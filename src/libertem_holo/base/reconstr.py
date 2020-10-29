@@ -25,6 +25,7 @@
 # see: https://github.com/LiberTEM/LiberTEM
 
 import numpy as np
+from numpy.fft import fft2
 
 
 def freq_array(shape, sampling=(1., 1.)):
