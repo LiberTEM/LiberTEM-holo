@@ -1,11 +1,12 @@
 import pytest
 import numpy as np
 
-from libertem_holo.udf.reconstr import HoloReconstructUDF
 from libertem.io.dataset.memory import MemoryDataSet
-from libertem.utils.generate import hologram_frame
 from libertem.utils.devices import detect
 from libertem.common.backend import set_use_cpu, set_use_cuda
+
+from libertem_holo.udf.reconstr import HoloReconstructUDF
+from libertem_holo.base.generate import hologram_frame
 
 
 @pytest.mark.parametrize(
