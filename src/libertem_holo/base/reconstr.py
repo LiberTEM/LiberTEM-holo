@@ -1,4 +1,5 @@
-# Functions freq_array, aperture_function, are adopted from Hyperspy
+# Functions freq_array, aperture_function, estimate_sideband_position
+# estimate_sideband_size are adopted from Hyperspy
 # and are subject of following copyright:
 #
 #  Copyright 2007-2016 The HyperSpy developers
