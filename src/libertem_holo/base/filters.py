@@ -50,14 +50,14 @@ def phase_ramp_finding(img, order=1):
     # The ramp is determined by the maximum and minimum values of the image.
     # TODO least-square-fitting, polynomial order
     # TODO How to find phase ramps in complex images
-    if img is not complex:
+    if img.dtype.kind != 'c':
         if order == 1:
             ramp_x = np.mean(np.gradient(img, axis=0))
             ramp_y = np.mean(np.gradient(img, axis=1))
             ramp = (ramp_y, ramp_x)
         else:
             pass
-    if img is complex:
+    if img.dtype.kind == 'c':
         pass
 
     return ramp
@@ -111,8 +111,7 @@ def phase_unwrap(image):
         2d nd array of the unwrapped phase image
     """
 
-    image_new = np.zeros_like(image)
-    if image is not complex:
+    if image.dtype.kind != 'c':
         image_new = unwrap_phase(image)
     else:
         angle = np.angle(image)
