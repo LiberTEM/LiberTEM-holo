@@ -118,3 +118,29 @@ def phase_unwrap(image):
         image_new = unwrap_phase(angle)
 
     return image_new
+
+
+def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
+    """
+    Parameters
+    ----------
+
+    img : np.array
+        Input array
+
+    sigma_lowpass : float
+        How much of the low frequencies should be removed before
+        finding bad pixels
+
+    sigma_exclusion : float
+        Pixels deviating more than this value from the mean will be
+        removed
+    """
+    mask = exclusion_mask(highpass(img, sigma=sigma_lowpass), sigma=sigma_exclusion)
+
+    coords = sparse.COO(mask)
+    return correct(
+        buffer=img.reshape((1,) + img.shape),
+        excluded_pixels=coords.coords,
+        sig_shape=tuple(img.shape)
+    ).squeeze()
