@@ -2,7 +2,7 @@ import numpy as np
 
 from libertem.udf import UDF
 
-from libertem_holo.base.reconstr import get_aperture
+from libertem_holo.base.reconstr import get_aperture, reconstruct_frame
 
 
 class HoloReconstructUDF(UDF):
