@@ -57,7 +57,7 @@ def phase_ramp_finding(img, order=1):
             ramp = (ramp_y, ramp_x)
         else:
             pass
-    if img.dtype.kind == 'c':
+    else:
         pass
 
     return ramp
