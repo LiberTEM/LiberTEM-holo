@@ -2,6 +2,7 @@ import sparse
 import numpy as np
 from scipy import ndimage
 from skimage.restoration import unwrap_phase
+from numpy imoprt unwrap as np_unwrap
 
 
 def highpass(img, sigma=2):
@@ -99,7 +100,7 @@ def phase_ramp_removal(size, order=1, ramp=None):
     return img
 
 
-def phase_unwrap(image):
+def phase_unwrap(image，method=1):
     """
     A phase_unwrap function that is unwrap the complex / wrapped phase image.
 
@@ -107,16 +108,28 @@ def phase_unwrap(image):
     ----------
     image : 2d nd array
         Complex or Wrapped phase image
+    method : int
+        Define which method for phase unwrapping. 
+        1 by default to use skimage. 2 to use numpy.umwrap
     Returns
     -------
         2d nd array of the unwrapped phase image
     """
 
-    if image.dtype.kind != 'c':
-        image_new = unwrap_phase(image)
+    if image.dtype.kind == 'c':
+        img = np.angle(image)
+        
     else:
-        angle = np.angle(image)
-        image_new = unwrap_phase(angle)
+        img = image
+    
+    if method == 1:
+        image_new = unwrap_phase(img)
+
+    elif method == 2:
+        image_new = np_unwrap(img)
+
+    else:
+        pass
 
     return image_new
 
