@@ -97,6 +97,7 @@ setup(
         'cloudpickle',
         'jsonschema',
         'scikit-learn',
+        'libertem',
     ],
     extras_require={
         'torch': 'torch',
