@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 
-from libertem.udf.holography import HoloReconstructUDF
+from libertem_holo.udf.reconstr import HoloReconstructUDF
 from libertem.io.dataset.memory import MemoryDataSet
 from libertem.utils.generate import hologram_frame
 from libertem.utils.devices import detect
