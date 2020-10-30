@@ -8,6 +8,9 @@ from libertem.common.backend import set_use_cpu, set_use_cuda
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 from libertem_holo.base.generate import hologram_frame
 
+from libertem.udf.holography import phase_ramp_removal
+from libertem.udf.holography import phase_ramp_finding
+
 
 @pytest.mark.parametrize(
     # CuPy support deactivated due to https://github.com/LiberTEM/LiberTEM/issues/815
@@ -74,3 +77,13 @@ def test_holo_reconstruction(lt_ctx, backend):
     phase = np.angle(w)
 
     assert np.allclose(phase_ref[slice_crop], phase[slice_crop], rtol=0.12)
+
+
+def test_phase_ramp_removal():
+    a = phase_ramp_removal((128, 128), ramp=(0.2, 0.01))
+    b = phase_ramp_finding(a)
+    assert np.allclose(b, (0.2, 0.01))
+
+
+def test_line_filter():
+    pass
