@@ -8,8 +8,8 @@ from libertem.common.backend import set_use_cpu, set_use_cuda
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 from libertem_holo.base.generate import hologram_frame
 
-from libertem_holo.udf.holography import phase_ramp_removal
-from libertem_holo.udf.holography import phase_ramp_finding
+from libertem_holo.base.filters import phase_ramp_removal
+from libertem_holo.base.filters import phase_ramp_finding
 
 
 @pytest.mark.parametrize(
