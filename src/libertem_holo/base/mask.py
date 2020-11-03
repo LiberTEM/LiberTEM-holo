@@ -1,7 +1,5 @@
 import numpy as np
 
-from libertem.udf import UDF
-
 from skimage.draw import polygon
 
 

@@ -1,3 +1,4 @@
+import sparse
 import numpy as np
 from scipy import ndimage
 from skimage.restoration import unwrap_phase
@@ -136,6 +137,7 @@ def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
         Pixels deviating more than this value from the mean will be
         removed
     """
+    from libertem.corrections.detector import correct
     mask = exclusion_mask(highpass(img, sigma=sigma_lowpass), sigma=sigma_exclusion)
 
     coords = sparse.COO(mask)
