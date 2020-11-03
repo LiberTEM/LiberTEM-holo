@@ -93,7 +93,11 @@ jobs:
         - python scripts/release upload --pypi-test-user=libertem_bot --pypi-user=libertem_bot --no-dry-run
   
   allow_failures:
-    - env: TOXENV=mypy    
+    - env: TOXENV=mypy
+    - env: TOXENV=numba_coverage
+    - env: TOXENV=docs-check
+    - env: TOXENV=docs-deploy
+    - env: TOXENV=packaging
 branches:
   except:
     - # Do not build tags that we create when we upload to GitHub Releases
