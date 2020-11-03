@@ -117,8 +117,9 @@ def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radiu
     if central_band_mask_radius is None:
         central_band_mask_radius = 1 / 20. * np.max(f_freq)
 
+    aperture = aperture_function(f_freq, central_band_mask_radius, 1e-6)
     # A small aperture masking out the centerband.
-    aperture_central_band = np.subtract(1.0, aperture_function(f_freq, central_band_mask_radius, 1e-6))  # 1e-6
+    aperture_central_band = np.subtract(1.0, aperture)  # 1e-6
     # imitates 0
 
     fft_holo = fft2(holo_data) / np.prod(holo_data.shape)
