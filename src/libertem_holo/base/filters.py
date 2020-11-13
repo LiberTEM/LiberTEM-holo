@@ -109,7 +109,7 @@ def phase_unwrap(image, alg=1):
     image : 2d nd array
         Complex or Wrapped phase image
     alg : int
-        Define which algorithm for phase unwrapping. 
+        Define which algorithm for phase unwrapping.
         1 by default to use skimage. 2 to use numpy.umwrap
     Returns
     -------
