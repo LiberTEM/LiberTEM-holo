@@ -2,7 +2,7 @@ import sparse
 import numpy as np
 from scipy import ndimage
 from skimage.restoration import unwrap_phase
-from numpy imoprt unwrap as np_unwrap
+from numpy import unwrap as np_unwrap
 
 
 def highpass(img, sigma=2):
