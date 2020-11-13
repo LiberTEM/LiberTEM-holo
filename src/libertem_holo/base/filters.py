@@ -100,7 +100,7 @@ def phase_ramp_removal(size, order=1, ramp=None):
     return img
 
 
-def phase_unwrap(image，method=1):
+def phase_unwrap(image，alg=1):
     """
     A phase_unwrap function that is unwrap the complex / wrapped phase image.
 
@@ -108,8 +108,8 @@ def phase_unwrap(image，method=1):
     ----------
     image : 2d nd array
         Complex or Wrapped phase image
-    method : int
-        Define which method for phase unwrapping. 
+    alg : int
+        Define which algorithm for phase unwrapping. 
         1 by default to use skimage. 2 to use numpy.umwrap
     Returns
     -------
