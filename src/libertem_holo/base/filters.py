@@ -100,7 +100,7 @@ def phase_ramp_removal(size, order=1, ramp=None):
     return img
 
 
-def phase_unwrap(image，alg=1):
+def phase_unwrap(image, alg=1):
     """
     A phase_unwrap function that is unwrap the complex / wrapped phase image.
 
@@ -118,14 +118,12 @@ def phase_unwrap(image，alg=1):
 
     if image.dtype.kind == 'c':
         img = np.angle(image)
-        
     else:
         img = image
-    
-    if method == 1:
+    if alg == 1:
         image_new = unwrap_phase(img)
 
-    elif method == 2:
+    elif alg == 2:
         image_new = np_unwrap(img)
 
     else:
