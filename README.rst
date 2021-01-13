@@ -1,3 +1,8 @@
+LiberTEM-holo
+=============
+
+LiberTEM-holo is a python project for holographty reconstruction
+
 Congratulations!
 ================
 
