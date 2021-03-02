@@ -29,7 +29,7 @@ def generateShiftedImage(im, xshift, yshift):
     nx,ny = float(nx),float(ny)
 
     w = -np.exp(-(2j*np.pi)*(xshift*rx/nx+yshift*ry/ny))
-    shifted_im = np.abs(np.fft.ifft2(np.fft.ifftshift(np.fft.fftshift(np.fft.fft2(im))*w)))
+    shifted_im = np.fft.ifft2(np.fft.ifftshift(np.fft.fftshift(np.fft.fft2(im))*w))
 
     return shifted_im
 

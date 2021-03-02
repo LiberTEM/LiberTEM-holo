@@ -554,7 +554,7 @@ class imstack(object):
             self.get_imshifts()
 
         good_image_indices = self.Rij_mask_c.sum(axis=1).nonzero()[0]
-        self.stack_registered=np.zeros((self.nx,self.ny,len(good_image_indices)))
+        self.stack_registered=np.zeros((self.nx,self.ny,len(good_image_indices)),dtype="complex")
         for i in range(len(good_image_indices)):
             self.stack_registered[:,:,i]=generateShiftedImage(self.imstack[:,:,good_image_indices[i]],self.shifts_x[good_image_indices[i]],self.shifts_y[good_image_indices[i]])
         self.average_image = np.sum(self.stack_registered,axis=2)/float(len(good_image_indices))
