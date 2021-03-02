@@ -32,12 +32,12 @@ class imstack(object):
                             nz steps between images
         """
         self.imstack = image_stack
-        self.nx, self.ny, self.nz = np.shape(image_stack)
+        self.nz, self.ny, self.nx = np.shape(image_stack)
         self.nz_min, self.nz_max = 0, self.nz
 
         # Define real and reciprocal space meshgrids
-        rx,ry = np.meshgrid(np.arange(self.nx),np.arange(self.ny))
-        self.rx,self.ry = rx.T,ry.T
+        rx , ry = np.meshgrid(np.arange(self.nx),np.arange(self.ny))
+        self.rx , self.ry = rx.T,ry.T
         nx,ny = float(self.nx),float(self.ny)
         kx,ky = np.meshgrid(np.arange(-int(nx/2),int(nx/2),1),np.arange(-int(ny/2),int(ny/2),1))
         self.kx,self.ky = kx.T,ky.T
