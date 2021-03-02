@@ -102,7 +102,7 @@ def fit_peaks(data, est_params, window_radius, print_mod=100, verbose=True):
         if not on_edge(data,x0,y0,window_radius):
             cutout = get_cutout(data,x0,y0,window_radius)
             popt, pcov, fit_success = fit_gaussian(window_radius,window_radius,sigma_x,sigma_y,0,0,cutout,plot=False,verbose=verbose)
-            popt[1:3]=popt[1:3][::-1]+[x0,y0]-window_radius
+            popt[1:3]=popt[1:3][-1::]+[x0,y0]-window_radius
             reference_fit_params.append(popt)
             reference_fit_success_mask.append(fit_success)
     reference_fit_params=np.array(reference_fit_params)
@@ -149,7 +149,7 @@ def allpaths(i,j,maxpaths=200):
     if j-i < 2:
         return [[(j,i)]]
     n = range(i+1,j)
-    combs = chain(*(combinations(n,l) for l in range(1,len(n)+1)[::1]))
+    combs = chain(*(combinations(n,l) for l in range(1,len(n)+1)[1::]))
     seq = [[i]+list(c)+[j] for c in islice(combs,maxpaths)]
     return map(makeslice, seq)
 

@@ -28,7 +28,7 @@ class imstack(object):
         Initializes imstack object from a 3D numpy array.
 
         Inputs:
-            image_stack     ndarray of floats, shape (nx, ny, nz)
+            image_stack     ndarray of floats, shape (nz, ny, nx)
                             nz steps between images
         """
         self.imstack = image_stack
@@ -65,7 +65,7 @@ class imstack(object):
         mask_realspace = (np.sin(np.pi*self.rx/self.nx)*np.sin(np.pi*(self.ry/self.ny)))**2
         fftstack = np.zeros_like(self.imstack, dtype='complex')
         for i in range(self.nz):
-            fftstack[:,:,i] = self.fftw.fft((self.imstack[:,:,i]-np.mean(self.imstack[:,:,i]))*mask_realspace)
+            fftstack[i,:,:] = self.fftw.fft((self.imstack[i,:,:]-np.mean(self.imstack[i,:,:]))*mask_realspace)
         self.fftstack = fftstack
         return
 
@@ -213,7 +213,7 @@ class imstack(object):
             for j in range(i+1, self.nz):
                 if verbose:
                     print("Correlating images {} and {}".format(i,j))
-                cc = getSingleCorrelation(self.fftstack[:,:,i], self.fftstack[:,:,j])
+                cc = getSingleCorrelation(self.fftstack[i, :, :], self.fftstack[j, :, :])
                 xshift, yshift = findMaxima(cc)
                 if xshift<self.nx/2:
                         self.X_ij[i,j] = xshift
@@ -333,7 +333,7 @@ class imstack(object):
         x_com, y_com = np.sum(ccs*self.rx)/norm, np.sum(ccs*self.ry)/norm
 
         # Iterate
-        n_vals=np.linspace(self.min_window_frac,0,self.num_iter,endpoint=False)[::-1]
+        n_vals=np.linspace(self.min_window_frac,0,self.num_iter,endpoint=False)[-1::]
         for n in n_vals:
             r_com = np.sqrt((x_com-self.rx)**2+(y_com-self.ry)**2)
             weights = (r_com<self.ny/n/2)*(np.cos(n*np.pi*r_com/self.ny))**2
@@ -554,10 +554,10 @@ class imstack(object):
             self.get_imshifts()
 
         good_image_indices = self.Rij_mask_c.sum(axis=1).nonzero()[0]
-        self.stack_registered=np.zeros((self.nx,self.ny,len(good_image_indices)),dtype="complex")
+        self.stack_registered=np.zeros((len(good_image_indices), self.nx, self.ny),dtype="complex")
         for i in range(len(good_image_indices)):
-            self.stack_registered[:,:,i]=generateShiftedImage(self.imstack[:,:,good_image_indices[i]],self.shifts_x[good_image_indices[i]],self.shifts_y[good_image_indices[i]])
-        self.average_image = np.sum(self.stack_registered,axis=2)/float(len(good_image_indices))
+            self.stack_registered[i,:,:]=generateShiftedImage(self.imstack[good_image_indices[i],:,:],self.shifts_x[good_image_indices[i]],self.shifts_y[good_image_indices[i]])
+        self.average_image = np.sum(self.stack_registered,axis=0)/float(len(good_image_indices))
         return
 
     def crop_image(self):
