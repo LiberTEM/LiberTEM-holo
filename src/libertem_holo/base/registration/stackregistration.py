@@ -182,13 +182,13 @@ class imstack(object):
         self.X_ij, self.Y_ij = np.zeros((self.nz,self.nz)), np.zeros((self.nz,self.nz))
 
         # If fftstack is not defined, get all FFTs
-        if not hasattr(self,'fftstack'):
+        if not hasattr(self, 'fftstack'):
             self.getFFTs()
 
         # Define correlation function call
-        if correlationType=="cc":
+        if correlationType == "cc":
             getSingleCorrelation = self.getSingleCrossCorrelation
-        elif correlationType=="mc":
+        elif correlationType == "mc":
             getSingleCorrelation = self.getSingleMutualCorrelation
         elif correlationType=="pc":
             getSingleCorrelation = self.getSinglePhaseCorrelation
