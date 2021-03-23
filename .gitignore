@@ -1,4 +1,4 @@
-/src/libertem_holo/base/registration/fftw_wisdom.pkl
+src/libertem_holo/base/registration/fftw_wisdom.pkl
 *.swp
 *.pyc
 *.bib.bak
