@@ -26,7 +26,8 @@
 
 import numpy as np
 from numpy.fft import fft2
-
+from skimage.draw import disk
+from scipy.ndimage import gaussian_filter
 
 def freq_array(shape, sampling=(1., 1.)):
     """
