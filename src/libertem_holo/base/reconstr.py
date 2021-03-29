@@ -68,6 +68,26 @@ def aperture_function(r, apradius, rsmooth):
 
     return 0.5 * (1. - np.tanh((np.absolute(r) - apradius) / (0.5 * rsmooth)))
 
+def aperture_function_gauss(r,radius,sigma) :
+    """
+    An aperture function with gaussian filter and skimage draw disk
+    ----------
+    r : input array
+        Array of input data (e.g. frequency or input image)
+    radius : float
+        Radius of the disk or circle 
+    sigma : float
+        Sigma value of gaussian filter
+    Returns
+    -------
+        2d array containing aperture
+    """
+    size = r.shape 
+    aperture = np.zeros((size))
+    rr,cc = disk((0,0),radius)
+    aperture[rr,cc] = 1
+    aperture = gaussian_filter(aperture,sigma=sigma)
+    return aperture
 
 def get_aperture(out_shape, sb_size, sb_smoothness, sig_shape):
     sy, sx = sig_shape
@@ -87,6 +107,20 @@ def get_aperture(out_shape, sb_size, sb_smoothness, sig_shape):
 
     return slice_fft, aperture
 
+def get_aperture_gauss(out_shape, sb_size, sb_smoothness, sig_shape):
+    sy, sx = sig_shape
+    oy, ox = out_shape
+    f_sampling = (1. / oy, 1. / ox)
+    f_freq = freq_array(out_shape)
+    aperture = aperture_function_gauss(f_freq, sb_size, sb_smoothness)
+
+    y_min = int(sy / 2 - oy / 2)
+    y_max = int(sy / 2 + oy / 2)
+    x_min = int(sx / 2 - ox / 2)
+    x_max = int(sx / 2 + oy / 2)
+    slice_fft = (slice(y_min, y_max), slice(x_min, x_max))
+
+    return slice_fft, aperture
 
 def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radius=None, sb='lower'):
     """
