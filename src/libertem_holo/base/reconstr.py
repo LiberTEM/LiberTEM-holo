@@ -199,7 +199,7 @@ def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5):
     return np.min(np.linalg.norm(h, axis=1))
 
 
-def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
+def reconstruct_frame(frame, sb_pos, aperture, slice_fft, mask=1, precision=True):
     if not precision:
         frame = frame.astype(np.float32)
     frame_size = frame.shape
@@ -209,7 +209,7 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
 
     fft_frame = np.fft.fftshift(np.fft.fftshift(fft_frame)[slice_fft])
 
-    fft_frame = fft_frame * aperture
+    fft_frame = fft_frame * aperture * mask
 
     wav = np.fft.ifft2(fft_frame) * np.prod(frame_size)
     return wav
