@@ -151,6 +151,6 @@ def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
 
 def window_filter(input_array, window_type, window_size):
     win = window(window_type, (window_size, window_size))
-    array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win))
+    array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win, mode="same"))
 
     return array_filtered
