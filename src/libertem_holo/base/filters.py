@@ -2,7 +2,8 @@ import sparse
 import numpy as np
 from scipy import ndimage
 from skimage.restoration import unwrap_phase
-
+from skimage.filters import window
+from scipy.signal import fftconvolve
 
 def highpass(img, sigma=2):
     """
@@ -146,3 +147,10 @@ def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
         excluded_pixels=coords.coords,
         sig_shape=tuple(img.shape)
     ).squeeze()
+
+
+def window_filter(input_array, window_type, window_size):
+    win = window(window_type, (window_size, window_size))
+    array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win))
+
+    return array_filtered
