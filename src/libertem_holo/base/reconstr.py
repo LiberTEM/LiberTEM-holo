@@ -26,8 +26,8 @@
 
 import numpy as np
 from numpy.fft import fft2
-from skimage.draw import disk
-from scipy.ndimage import gaussian_filter
+from libertem_holo.base.mask import disk_aperture
+
 
 def freq_array(shape, sampling=(1., 1.)):
     """
@@ -51,40 +51,14 @@ def freq_array(shape, sampling=(1., 1.)):
     return f_freq
 
 
-def aperture_function(out_shape, radius):
-    """
-    An aperture function with gaussian filter and skimage draw disk
-    ----------
-    out_shape : interger
-        Shape of the output array
-    radius : float
-        Radius of the disk
-    Returns
-    -------
-        2d array containing aperture
-    """
-    size = out_shape
-    aperture = np.zeros((size))
-    rr, cc = disk((0, 0), radius)
-    aperture[rr, cc] = 1
-
-    return aperture
-
-
-def get_aperture(out_shape, sb_size):
-    aperture = aperture_function(out_shape, sb_size)
-
-    return aperture
-
-
 def get_slice_fft(out_shape, sig_shape):
     sy, sx = sig_shape
     oy, ox = out_shape
 
-    y_min = int(sy /2 - oy/2)
-    y_max = int(sy /2 + oy/2)
-    x_min = int(sx /2 - ox/2)
-    x_max = int(sx /2 + ox/2)
+    y_min = int(sy / 2 - oy / 2)
+    y_max = int(sy / 2 + oy / 2)
+    x_min = int(sx / 2 - ox / 2)
+    x_max = int(sx / 2 + ox / 2)
     slice_fft = (slice(y_min, y_max), slice(x_min, x_max))
 
     return slice_fft
@@ -119,9 +93,10 @@ def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radiu
     if central_band_mask_radius is None:
         central_band_mask_radius = 1 / 20. * np.max(f_freq)
 
-    aperture = aperture_function(holo_data.shape, central_band_mask_radius)
+    aperture = disk_aperture(holo_data.shape, central_band_mask_radius)
+
     # A small aperture masking out the centerband.
-    aperture_central_band = np.subtract(1.0, aperture)  # 1e-6
+    aperture_central_band = np.subtract(1.0, aperture)
     # imitates 0
 
     fft_holo = fft2(holo_data) / np.prod(holo_data.shape)
@@ -166,7 +141,7 @@ def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5):
     return np.min(np.linalg.norm(h, axis=1))
 
 
-def reconstruct_frame(frame, sb_pos, aperture, slice_fft, mask=1, precision=True):
+def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
     if not precision:
         frame = frame.astype(np.float32)
     frame_size = frame.shape
@@ -176,7 +151,7 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, mask=1, precision=True
 
     fft_frame = np.fft.fftshift(np.fft.fftshift(fft_frame)[slice_fft])
 
-    fft_frame = fft_frame * aperture * mask
+    fft_frame = fft_frame * aperture
 
     wav = np.fft.ifft2(fft_frame) * np.prod(frame_size)
     return wav
