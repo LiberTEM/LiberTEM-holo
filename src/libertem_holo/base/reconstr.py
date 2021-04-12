@@ -27,6 +27,8 @@
 import numpy as np
 from numpy.fft import fft2
 from libertem_holo.base.mask import disk_aperture
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 
 
 def freq_array(shape, sampling=(1., 1.)):
@@ -155,3 +157,49 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
 
     wav = np.fft.ifft2(fft_frame) * np.prod(frame_size)
     return wav
+
+
+def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
+    """
+    Display the fft image
+    This function helps to show the steps of the reconstruction and to define
+    the best length and width of line mask
+
+    Parameters
+    ----------
+    image : array
+        the input image
+    sb_position : tuple
+        the sideband position (y, x), referred to the non-shifted FFT.
+    slice fft : array
+        contain minimum and maximum value in y and x axis.
+    mask : array
+        contain the aperture and line mask
+    detail : bolean
+    """
+    fft_original_image = np.fft.fft2(image) / np.prod(image.shape)
+    fft_original_image1 = np.roll(fft_original_image, sb_position, axis=(0, 1))
+    fft_original_image2 = np.fft.fftshift(fft_original_image1)
+    fft_original_image3 = fft_original_image2[slice_fft]
+    fft_original_image4 = np.fft.fftshift(fft_original_image3)
+    fft_with_aperture = fft_original_image4 * mask
+    if detail:
+        plt.figure()
+        plt.imshow(np.abs(fft_original_image1), norm=LogNorm(), cmap="gray")
+        plt.figure()
+        plt.imshow(np.abs(fft_original_image2), norm=LogNorm(), cmap="gray")
+        plt.figure()
+        plt.imshow(np.abs(fft_original_image3), norm=LogNorm(), cmap="gray")
+        plt.figure()
+        plt.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
+        figure, (ax1, ax2) = plt.subplots(1, 2)
+        ax1.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
+        ax1.set_title('Without Aperture Mask')
+        ax2.imshow(np.abs(fft_with_aperture), vmax=0.01, cmap="gray")
+        ax2.set_title('FFT with Aperture Mask')
+    else:
+        figure, (ax1, ax2) = plt.subplots(1, 2)
+        ax1.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
+        ax1.set_title('Without Aperture Mask')
+        ax2.imshow(np.abs(fft_with_aperture), vmax=0.01, cmap="gray")
+        ax2.set_title('FFT with Aperture Mask')
