@@ -159,6 +159,49 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
     return wav
 
 
+def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=True):
+    image_double_resolution = frame[1]-frame[0]
+    wav = reconstruct_frame(image_double_resolution,
+                            sb_pos, aperture, slice_fft)
+    return wav
+
+
+def reconstruct_direct(frame, number_of_images, omega):
+    xspace = omega[1]
+    yspace = omega[0]
+    compfront = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    compcar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    sin_value_sum = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    cos_value_sum = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    coscar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    sincar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+
+    cos_value_sum = np.array(0)
+    sin_value_sum = np.array(0)
+    n = np.arange(number_of_images)
+    initial_phase_change = 2 * np.pi * (n/number_of_images)
+
+    for i in range(number_of_images):
+        cos_value = frame[i] * np.cos(initial_phase_change[i])
+        sin_value = frame[i] * np.sin(initial_phase_change[i])
+        cos_value_sum = cos_value_sum + cos_value
+        sin_value_sum = sin_value_sum + sin_value
+    compfront = cos_value_sum + sin_value_sum * 1j
+
+    x = np.linspace(0, yspace, frame.shape[1], endpoint=False)
+    y = np.linspace(0, xspace, frame.shape[2], endpoint=False)
+    irow, icol = np.meshgrid(x, y, indexing='ij')
+
+    coscar = np.cos(2 * np.pi * (icol+irow)).astype('float32')
+    sincar = np.sin(2 * np.pi * (icol+irow)).astype('float32')
+    compcar = coscar + sincar * 1j
+
+    compfinal = compfront/compcar
+    phase_final = np.arctan2(np.imag(compfinal), np.real(compfinal))
+
+    return phase_final
+
+
 def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
     """
     Display the fft image
