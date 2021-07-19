@@ -4,6 +4,7 @@ from scipy import ndimage
 from skimage.restoration import unwrap_phase
 from skimage.filters import window
 from scipy.signal import fftconvolve
+from scipy.optimize import least_squares
 
 
 def highpass(img, sigma=2):
@@ -185,3 +186,37 @@ def window_filter(input_array, window_type, window_shape):
     array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win, mode="same"))
     array_filtered = array_filtered / np.max(array_filtered)
     return array_filtered
+
+
+def ramp_compensation(image):
+    """
+    A ramp or wedge compensation for a 2D image with a linear optimization methods.
+
+    Parameters
+    ----------
+    image : 2D-Array
+        Input array
+    """
+
+    def linear_gradient(c, dy, dx, y, x):
+        return c+y*dy+x*dx
+    x = np.linspace(0, image.shape[1]-1, image.shape[1])
+    y = np.linspace(0, image.shape[0]-1, image.shape[0])
+
+    def fun(initial_value):
+        function = image_not_compensated - linear_gradient(initial_value[0], initial_value[1],
+                                                           initial_value[2], yv, xv)
+        return function.reshape((-1, ))
+    yv, xv = np.meshgrid(y, x)
+
+    image_not_compensated = np.copy(image)
+    m_initial = np.gradient(image_not_compensated)
+    dy_initial = np.mean(m_initial[0])
+    dx_initial = np.mean(m_initial[1])
+    c_initial = image[511, 0]
+    initial_value = np.array([c_initial, dy_initial, dx_initial])
+    res1 = least_squares(fun, initial_value)
+    gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
+                                            res1.x[2], yv, xv)
+    phase_image_compensated = image - gradient_compensation
+    return phase_image_compensated

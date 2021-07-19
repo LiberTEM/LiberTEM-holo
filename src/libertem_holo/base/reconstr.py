@@ -27,8 +27,10 @@
 import numpy as np
 from numpy.fft import fft2
 from libertem_holo.base.mask import disk_aperture
+from libertem_holo.base.filters import ramp_compensation
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from skimage.restoration import unwrap_phase
 
 
 def freq_array(shape, sampling=(1., 1.)):
@@ -160,6 +162,24 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
 
 
 def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=True):
+    """
+    Reconstruct a stack of phase shifted holography with double resolution method.
+
+    Parameters
+    ----------
+    Frame : array_like
+        Holographic data array
+    sb_pos : tuple
+        The sideband position (y, x), referred to the non-shifted FFT.
+    aperture : 2D Array
+        array containing the mask for reconstruction
+
+    Returns
+    -------
+    wav : complex array
+        the reconstructed complex image
+
+    """
     image_double_resolution = frame[1]-frame[0]
     wav = reconstruct_frame(image_double_resolution,
                             sb_pos, aperture, slice_fft)
@@ -167,6 +187,25 @@ def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=
 
 
 def reconstruct_direct(frame, number_of_images, omega):
+    """
+    Reconstruct a stack of phase shifted holography with direct
+    reconstruction method
+
+    Parameters
+    ----------
+    Frame : array_like
+        Holographic data array
+    number_of_images : int
+        The number of images inside the stack
+    omega: tuple
+        frequency carrier in y and x axis
+
+    Returns
+    -------
+    phase final : 2D array
+        the reconstructed phase image
+
+    """
     xspace = omega[1]
     yspace = omega[0]
     compfront = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
@@ -238,7 +277,7 @@ def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
         figure, (ax1, ax2) = plt.subplots(1, 2)
         ax1.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
         ax1.set_title('Without Aperture Mask')
-        ax2.imshow(np.abs(fft_with_aperture), vmax=0.01, cmap="gray")
+        ax2.imshow(np.log1p(np.abs(fft_with_aperture)), cmap="gray")
         ax2.set_title('FFT with Aperture Mask')
     else:
         figure, (ax1, ax2) = plt.subplots(1, 2)
@@ -246,3 +285,34 @@ def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
         ax1.set_title('Without Aperture Mask')
         ax2.imshow(np.abs(fft_with_aperture), vmax=0.01, cmap="gray")
         ax2.set_title('FFT with Aperture Mask')
+
+
+def phase_shifting_reconstruction(image, number_of_image, centerband_position, sb_position):
+    """
+    This function allow a reconstruction with phase shifting methods.
+
+    Parameters
+    ----------
+    image : array
+        the input image
+    number_of_image : int
+        the number of images in the stack
+    centerband_position : tuple
+        the centerband position (y, x), referred to the shifted FFT.
+    sb_position : tuple
+        the sideband position (y, x), referred to the shifted FFT.
+    """
+    image_FT_stack = np.fft.fftshift((np.fft.fft2(image)))
+    phase_initial = np.zeros(number_of_image)
+    centerband_value = np.zeros(number_of_image, dtype=np.complex128)
+    sideband_value = np.zeros(number_of_image, dtype=np.complex128)
+    for i in range(len(image_FT_stack)):
+        sideband_value[i] = image_FT_stack[i, sb_position[0], sb_position[1]]
+        centerband_value[i] = image_FT_stack[i, centerband_position[0], centerband_position[1]]
+        phase_initial[i] = np.angle(sideband_value[i])-np.angle(centerband_value[i])
+    c2 = 0
+    for i in range(number_of_image):
+        c2 = c2 + (image[i] * np.exp(-1j * phase_initial[i]))
+    c2 = c2 / number_of_image
+    phase_distribution_noisy = ramp_compensation(unwrap_phase(np.angle(c2)))
+    return phase_distribution_noisy
