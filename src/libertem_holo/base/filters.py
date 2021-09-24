@@ -200,8 +200,8 @@ def ramp_compensation(image):
 
     def linear_gradient(c, dy, dx, y, x):
         return c+y*dy+x*dx
-    x = np.linspace(0, image.shape[1]-1, image.shape[1])
-    y = np.linspace(0, image.shape[0]-1, image.shape[0])
+    x = np.linspace(0, image.shape[0]-1, image.shape[0])
+    y = np.linspace(0, image.shape[1]-1, image.shape[1])
 
     def fun(initial_value):
         function = image_not_compensated - linear_gradient(initial_value[0], initial_value[1],
@@ -213,7 +213,7 @@ def ramp_compensation(image):
     m_initial = np.gradient(image_not_compensated)
     dy_initial = np.mean(m_initial[0])
     dx_initial = np.mean(m_initial[1])
-    c_initial = image[511, 0]
+    c_initial = image[0, 0]
     initial_value = np.array([c_initial, dy_initial, dx_initial])
     res1 = least_squares(fun, initial_value)
     gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
