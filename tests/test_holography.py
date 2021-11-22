@@ -74,3 +74,60 @@ def test_holo_reconstruction(lt_ctx, backend):
     phase = np.angle(w)
 
     assert np.allclose(phase_ref[slice_crop], phase[slice_crop], rtol=0.12)
+
+
+def test_poisson_infinity():
+    # Make sure that the value with Poisson noise
+    # approaches the noiseless case for many counts
+    counts = 1000000000  # maximum for np.random.poisson()
+    large_counts = hologram_frame(
+        amp=np.ones((16, 16)),
+        phi=np.zeros((16, 16)),
+        counts=counts,
+        visibility=0.1,  # weak fringe contrast, enough counts everywhere
+        poisson_noise=True
+    )
+    noiseless = hologram_frame(
+        amp=np.ones((16, 16)),
+        phi=np.zeros((16, 16)),
+        counts=counts,
+        visibility=0.1,  # weak fringe contrast, enough counts everywhere
+        poisson_noise=False
+    )
+    # Choose rtol in such a way that test failures are improbable
+    assert np.allclose(large_counts, noiseless, rtol=1/np.sqrt(counts) * 50)
+
+
+@pytest.mark.parametrize(
+    'counts', (1000, 10000)
+)
+def test_poisson_scaling(counts):
+    # Make sure that the result with Poisson noise
+    # satisfies some properties of a Poisson distribution.
+
+    # Aggregating `counts` frames with dose 1 should correspond
+    # to one frame with dose `counts`.
+    aggregate = np.sum([
+        hologram_frame(
+            amp=np.ones((16, 16)),
+            phi=np.zeros((16, 16)),
+            counts=1,
+            visibility=0,  # no fringe contrast, flat full intensity result
+            poisson_noise=True
+        ) for i in range(counts)
+    ], axis=0)
+
+    full = hologram_frame(
+        amp=np.ones((16, 16)),
+        phi=np.zeros((16, 16)),
+        counts=counts,
+        visibility=0,  # no fringe contrast, flat full intensity result
+        poisson_noise=True
+    )
+    rtol = 1/np.sqrt(counts)*50
+    # See https://en.wikipedia.org/wiki/Poisson_distribution#Descriptive_statistics
+    assert np.allclose(np.var(aggregate), counts, rtol=rtol)
+    assert np.allclose(np.var(full), counts, rtol=rtol)
+
+    assert np.allclose(np.mean(aggregate), counts, rtol=rtol)
+    assert np.allclose(np.mean(full), counts, rtol=rtol)
