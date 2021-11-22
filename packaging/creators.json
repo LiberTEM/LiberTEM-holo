@@ -1,10 +1,26 @@
 [
-    {            
-        "displayname": "",
-        "authorname": "",
-        "affiliation": "",
-        "github": "",
-        "contribution": "",
-        "orcid": ""
+    {
+        "displayname": "Vadim Migunov",
+        "authorname": "Migunov, Vadim",
+        "affiliation": "RWTH Aachen University, Jülich Research Centre, Ernst Ruska Centre",
+        "github": "woozey",
+        "contribution": "Holography reconstruction and simulation features",
+        "orcid": "0000-0002-6296-4492"
+    },
+    {
+        "displayname": "Alexander Clausen",
+        "authorname": "Clausen, Alexander",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "github": "sk1p",
+        "contribution": "System design, engineering, management, code review",
+        "orcid": "0000-0002-9555-7455"
+    },
+    {
+        "displayname": "Dieter Weber",
+        "authorname": "Weber, Dieter",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "github": "uellue",
+        "contribution": "Fix for Poisson noise simulation",
+        "orcid": "0000-0001-6635-9567"
     }
 ]
