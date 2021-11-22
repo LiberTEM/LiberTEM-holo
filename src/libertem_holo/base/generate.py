@@ -67,8 +67,7 @@ def hologram_frame(amp, phi,
     if poisson_noise:
         if not isinstance(poisson_noise, (float, int)):
             raise ValueError("poisson_noise parameter should be float or int or None.")
-        noise_scale = poisson_noise * counts
-        holo = noise_scale * np.random.poisson(holo / noise_scale)
+        holo = np.random.poisson(holo)
 
     if gaussian_noise:
         if not isinstance(gaussian_noise, (float, int)):
