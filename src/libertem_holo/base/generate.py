@@ -7,14 +7,20 @@ def hologram_frame(amp, phi,
                    sampling=5.,
                    visibility=1.,
                    f_angle=30.,
-                   gaussian_noise=None,
-                   poisson_noise=None):
+                   gaussian_blur=None,
+                   poisson_noise=False):
     """
     Generates holograms using phase and amplitude as an input
 
     See :ref:`holography app` for detailed application example
 
-    .. versionadded:: 0.3.0
+    .. versionchanged:: 0.1.0
+        * Renamed :code:`gaussian_noise` to :code:`gaussian_blur` to correctly reflect the
+          functionality.
+        * Apply Gaussian blur before Poisson noise to simulate loss of contrast in the imaging
+          system. To simulate detector MTF, one can apply blur after applying Poisson noise.
+        * Changed the implementation of Poisson noise to correctly reflect the impact of
+          :code:`counts` on the noise.
 
     Notes
     -----
@@ -40,13 +46,12 @@ def hologram_frame(amp, phi,
     f_angle: float, default: 30.
         Angle in degrees of hologram fringes with respect to X-axis
 
-    gaussian_noise: float or int or None, default: None.
+    gaussian_blur: float or int or None, default: None.
         Amount of Gaussian smoothing determined by sigma parameter
-        applied to the hologram simulating effect of focus spread or
-        PSF of the detector.
+        applied to the hologram simulating effect of focus spread.
 
-    poisson_noise: float or int or None, default: None.
-        Amount of Poisson applied to the hologram.
+    poisson_noise: boolean, default: False.
+        Poisson noise applied to the hologram.
 
     Returns
     -------
@@ -64,15 +69,18 @@ def hologram_frame(amp, phi,
                                   + 2. * np.pi * x / sampling * np.sin(f_angle)
                                   - phi))
 
-    if poisson_noise:
-        if not isinstance(poisson_noise, (float, int)):
-            raise ValueError("poisson_noise parameter should be float or int or None.")
-        noise_scale = poisson_noise * counts
-        holo = noise_scale * np.random.poisson(holo / noise_scale)
+    if gaussian_blur is not None:
+        if not isinstance(gaussian_blur, (float, int)):
+            raise ValueError("gaussian_blur parameter should be float or int or None.")
+        holo = gaussian_filter(holo, gaussian_blur)
 
-    if gaussian_noise:
-        if not isinstance(gaussian_noise, (float, int)):
-            raise ValueError("gaussian_noise parameter should be float or int or None.")
-        holo = gaussian_filter(holo, gaussian_noise)
+    if poisson_noise:
+        if not isinstance(poisson_noise, bool):
+            raise ValueError(
+                "poisson_noise parameter should be boolean, "
+                "implementation was changed compared to the version in LiberTEM. "
+                "See also https://github.com/LiberTEM/LiberTEM/issues/1156."
+            )
+        holo = np.random.poisson(holo)
 
     return holo

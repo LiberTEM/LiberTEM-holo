@@ -5,7 +5,7 @@
 * [ ] I have added/updated documentation for all user-facing changes
 * [ ] I have added/updated test cases
 
-## Please remove this section
+<!--
 
 Starting by submitting an incomplete pull request (PR) or draft PR is OK. You
 can work on the checklist step by step by pushing additional commits into the
@@ -18,3 +18,5 @@ clarification and help, for example in your PR description, with comments or in
 our [Gitter channel](https://gitter.im/LiberTEM/Lobby).
 
 Thank you for your contribution!
+
+-->
