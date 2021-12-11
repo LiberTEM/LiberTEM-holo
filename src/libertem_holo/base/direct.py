@@ -50,7 +50,7 @@ def reconstruction_recipe(phases):
 
 
 @numba.njit(fastmath=True)
-def reconstruction_engine(holograms, y_offsets, x_offsets, rotation, recipe, out):
+def reconstruction_engine(holograms, weights, y_offsets, x_offsets, rotation, recipe, out):
     '''
     Numerical work horse for the reconstruction.
 
@@ -63,6 +63,8 @@ def reconstruction_engine(holograms, y_offsets, x_offsets, rotation, recipe, out
 
     holograms : numpy.ndarray
         Hologram stack, resp. tile from hologram stack
+    weights : numpy.ndarray
+        Weight of each hologram to compensate beam current fluctuations
     y_offsets, x_offsets : numpy.ndarray
         Offset of each item in :code:`holograms` relative to output.
     rotation : numpy.ndarray
@@ -84,6 +86,7 @@ def reconstruction_engine(holograms, y_offsets, x_offsets, rotation, recipe, out
     for y in range(size_y):
         for i in range(count):
             rot = rotation[i]
+            weight = weights[i]
             source_y = y + y_offsets[i]
             if source_y >= 0 and source_y < input_y:
                 x_offset = x_offsets[i]
@@ -91,7 +94,7 @@ def reconstruction_engine(holograms, y_offsets, x_offsets, rotation, recipe, out
                 stop_x = min(size_x, input_x + x_offset)
                 for x in range(start_x, stop_x):
                     source_x = x + x_offset
-                    source_data = holograms[i, source_y, source_x]
+                    source_data = holograms[i, source_y, source_x] * weight
                     acc[0, x] += source_data
                     acc[1, x] += source_data / rot
                     acc[2, x] += source_data * rot
@@ -99,7 +102,8 @@ def reconstruction_engine(holograms, y_offsets, x_offsets, rotation, recipe, out
         acc[:] = 0
 
 
-def direct_reconstruction(holograms, phases, reference_wave, y_offsets=None, x_offsets=None):
+def direct_reconstruction(
+        holograms, phases, reference_wave, y_offsets=None, x_offsets=None, weights=None):
     '''
     Convenience function to perform reconstruction of a stack of holograms.
 
@@ -116,6 +120,8 @@ def direct_reconstruction(holograms, phases, reference_wave, y_offsets=None, x_o
         can be used.
     y_offsets, x_offsets : numpy.ndarray
         Offset of each item in :code:`holograms` relative to output. No offset if None.
+    weights : numpy.ndarray
+        Weight of each hologram to compensate beam current fluctuations
 
     Returns
     -------
@@ -127,6 +133,8 @@ def direct_reconstruction(holograms, phases, reference_wave, y_offsets=None, x_o
         y_offsets = np.zeros(len(holograms), dtype=int)
     if x_offsets is None:
         x_offsets = np.zeros(len(holograms), dtype=int)
+    if weights is None:
+        weights = np.ones(len(holograms))
     N = len(phases)
 
     if len(holograms) != N:
@@ -140,6 +148,7 @@ def direct_reconstruction(holograms, phases, reference_wave, y_offsets=None, x_o
     out = np.zeros((size_y, size_x), dtype=np.complex128)
     reconstruction_engine(
         holograms,
+        weights=weights,
         y_offsets=y_offsets,
         x_offsets=x_offsets,
         rotation=rotation,

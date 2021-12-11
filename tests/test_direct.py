@@ -79,7 +79,9 @@ def test_direct_shifted(obj, simulated):
         )
 
     ref_rec = direct_reconstruction(ref_holograms, angles, 1)
-    rec = direct_reconstruction(shifted_holograms, angles, ref_rec, y_offsets, x_offsets)
+    rec = direct_reconstruction(
+        shifted_holograms, angles, ref_rec, y_offsets=y_offsets, x_offsets=x_offsets
+    )
     assert np.allclose(obj[21:-21, 21:-21], rec[21:-21, 21:-21])
 
 
@@ -106,6 +108,7 @@ def test_direct_shifted_tiled(obj, simulated):
     out = np.zeros(obj.shape, dtype=np.complex128)
     reconstruction_engine(
         tile_00,
+        weights=np.ones(len(tile_00)),
         y_offsets=y_offsets[:7],
         x_offsets=x_offsets[:7],
         rotation=rotation[:7],
@@ -114,6 +117,7 @@ def test_direct_shifted_tiled(obj, simulated):
     )
     reconstruction_engine(
         tile_01,
+        weights=np.ones(len(tile_01)),
         y_offsets=y_offsets[:7] - 101,
         x_offsets=x_offsets[:7],
         rotation=rotation[:7],
@@ -122,6 +126,7 @@ def test_direct_shifted_tiled(obj, simulated):
     )
     reconstruction_engine(
         tile_10,
+        weights=np.ones(len(tile_10)),
         y_offsets=y_offsets[7:],
         x_offsets=x_offsets[7:],
         rotation=rotation[7:],
@@ -130,6 +135,7 @@ def test_direct_shifted_tiled(obj, simulated):
     )
     reconstruction_engine(
         tile_11,
+        weights=np.ones(len(tile_11)),
         y_offsets=y_offsets[7:] - 101,
         x_offsets=x_offsets[7:],
         rotation=rotation[7:],
@@ -140,3 +146,10 @@ def test_direct_shifted_tiled(obj, simulated):
     ref_rec = direct_reconstruction(ref_holograms, angles, 1)
     rec = out / ref_rec
     assert np.allclose(obj[21:-21, 21:-21], rec[21:-21, 21:-21])
+
+
+def test_direct_weight(obj, simulated):
+    holograms, ref_holograms, angles = simulated
+    ref_rec = direct_reconstruction(ref_holograms, angles, 1)
+    rec = direct_reconstruction(holograms, angles, ref_rec, weights=np.full(len(holograms), 0.5))
+    assert np.allclose(obj, 2*rec)
