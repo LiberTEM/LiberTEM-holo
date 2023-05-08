@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Configuration file for the Sphinx documentation builder.
 #
@@ -28,7 +27,7 @@ sys.path.insert(
     )
 )
 
-import libertem_holo
+import libertem_holo  # NOQA: E402
 
 # -- Project information -----------------------------------------------------
 
@@ -216,5 +215,5 @@ linkcheck_ignore = [
     # Some kind of user agent filtering
     r'^https://pydata.org.*',
     # Freezes the link checker for unknown reasons within CI, hard to reproduce
-    r'http://quantumdetectors.com/wp-content/uploads/2017/01/1532-Merlin-for-EM-Technical-Datasheet-v2.pdf',
+    r'http://quantumdetectors.com/wp-content/uploads/2017/01/1532-Merlin-for-EM-Technical-Datasheet-v2.pdf',  # NOQA: E501
 ]
