@@ -1,3 +1,2 @@
-pytest>=5,<6
+pytest>=6
 pytest-cov
--e git+https://github.com/libertem/libertem.git#egg=libertem
