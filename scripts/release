@@ -30,9 +30,75 @@ STABLE_VERSION_PAT = re.compile(
     r'^v\d+\.(\d+|x)(\.(\d+|x))?$'
 )
 
+GH_REPO_NAME = "LiberTEM/LiberTEM-holo"
+PYTHON_PKG_NAME = 'libertem_holo'
+
+
+def get_travis_env():
+    return {
+        'log_url': os.environ.get("TRAVIS_BUILD_WEB_URL", ""),
+        'commit': os.environ["TRAVIS_COMMIT"],
+        'branch': os.environ["TRAVIS_BRANCH"],
+        'is_pr': os.environ['TRAVIS_PULL_REQUEST'] != "false",
+    }
+
+
+def get_azure_env():
+    return {
+        'log_url': None,
+        'commit': os.environ.get('BUILD_SOURCEVERSION'),
+        'branch': os.environ.get('BUILD_SOURCEBRANCHNAME'),
+        'is_pr': os.environ.get('BUILD_REASON') == 'PullRequest',
+    }
+
+
+def get_github_actions_env():
+    branch = get_current_branch()
+    return {
+        'log_url': None,
+        'commit': os.environ.get('GITHUB_SHA'),
+        'branch': branch,
+        'is_pr': os.environ.get('GITHUB_EVENT_NAME') == 'pull_request',
+    }
+
+
+def get_all_branches():
+    """
+    Returns a dict from branch name to revision
+    """
+    cmd = ["git", "for-each-ref", "--format=%(objectname) %(refname:short)",
+           "refs/heads"]
+    lines = subprocess.check_output(cmd, text="utf-8").strip().split("\n")
+    lines = [line for line in lines if line]
+    if not lines:
+        return {}
+    return {
+        line.split()[1]: line.split()[0]
+        for line in lines
+    }
+
+
+def get_current_rev():
+    cmd = ["git", "rev-parse", "HEAD"]
+    return subprocess.check_output(cmd, text="utf-8").strip()
+
+
+def get_current_branch():
+    # tag builds are in detached HEAD state for github actions, so we need to
+    # put some effort into finding the matching branch:
+    all_branches = get_all_branches()
+    branch_by_rev = {
+        rev: branch
+        for (branch, rev) in all_branches.items()
+    }
+    return branch_by_rev.get(get_current_rev(), "HEAD")
+
+
+env = get_github_actions_env()
+
 
 def render_version(version_file, new_version):
-    version_stm = '__version__ = "{}"\n'.format(new_version)
+    version_stm = f'__version__ = "{new_version}"\n'
     with open(version_file, 'wb') as f:
         f.write(version_stm.encode("utf8"))
 
@@ -45,12 +111,12 @@ def read_version(version_file):
 
 
 def get_version_fn():
-    return join(BASE_DIR, 'src', 'libertem_holo', '__version__.py')
+    return join(BASE_DIR, 'src', PYTHON_PKG_NAME, '__version__.py')
 
 
 def do_git_commit(old_version, new_version, version_file):
     cmd = ["git", "commit", version_file, "-m",
-           "bump version: {} → {}".format(old_version, new_version)]
+           f"bump version: {old_version} → {new_version}"]
     subprocess.check_call(cmd)
 
 
@@ -91,7 +157,7 @@ def validate_version_tag():
         )
     if version_from_file != v:
         raise click.ClickException(
-            "version tag %s and __version__ %s do not match" % (
+            "version tag {} and __version__ {} do not match".format(
                 v, version_from_file
             )
         )
@@ -103,6 +169,14 @@ def get_current_tags():
     returns list of tags that point to HEAD
     """
     cmd = ["git", "tag", "--points-at", "HEAD"]
+    return subprocess.check_output(cmd, text="utf-8").strip().split("\n")
+
+
+def get_all_tags():
+    """
+    returns list of all tags in the repository
+    """
+    cmd = ["git", "tag"]
     return subprocess.check_output(cmd, text="utf-8").strip().split("\n")
 
 
@@ -132,6 +206,17 @@ def get_latest_tag():
         return subprocess.check_output(cmd, text="utf-8").strip()
     except subprocess.CalledProcessError:
         return ""
+
+
+def get_latest_stable_tag():
+    tags = get_all_tags()
+    sorted_stable_tags = list(
+        sorted(
+            filter(STABLE_VERSION_PAT.match, tags),
+            key=parse_version
+        )
+    )
+    return sorted_stable_tags[-1]
 
 
 def tag_matches(tags):
@@ -206,7 +291,7 @@ def get_archive(tag):
     filename = "libertem-repo-archive-%s.tar.gz" % tag['full']
     with tempfile.TemporaryDirectory() as tempdir:
         full_fn = os.path.join(tempdir, filename)
-        url = "https://github.com/LiberTEM/LiberTEM/archive/%s.tar.gz" % tag['full']
+        url = f"https://github.com/{GH_REPO_NAME}/archive/{tag['full']}.tar.gz"
         stream_download(dest_fn=full_fn, url=url)
         yield full_fn
 
@@ -252,9 +337,8 @@ def upload_to_zenodo(verbose, parent, token, sandbox_token):
 
 def get_release_msg():
     parts = []
-    travis_url = os.environ.get("TRAVIS_BUILD_WEB_URL", "")
-    if travis_url:
-        parts.append("Travis CI build log: %s" % travis_url)
+    if env['log_url']:
+        parts.append("CI build log: %s" % env['log_url'])
     return "\n\n".join(parts)
 
 
@@ -267,13 +351,11 @@ def upload_to_github(verbose, files, token, release):
         print("release message:", msg)
 
     g = Github(token)
-    repo = g.get_repo("LiberTEM/LiberTEM-holo")
+    repo = g.get_repo(GH_REPO_NAME)
 
-    # FIXME: what if we are not in context of travis?
-    target = os.environ["TRAVIS_COMMIT"]
     release_data = {
         "message": msg,
-        "target_commitish": target,
+        "target_commitish": env['commit'],
     }
     if release == "dev":
         release_data.update({
@@ -282,12 +364,17 @@ def upload_to_github(verbose, files, token, release):
             "draft": False,
             "prerelease": True,
         })
-        # first, delete existing continuous tag and release:
+        # first, delete existing continuous tag and release(s):
         try:
-            cont_release = repo.get_release("continuous")
-            cont_release.delete_release()
-            if verbose:
-                print("deleted existing continuous release")
+            continuous_releases = [
+                r
+                for r in repo.get_releases()
+                if r.tag_name == "continuous"
+            ]
+            for cont_release in continuous_releases:
+                cont_release.delete_release()
+                if verbose:
+                    print("deleted existing continuous release")
         except UnknownObjectException:
             pass
         try:
@@ -304,7 +391,7 @@ def upload_to_github(verbose, files, token, release):
         release_data.update({
             "tag": tag['full'],
             "name": "Release Candidate %s" % tag['full'],
-            "draft": False,
+            "draft": True,
             "prerelease": True,
         })
         if verbose:
@@ -314,18 +401,44 @@ def upload_to_github(verbose, files, token, release):
         release_data.update({
             "tag": tag['full'],
             "name": "Release %s" % tag['full'],
-            "draft": False,
+            "draft": True,
             "prerelease": False,
         })
         if verbose:
             print("release, tag:", tag['full'])
     else:
         raise ValueError("unknown release kind: %s" % release)
-
+    if verbose:
+        print("release data: %r" % release_data)
     rel = repo.create_git_release(**release_data)
 
     for path in files:
         rel.upload_asset(path=path, content_type='application/octet-stream')
+
+
+def build_appimage(verbose):
+    APPIMAGE_DIR = join(BASE_DIR, 'packaging', 'appimage')
+
+    if verbose:
+        print("building AppImage in %s" % APPIMAGE_DIR)
+
+    # cleanup existing AppDir
+    APPDIR = join(APPIMAGE_DIR, 'AppDir')
+    if os.path.exists(APPDIR):
+        shutil.rmtree(APPDIR)
+
+    cmd = [
+        join(APPIMAGE_DIR, 'make_app_image.sh')
+    ]
+    output = subprocess.check_output(cmd, text="utf-8", cwd=APPIMAGE_DIR).strip()
+
+    if verbose:
+        print(output)
+
+    # FIXME: where does the zsync file come from?
+    appimage_files = glob.glob(join(APPIMAGE_DIR, 'LiberTEM*.AppImage*'))
+
+    return appimage_files
 
 
 def prepare_upload(verbose):
@@ -341,11 +454,20 @@ def prepare_upload(verbose):
         print("building wheel and sdist")
 
     out = subprocess.check_output([
-        "python", "setup.py", "sdist", "bdist_wheel"
+        "python", "-m", "build",
     ], cwd=BASE_DIR)
 
     if verbose and out:
         print(out.decode("utf-8"))
+
+
+def run_twine_check(verbose):
+    cmd = ["twine", "check"]
+    cmd.extend(get_py_release_files())
+    out = subprocess.check_output(cmd)
+
+    if verbose:
+        print(out)
 
 
 def upload_to_pypi(verbose, user, password):
@@ -395,6 +517,8 @@ def is_rc(ctx):
 @cli.command()
 @click.option('--dry-run/--no-dry-run', default=True,
               help="don't actually upload, only prepare files etc.")
+@click.option('--build-appimage/--no-build-appimage', default=False,
+              help="Build an AppImage")
 @click.option('--pypi-user', type=str, show_envvar=True)
 @click.option('--pypi-password', type=str, show_envvar=True)
 @click.option('--pypi-test-user', type=str, show_envvar=True)
@@ -410,8 +534,9 @@ def is_rc(ctx):
 @click.option('--zenodo-sandbox-parent', type=str, show_envvar=True,
               help='Zenodo sandbox parent deposition id')
 @click.pass_context
-def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_password, token,
-           zenodo_sandbox_token, zenodo_token, zenodo_parent, zenodo_sandbox_parent):
+def upload(ctx, dry_run, build_appimage, pypi_user, pypi_password,
+           pypi_test_user, pypi_test_password, token, zenodo_sandbox_token,
+           zenodo_token, zenodo_parent, zenodo_sandbox_parent):
     """
     prepare, build and upload to github, zenodo and pypi
     (if release candidate, to the test instance(s))
@@ -419,6 +544,8 @@ def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_pas
 
     if dry_run:
         print("NOTE: running in dry-run mode, specify --no-dry-run to really upload!")
+
+    print("environment: %s" % env)
 
     is_rc = current_version_tag_is_rc()
     is_release = current_version_tag_is_release()
@@ -439,6 +566,8 @@ def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_pas
     with open(join(BASE_DIR, 'packaging/zenodo-upload.json')) as f:
         json.load(f)
 
+    run_twine_check(ctx.obj['verbose'])
+
     if not dry_run:
         if is_release:
             upload_to_pypi(ctx.obj['verbose'], user=pypi_user, password=pypi_password)
@@ -447,15 +576,20 @@ def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_pas
 
     release = get_release_kind()
 
+    if build_appimage:
+        appimage_files = build_appimage(verbose=ctx.obj['verbose'])
+    else:
+        appimage_files = []
     github_files = get_py_release_files()
+    github_files.extend(appimage_files)
 
-    branch = os.environ['TRAVIS_BRANCH']
+    branch = env['branch']
 
     is_master = branch == "master"
     is_stable_branch = STABLE_VERSION_PAT.match(branch) is not None
-    is_pull_request = os.environ['TRAVIS_PULL_REQUEST'] != "false"
+    is_pull_request = env['is_pr']
 
-    if (is_master or is_stable_branch) and not is_pull_request:
+    if (is_master or is_stable_branch or is_release or is_rc) and not is_pull_request:
         if dry_run:
             print("would upload the following files to github:")
             for f in github_files:
@@ -464,7 +598,7 @@ def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_pas
             upload_to_github(ctx.obj['verbose'], github_files, token=token, release=release)
     else:
         print(
-            "branch is not master or stable (or CI run is for PR)"
+            "branch is not master or stable and not tagged (or CI run is for PR)"
             ", not uploading to github (files=%s)" % github_files
         )
 
@@ -479,6 +613,7 @@ def upload(ctx, dry_run, pypi_user, pypi_password, pypi_test_user, pypi_test_pas
 def status(ctx):
     version_file = get_version_fn()
     current_version = read_version(version_file)
+    print(f"env: {env}")
     print("current version: %s" % current_version)
     print("version tags for HEAD: %s" % [m['full'] for m in tag_matches(get_current_tags())])
     print("is release candidate? %s" % current_version_tag_is_rc())
@@ -487,6 +622,35 @@ def status(ctx):
         print("validating version tag...")
         validate_version_tag()
         print("done.")
+
+
+@cli.command()
+@click.pass_context
+def do_build_appimage(ctx):
+    appimage_files = build_appimage(verbose=ctx.obj['verbose'])
+    print("success, files=", appimage_files)
+
+
+@cli.command()
+def docker_tags():
+    """
+    Prints the tags that should be used for any docker images that are built,
+    separated by whitespace.
+    """
+    version = get_release_tag()
+    is_latest_stable = version and (version["full"] == get_latest_stable_tag())
+
+    tags = []
+
+    if version is not None:
+        tags.append(version["full"])
+
+    if is_latest_stable:
+        tags.append("latest")
+
+    tags.append("continuous")
+
+    print(" ".join(tags))
 
 
 @cli.command()
@@ -499,7 +663,7 @@ def status(ctx):
               default=False)
 def bump(new_version, tag, commit, force):
     """
-    bump the version in libertem_holo.__version__
+    bump the version in {PYTHON_PKG_NAME}.__version__
 
     NEW_VERSION should be pep440 compatible and conform to our version conventions
     """
@@ -519,18 +683,30 @@ def bump(new_version, tag, commit, force):
 
     version_file = get_version_fn()
     old_version = read_version(version_file)
+
+    if parse_version(old_version) > parse_version(new_version):
+        print(f'old version {old_version} is larger than new version {new_version}')
+        if not force:
+            raise click.ClickException("new version should be larger than old version")
+        else:
+            print("NOTE: bumping version by force")
+
     render_version(version_file, new_version)
-    version_tag = "v{}".format(new_version)
+    version_tag = f"v{new_version}"
 
     if commit:
         do_git_commit(old_version=old_version, new_version=new_version,
                       version_file=version_file)
     if tag:
         do_git_tag(tag=version_tag)
-    print("version bumped from {} to {}".format(old_version, new_version))
+    print(f"version bumped from {old_version} to {new_version}")
+
+    repo = f"git@github.com:{GH_REPO_NAME}.git"
 
     if tag:
-        print("now, push the new version: $ git push && git push origin {}".format(version_tag))
+        print("now, push the new version: $ git push {} && git push {} {}".format(
+            repo, repo, version_tag)
+        )
     else:
         if commit:
             print("now, tag as needed and push")
