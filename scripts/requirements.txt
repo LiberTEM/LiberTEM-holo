@@ -2,6 +2,8 @@ click
 pygithub
 requests
 twine
+build
+wheel
 html5lib
 docutils
 bibtexparser
