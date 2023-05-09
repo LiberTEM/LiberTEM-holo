@@ -37,7 +37,7 @@ jobs:
     additional:
         strategy:
             matrix:
-                envs: ["numba_coverage", "docs-check"]
+                envs: ["docs-check"]  # add "numba_coverage" once there are tests marked with that
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v3
