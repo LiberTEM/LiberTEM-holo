@@ -19,7 +19,7 @@ Documentation
    :caption: Contents:
    
    changelog
-   acknowledgements
+   acknowledgments
 
 
 Indices and tables
