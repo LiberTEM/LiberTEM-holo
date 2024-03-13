@@ -24,7 +24,7 @@ jobs:
                     python_version: "3.9"
         runs-on: ${{ matrix.os }}
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
             - name: Choose Python version ${{ matrix.python_version }}
               uses: actions/setup-python@v4
               with:
@@ -43,7 +43,7 @@ jobs:
                 envs: ["docs-check"]  # add "numba_coverage" once there are tests marked with that
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
             - name: 'Choose Python version 3.11'
               uses: actions/setup-python@v4
               with:
@@ -60,7 +60,7 @@ jobs:
     build-docs:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v3
+            - uses: actions/checkout@v4
             - name: 'Choose Python version 3.11'
               uses: actions/setup-python@v4
               with:
@@ -106,7 +106,7 @@ jobs:
         LT_RELEASE_UPLOAD_ZENODO_SANDBOX_PARENT: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_SANDBOX_PARENT }}
         LT_RELEASE_UPLOAD_ZENODO_PARENT: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_PARENT }}
       steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Choose Python version 3.11
         uses: actions/setup-python@v4
         with:
