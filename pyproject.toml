@@ -1,2 +1,61 @@
-# This file is a workaround for a pip bug.
-# https://stackoverflow.com/a/53698424
+[build-system]
+requires = ["hatchling", "hatch-fancy-pypi-readme"]
+build-backend = "hatchling.build"
+
+[project]
+name = "libertem-holo"
+dynamic = ["version", "readme"]
+description = "Electron holography reconstruction using LiberTEM"
+requires-python = ">=3.9"
+license-files = { paths = ["LICENSE"] }
+dependencies = [
+    "libertem",
+    "numpy",
+    "scipy",
+    "sparse",
+    'scikit-image',
+]
+keywords = ["electron microscopy", "holography", "off-axis holography"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+authors = [
+    { name = "Alexander Clausen", email = "a.clausen@fz-juelich.de" },
+    { name = "Dieter Weber", email = "d.weber@fz-juelich.de" },
+]
+
+[project.urls]
+Repository = "https://github.com/LiberTEM/LiberTEM-holo"
+Documentation = "https://libertem.github.io/LiberTEM-holo"
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+"content-type" = "text/x-rst"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.rst"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = ":(cite|doc):`[^`]+` ?"
+replacement = ""
+
+[tool.hatch.version]
+path = "src/libertem_holo/__version__.py"
+
+[tool.hatch.build.hooks.custom]
+# this enables hatch_build.py
