@@ -14,12 +14,8 @@ repos:
   rev: 7.0.0
   hooks:
   - id: flake8
-- repo: https://github.com/regebro/pyroma
-  rev: "4.2"
-  hooks:
-  - id: pyroma
 - repo: https://github.com/asottile/pyupgrade
   rev: v3.15.1
   hooks:
     - id: pyupgrade
-      args: ["--py37-plus"]
+      args: ["--py39-plus"]
