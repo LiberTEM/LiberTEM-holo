@@ -27,3 +27,4 @@ data
 *.idea
 .mypy_cache/
 .benchmarks
+src/libertem_holo/_baked_revision.py
