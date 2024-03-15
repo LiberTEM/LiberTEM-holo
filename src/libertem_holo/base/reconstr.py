@@ -166,11 +166,11 @@ def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=
     Parameters
     ----------
     Frame : array_like
-        Holographic data array
+        Holographic data array with shape (2, height, width)
     sb_pos : tuple
-        The sideband position (y, x), referred to the non-shifted FFT.
+        The sideband position (y, x), relative to the non-shifted FFT.
     aperture : 2D Array
-        array containing the mask for reconstruction
+        Array containing the mask for reconstruction
 
     Returns
     -------
@@ -180,7 +180,8 @@ def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=
     """
     image_double_resolution = frame[1]-frame[0]
     wav = reconstruct_frame(image_double_resolution,
-                            sb_pos, aperture, slice_fft)
+                            sb_pos, aperture, slice_fft,
+                            precision=precision)
     return wav
 
 
