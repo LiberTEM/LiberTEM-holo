@@ -38,6 +38,7 @@ classifiers = [
 authors = [
     { name = "Alexander Clausen", email = "a.clausen@fz-juelich.de" },
     { name = "Dieter Weber", email = "d.weber@fz-juelich.de" },
+    { name = "Patrick Adrian", email = "patrick.adrian.gunawan@stud.th-luebeck.de" },
 ]
 
 [project.urls]
