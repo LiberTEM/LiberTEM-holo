@@ -150,7 +150,7 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
         frame = frame.astype(np.float32)
     frame_size = frame.shape
 
-    fft_frame = np.fft.fft2(frame) / np.prod(frame_size) 
+    fft_frame = np.fft.fft2(frame) / np.prod(frame_size)
     fft_frame = np.roll(fft_frame, sb_pos, axis=(0, 1))
 
     fft_frame = np.fft.fftshift(np.fft.fftshift(fft_frame)[slice_fft])
@@ -195,7 +195,7 @@ def estimate_omega(image, sideband_position, flip=False , stack=True):
             Holographic data array
     sb_position : tuple
         The sideband position (y, x), referred to the non-shifted FFT.
-    
+
     Returns
     -------
     omega : tuple
@@ -206,15 +206,15 @@ def estimate_omega(image, sideband_position, flip=False , stack=True):
         width = image.shape[2]
     else :
         width = image.shape[1]
-    
+
     if sideband_position[1] >= width/2 :
         omega = (-sideband_position[0], (width-sideband_position[1]))
     elif sideband_position[1] < width/2 :
         omega = (-sideband_position[0], sideband_position[1])
-    
+
     if flip :
         omega = (-omega[0], -omega[1])
-    
+
     return omega
 
 def reconstruct_direct_euler(image, omega):
@@ -237,7 +237,7 @@ def reconstruct_direct_euler(image, omega):
     """
     number_of_images = image.shape[1]
     phase_initial_euler = np.zeros(number_of_images, dtype="complex128")
-    
+
     n = np.arange(number_of_images)
     phase_initial = 2*np.pi*n/number_of_images
     phase_initial_euler = np.exp(1j*phase_initial)

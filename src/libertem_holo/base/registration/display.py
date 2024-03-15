@@ -2,7 +2,6 @@
 Display functions for stackregistration.py
 """
 
-from __future__ import print_function, division, absolute_import
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -151,7 +150,7 @@ def show_Fourier_mask(imstack,i=0,j=1):
                           displayed is between images i and j.
     """
     fig,(ax1,ax2,ax3)=plt.subplots(1,3)
-    fig.suptitle(", ".join(["{} = {}".format(key,imstack.mask_params[key]) for key in list(imstack.mask_params)]))
+    fig.suptitle(", ".join([f"{key} = {imstack.mask_params[key]}" for key in list(imstack.mask_params)]))
     ax1.matshow(np.log(np.abs(np.fft.fftshift(imstack.fftstack[i,:,:]))),
                 cmap='gray',vmin=np.average(np.log(np.abs(imstack.fftstack[i,:,:]))))
     ax1.matshow(np.fft.fftshift(imstack.mask_fourierspace),cmap='hot',alpha=0.4)
@@ -242,5 +241,3 @@ def show_report(imstack):
     plt.show()
 
     return
-
-

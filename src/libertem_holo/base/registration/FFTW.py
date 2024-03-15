@@ -1,4 +1,3 @@
-from __future__ import print_function
 import sys, os
 import numpy as np
 if sys.version_info[0] < 3:
@@ -14,7 +13,7 @@ except ImportError:
     hasfftw = False
 
 
-class WrapFFTW(object):
+class WrapFFTW:
    def __init__(self, shape, **kwargs):
        self.shape = shape
 
@@ -30,7 +29,7 @@ class WrapFFTW(object):
            with open(self.wisdomfile, 'rb') as infile:
                self._wisdom = pickle.load(infile)
            self._gotwisdom = import_wisdom(self._wisdom)
-       except IOError:
+       except OSError:
            pass
 
        self.data = n_byte_align(np.zeros(self.shape), 16, 'complex128')
@@ -57,7 +56,7 @@ class WrapFFTW(object):
        return self.ifft_object().copy()
 
 
-class WrapFFTW_NUMPY(object):
+class WrapFFTW_NUMPY:
    def __init__(self, shape, **kwargs):
        self.shape = shape
 
@@ -65,10 +64,8 @@ class WrapFFTW_NUMPY(object):
        return np.fft.fftn(inp)
 
    def ifft(self, inp):
-       return np.fft.ifftn(inp) 
+       return np.fft.ifftn(inp)
 
 
 if not hasfftw:
     WrapFFTW = WrapFFTW_NUMPY
-
-

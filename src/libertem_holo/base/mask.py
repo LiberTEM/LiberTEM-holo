@@ -16,7 +16,7 @@ def disk_aperture(out_shape, radius):
         2d array containing aperture
     """
     size = out_shape
-    aperture = np.zeros((size))
+    aperture = np.zeros(size)
     rr, cc = disk((0, 0), radius)
     aperture[rr, cc] = 1
 

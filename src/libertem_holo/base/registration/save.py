@@ -2,7 +2,6 @@
 Save functions for stackregistration.py
 """
 
-from __future__ import print_function, division, absolute_import
 import numpy as np
 import matplotlib.pyplot as plt
 from os.path import splitext
@@ -122,5 +121,3 @@ def save_report(imstack, fout):
 
     report.close()
     return
-
-

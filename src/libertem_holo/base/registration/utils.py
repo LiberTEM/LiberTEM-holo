@@ -2,7 +2,6 @@
 Utility functions for stackregistration.py
 """
 
-from __future__ import print_function, division, absolute_import
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
@@ -210,13 +209,3 @@ def getpaths(i,j,maxpaths,nz):
                 seq.append([i]+seq11+subseq+seq22+[j])
 
     return map(makeslice, seq[:maxpaths])
-
-
-
-
-
-
-
-
-
-

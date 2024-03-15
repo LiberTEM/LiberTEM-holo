@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Image registration optimized for noisy STEM datasets.
 
@@ -7,7 +6,6 @@ See, e.g., stackregistration_sample_notebook.ipynb.
 """
 
 # Import global libraries
-from __future__ import print_function, division, absolute_import
 import numpy as np
 from math import floor, ceil
 
@@ -17,7 +15,7 @@ from . import save
 from . import FFTW
 from .utils import generateShiftedImage, gauss2d, fit_gaussian, on_edge, get_cutout, fit_peaks, getpaths, allpaths
 
-class imstack(object):
+class imstack:
     """
     Object for functions on stacks of images.
     Optimized to register and average stacks of noisy STEM images.
@@ -212,7 +210,7 @@ class imstack(object):
         for i in range (0, self.nz-1):
             for j in range(i+1, self.nz):
                 if verbose:
-                    print("Correlating images {} and {}".format(i,j))
+                    print(f"Correlating images {i} and {j}")
                 cc = getSingleCorrelation(self.fftstack[i, :, :], self.fftstack[j, :, :])
                 xshift, yshift = findMaxima(cc)
                 if xshift<self.nx/2:
@@ -273,7 +271,7 @@ class imstack(object):
             phase_correlation = np.abs(self.fftw.ifft(self.mask_fourierspace * fft2 * np.conj(fft1) / (np.abs(fft2)**2) ))
         return phase_correlation
 
-    ########### Methods for getting shifts from correlation maxima ########## 
+    ########### Methods for getting shifts from correlation maxima ##########
 
     def getSingleShift_pixel(self, cc):
         """
@@ -673,7 +671,3 @@ class imstack(object):
         return
 
     #################### END IMSTACK OBJECT ####################
-
-
-
-
