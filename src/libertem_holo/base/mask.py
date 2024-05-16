@@ -1,26 +1,35 @@
 import numpy as np
 from skimage.draw import line
-from skimage.draw import disk
+from libertem.masks import radial_bins
 
 
 def disk_aperture(out_shape, radius):
     """
-    An aperture function with skimage draw disk.
+    A disk-shaped aperture, fft-shifted.
+
+    Parameters
     ----------
     out_shape : interger
         Shape of the output array
     radius : float
         Radius of the disk
+
     Returns
     -------
+    aperture
         2d array containing aperture
     """
-    size = out_shape
-    aperture = np.zeros(size)
-    rr, cc = disk((0, 0), radius)
-    aperture[rr, cc] = 1
+    center = int(out_shape[0] / 2), int(out_shape[1] / 2)
 
-    return aperture
+    return np.fft.fftshift(radial_bins(
+        centerX=center[1],
+        centerY=center[0],
+        imageSizeX=out_shape[1],
+        imageSizeY=out_shape[0],
+        radius=radius,
+        n_bins=1,
+        use_sparse=False)[0]
+    )
 
 
 def line_filter(shape, sidebandpos, width, length, slice_fft):
@@ -46,14 +55,14 @@ def line_filter(shape, sidebandpos, width, length, slice_fft):
     """
     start_pos = (sidebandpos[0], sidebandpos[1])
     angle = np.arctan2(sidebandpos[0], shape[1] - sidebandpos[1])
-    end_pos = (sidebandpos[0] - np.int(np.floor(length * np.sin(angle))),
-               sidebandpos[1] + np.int(np.floor(length * np.cos(angle))))
+    end_pos = (sidebandpos[0] - int(np.floor(length * np.sin(angle))),
+               sidebandpos[1] + int(np.floor(length * np.cos(angle))))
 
     rr, cc = line(start_pos[0], start_pos[1], end_pos[0], end_pos[1])
     mask = np.ones(shape)
     mask[rr, cc] = 0
 
-    for i in range(0, np.int(np.ceil(width/2))):
+    for i in range(0, int(np.ceil(width/2))):
         rr, cc = line(start_pos[0], start_pos[1] + i, end_pos[0] + i, end_pos[1])
         mask[rr, cc] = 0
         rr, cc = line(start_pos[0], start_pos[1] - i, end_pos[0], end_pos[1] - i)

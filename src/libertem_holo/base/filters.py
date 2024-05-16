@@ -16,14 +16,16 @@ def highpass(img, sigma=2):
 
 def exclusion_mask(img, sigma=6):
     """
-    Return a mask with `True` entries for pixels deviating more than `sigma` from the mean
+    Return a mask with `True` entries for pixels deviating more than `sigma`
+    from the mean
     """
     return np.abs(img) > (img.mean() + sigma * img.std())
 
 
 def clipped(img, sigma=6):
     """
-    Return `img`, but with pixels deviating more than `sigma` from the mean masked out
+    Return `img`, but with pixels deviating more than `sigma` from the mean
+    masked out
 
     Useful for plotting:
 
@@ -36,7 +38,8 @@ def clipped(img, sigma=6):
 
 def phase_ramp_finding(img, order=1):
     """
-    A phase ramp finding function that is used to find the phase ramp across the field of view.
+    A phase ramp finding function that is used to find the phase ramp across the
+    field of view.
 
     Parameters
     ----------
@@ -60,16 +63,17 @@ def phase_ramp_finding(img, order=1):
             ramp_y = np.mean(np.gradient(img, axis=1))
             ramp = (ramp_y, ramp_x)
         else:
-            pass
+            raise ValueError(f"can only handle `order=1` for now, not order={order}")
     else:
-        pass
+        raise ValueError(f"cannot handle input of type {img.dtype}")
 
     return ramp
 
 
 def phase_ramp_removal(size, order=1, ramp=None):
     """
-    A phase ramp removal function that is remove to find the phase ramp across the field of view.
+    A phase ramp removal function that finds and removes a phase ramp across the
+    field of view.
 
     Parameters
     ----------
@@ -97,7 +101,7 @@ def phase_ramp_removal(size, order=1, ramp=None):
         img = ramp_x * x + ramp_y * y
     else:
         # To be expanded.
-        pass
+        raise ValueError(f"cannot handle order={order}")
 
     return img
 
