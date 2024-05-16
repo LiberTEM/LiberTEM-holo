@@ -1,8 +1,13 @@
+from typing import Optional
+
 import numpy as np
+import numpy.typing as npt
 
 from libertem.udf import UDF
 
-from libertem_holo.base.reconstr import get_aperture, reconstruct_frame
+from libertem_holo.base.filters import window_filter
+from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
+from libertem_holo.base.mask import disk_aperture
 
 
 class HoloReconstructUDF(UDF):
@@ -28,12 +33,15 @@ class HoloReconstructUDF(UDF):
     >>> wave = ctx.run_udf(dataset=dataset, udf=holo_udf)['wave'].data
     """
 
-    def __init__(self,
-                 out_shape,
-                 sb_position,
-                 sb_size,
-                 sb_smoothness=.05,
-                 precision=True):
+    def __init__(
+        self,
+        out_shape,
+        sb_position,
+        sb_size,
+        sb_smoothness=.05,
+        precision: bool = True,
+        custom_aperture: Optional[npt.NDArray] = None,
+    ):
         """
         out_shape : (int, int)
             Shape of the returned complex wave image. Note that the result should fit into the
@@ -53,11 +61,14 @@ class HoloReconstructUDF(UDF):
             Defines precision of the reconstruction, True for complex128 for the resulting
             complex wave, otherwise results will be complex64
         """
-        super().__init__(out_shape=out_shape,
-                         sb_position=sb_position,
-                         sb_size=sb_size,
-                         sb_smoothness=sb_smoothness,
-                         precision=precision)
+        super().__init__(
+            out_shape=out_shape,
+            sb_position=sb_position,
+            sb_size=sb_size,
+            sb_smoothness=sb_smoothness,
+            precision=precision,
+            custom_aperture=custom_aperture,
+        )
 
     def get_result_buffers(self):
         """
@@ -92,16 +103,31 @@ class HoloReconstructUDF(UDF):
             Slice for slicing FFT of the hologram
         """
 
-        slice_fft, aperture = get_aperture(
-            out_shape=self.params.out_shape,
-            sb_size=self.params.sb_size,
-            sb_smoothness=self.params.sb_smoothness,
-            sig_shape=self.meta.partition_shape.sig,
+        slice_fft = get_slice_fft(
+            self.params.out_shape,
+            self.meta.partition_shape.sig
         )
+
+        if self.params.custom_aperture is not None:
+            aperture = self.params.custom_aperture
+        else:
+            disk = disk_aperture(
+                out_shape=self.params.out_shape,
+                radius=self.params.sb_size,
+            )
+            aperture = window_filter(
+                disk, 
+            )
+            aperture = disk_aperture(
+                out_shape=self.params.out_shape,
+                sb_size=self.params.sb_size,
+                sb_smoothness=self.params.sb_smoothness,
+                sig_shape=self.meta.partition_shape.sig,
+            )
 
         kwargs = {
             'aperture': self.xp.array(aperture),
-            'slice': slice_fft
+            'slice': slice_fft,
         }
         return kwargs
 
