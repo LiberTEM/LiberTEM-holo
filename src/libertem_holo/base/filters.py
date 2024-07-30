@@ -2,6 +2,9 @@ import sparse
 import numpy as np
 from scipy import ndimage
 from skimage.restoration import unwrap_phase
+from skimage.filters import window
+from scipy.signal import fftconvolve
+from scipy.optimize import least_squares
 
 
 def highpass(img, sigma=2):
@@ -146,3 +149,74 @@ def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
         excluded_pixels=coords.coords,
         sig_shape=tuple(img.shape)
     ).squeeze()
+
+
+def window_filter(input_array, window_type, window_shape):
+    """
+    Return a filtered array with the same size of the input array
+
+    Parameters
+    ----------
+    input_array: array
+        Input array
+    window_type : string, float or tuple
+        The type of window to be created. Any window type supported by
+        ``scipy.signal.get_window`` is allowed here. See notes below for a
+        current list, or the SciPy documentation for the version of SciPy
+        on your machine.
+    window_shape : tuple of int or int
+        The shape of the window. If an integer is provided,
+        a 2D window is generated.
+    Notes
+    -----
+    This function is based on ``scipy.signal.get_window`` and thus can access
+    all of the window types available to that function
+    (e.g., ``"hann"``, ``"boxcar"``). Note that certain window types require
+    parameters that have to be supplied with the window name as a tuple
+    (e.g., ``("tukey", 0.8)``). If only a float is supplied, it is interpreted
+    as the beta parameter of the Kaiser window.
+    https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.windows.get_window.html
+
+    it is recommended to check the that after fft shift, the input array has value of 0
+    at the border.
+    """
+    if isinstance(window_shape, int):
+        window_shape = (window_shape, window_shape)
+    win = window(window_type, window_shape)
+    array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win, mode="same"))
+    array_filtered = array_filtered / np.max(array_filtered)
+    return array_filtered
+
+
+def ramp_compensation(image):
+    """
+    A ramp or wedge compensation for a 2D image with a linear optimization methods.
+
+    Parameters
+    ----------
+    image : 2D-Array
+        Input array
+    """
+
+    def linear_gradient(c, dy, dx, y, x):
+        return c+y*dy+x*dx
+    x = np.linspace(0, image.shape[0]-1, image.shape[0])
+    y = np.linspace(0, image.shape[1]-1, image.shape[1])
+
+    def fun(initial_value):
+        function = image_not_compensated - linear_gradient(initial_value[0], initial_value[1],
+                                                           initial_value[2], yv, xv)
+        return function.reshape((-1, ))
+    yv, xv = np.meshgrid(y, x)
+
+    image_not_compensated = np.copy(image)
+    m_initial = np.gradient(image_not_compensated)
+    dy_initial = np.mean(m_initial[0])
+    dx_initial = np.mean(m_initial[1])
+    c_initial = image[0, 0]
+    initial_value = np.array([c_initial, dy_initial, dx_initial])
+    res1 = least_squares(fun, initial_value)
+    gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
+                                            res1.x[2], yv, xv)
+    phase_image_compensated = image - gradient_compensation
+    return phase_image_compensated
