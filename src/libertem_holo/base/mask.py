@@ -3,7 +3,7 @@ from skimage.draw import line
 from libertem.masks import radial_bins
 
 
-def disk_aperture(out_shape, radius):
+def disk_aperture(out_shape, radius, xp=np):
     """
     A disk-shaped aperture, fft-shifted.
 
@@ -21,15 +21,17 @@ def disk_aperture(out_shape, radius):
     """
     center = int(out_shape[0] / 2), int(out_shape[1] / 2)
 
-    return np.fft.fftshift(radial_bins(
+    bins = xp.asarray(radial_bins(
         centerX=center[1],
         centerY=center[0],
         imageSizeX=out_shape[1],
         imageSizeY=out_shape[0],
-        radius=radius,
+        radius=float(radius),
         n_bins=1,
-        use_sparse=False)[0]
-    )
+        use_sparse=False
+    ))
+
+    return xp.fft.fftshift(bins[0])
 
 
 def line_filter(shape, sidebandpos, width, length, slice_fft):
