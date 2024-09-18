@@ -66,7 +66,13 @@ def get_slice_fft(out_shape, sig_shape):
     return slice_fft
 
 
-def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radius=None, sb='lower'):
+def estimate_sideband_position(
+    holo_data,
+    holo_sampling,
+    central_band_mask_radius=None,
+    sb='lower',
+    xp=np,
+):
     """
     Finds the position of the sideband and returns its position.
 
@@ -95,7 +101,11 @@ def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radiu
     if central_band_mask_radius is None:
         central_band_mask_radius = 1 / 20. * np.max(f_freq)
 
-    aperture = disk_aperture(holo_data.shape, central_band_mask_radius)
+    aperture = disk_aperture(
+        holo_data.shape,
+        central_band_mask_radius,
+        xp=xp,
+    )
 
     # A small aperture masking out the centerband.
     aperture_central_band = np.subtract(1.0, aperture)
@@ -107,16 +117,21 @@ def estimate_sideband_position(holo_data, holo_sampling, central_band_mask_radiu
     # Sideband position in pixels referred to unshifted FFT
     if sb == 'lower':
         fft_sb = fft_filtered[:int(fft_filtered.shape[0] / 2), :]
-        sb_position = np.asarray(np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape))
+        sb_position = xp.asarray(np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape))
     elif sb == 'upper':
         fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2):, :]
         sb_position = (np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape))
-        sb_position = np.asarray(np.add(sb_position, (int(fft_filtered.shape[0] / 2), 0)))
+        sb_position = xp.asarray(
+            xp.add(
+                xp.asarray(sb_position),
+                xp.asarray([int(fft_filtered.shape[0] / 2), 0]),
+            )
+        )
 
-    return sb_position
+    return tuple(sb_position)
 
 
-def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5):
+def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5, xp=np):
     """
     Estimates the size of sideband filter
 
@@ -136,26 +151,28 @@ def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5):
 
     """
 
-    h = np.array((np.asarray(sb_position) - np.asarray([0, 0]),
-                  np.asarray(sb_position) - np.asarray([0, holo_shape[1]]),
-                  np.asarray(sb_position) - np.asarray([holo_shape[0], 0]),
-                  np.asarray(sb_position) - np.asarray(holo_shape))) * sb_size_ratio
-    return np.min(np.linalg.norm(h, axis=1))
+    h = xp.array((xp.asarray(sb_position) - xp.asarray([0, 0]),
+                  xp.asarray(sb_position) - xp.asarray([0, holo_shape[1]]),
+                  xp.asarray(sb_position) - xp.asarray([holo_shape[0], 0]),
+                  xp.asarray(sb_position) - xp.asarray(holo_shape))) * sb_size_ratio
+    return xp.min(xp.linalg.norm(h, axis=1))
 
 
-def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True):
+def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True, xp=np):
+    frame = xp.array(frame)
+
     if not precision:
         frame = frame.astype(np.float32)
     frame_size = frame.shape
 
-    fft_frame = np.fft.fft2(frame) / np.prod(frame_size)
-    fft_frame = np.roll(fft_frame, sb_pos, axis=(0, 1))
+    fft_frame = xp.fft.fft2(frame) / np.prod(frame_size)
+    fft_frame = xp.roll(fft_frame, xp.array(sb_pos), axis=(0, 1))
 
-    fft_frame = np.fft.fftshift(np.fft.fftshift(fft_frame)[slice_fft])
+    fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
     fft_frame = fft_frame * aperture
 
-    wav = np.fft.ifft2(fft_frame) * np.prod(frame_size)
+    wav = xp.fft.ifft2(fft_frame) * np.prod(frame_size)
     return wav
 
 
