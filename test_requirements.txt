@@ -1,2 +1,5 @@
 pytest>=6
 pytest-cov
+
+numpy<2.1
+numba
