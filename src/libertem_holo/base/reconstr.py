@@ -30,7 +30,7 @@ This includes both FFT-based and phase-shifting approaches.
 # see: https://github.com/LiberTEM/LiberTEM
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -188,7 +188,7 @@ def estimate_sideband_size(
     return xp.min(xp.linalg.norm(h, axis=1))
 
 
-def reconstruct_frame(  # noqa: PLR0913
+def reconstruct_frame(
     frame: np.ndarray,
     sb_pos: tuple[float, float],
     aperture: np.ndarray,
@@ -234,7 +234,7 @@ def reconstruct_frame(  # noqa: PLR0913
     return xp.fft.ifft2(fft_frame) * np.prod(frame_size)
 
 
-def reconstruct_double_resolution(  # noqa: PLR0913
+def reconstruct_double_resolution(
     frames: np.ndarray,
     sb_pos: tuple[float, float],
     aperture: np.ndarray,

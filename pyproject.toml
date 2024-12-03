@@ -64,4 +64,22 @@ path = "src/libertem_holo/__version__.py"
 [tool.ruff.lint]
 ignore = [
     "PLR0913",  # too many arguments
+    "D419",  # empty docstring - used to "un-document" functions, for example inherited ones
+]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "ALL",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"{**/tests/*,conftest.py}" = [
+    "S101",  # "assert" used - yeah no shit it's a testcase
+    "D103",  # missing docstring
+    "D100",  # missing module docstring
+    "ANN201",  # missing return type annotation
+    "ANN001",  # missing argument annotation
+    "INP001",  # "implicit namespace package" doesn't make sense for tests
 ]

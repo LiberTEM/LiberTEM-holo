@@ -1,43 +1,45 @@
-import sparse
+"""Useful image filtering helpers."""
 import numpy as np
+import sparse
 from scipy import ndimage
-from skimage.restoration import unwrap_phase
-from skimage.filters import window
-from scipy.signal import fftconvolve
 from scipy.optimize import least_squares
+from scipy.signal import fftconvolve
+from skimage.filters import window
+from skimage.restoration import unwrap_phase
 
 
-def highpass(img, sigma=2):
-    """
-    Return highpass by subtracting a gaussian lowpass filter
-    """
+def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
+    """Return highpass by subtracting a gaussian lowpass filter."""
     return img - ndimage.gaussian_filter(img, sigma=sigma)
 
 
-def exclusion_mask(img, sigma=6):
-    """
-    Return a mask with `True` entries for pixels deviating more than `sigma`
-    from the mean
+def exclusion_mask(img: np.ndarray, sigma: float = 6) -> np.ndarray:
+    """Generate outlier mask.
+
+    Return a mask with `True` entries for pixels deviating more
+    than `sigma` from the mean.
     """
     return np.abs(img) > (img.mean() + sigma * img.std())
 
 
-def clipped(img, sigma=6):
-    """
+def clipped(img: np.ndarray, sigma: float = 6):
+    """Mask out outliers.
+
     Return `img`, but with pixels deviating more than `sigma` from the mean
-    masked out
+    masked out.
 
     Useful for plotting:
 
-    >>> plt.imshow(img, vmax=np.max(clipped(img)))
+    >>> plt.imshow(img, vmax=np.max(clipped(img)))  # doctest: +SKIP
     """
-    sigma_mask = exclusion_mask(img)
+    sigma_mask = exclusion_mask(img, sigma=sigma)
     sigma_mask = ~sigma_mask
     return img[sigma_mask]
 
 
 def phase_ramp_finding(img, order=1):
-    """
+    """Find a phase ramp in `img`.
+
     A phase ramp finding function that is used to find the phase ramp across the
     field of view.
 
@@ -49,11 +51,12 @@ def phase_ramp_finding(img, order=1):
         Phase ramp, 1 (default) is linear.
     ramp : 2d tuple, ()
         Phase ramp in y, x, if not None.
+
     Returns
     -------
         ramp, order, tuple, float
-    """
 
+    """
     # The ramp is determined by the maximum and minimum values of the image.
     # TODO least-square-fitting, polynomial order
     # TODO How to find phase ramps in complex images
@@ -71,7 +74,8 @@ def phase_ramp_finding(img, order=1):
 
 
 def phase_ramp_removal(size, order=1, ramp=None):
-    """
+    """Remove phase ramp.
+
     A phase ramp removal function that finds and removes a phase ramp across the
     field of view.
 
@@ -83,11 +87,12 @@ def phase_ramp_removal(size, order=1, ramp=None):
         Phase ramp, 1 (default) is linear.
     ramp : 2d tuple, ()
         Phase ramp in y, x, if not None.
+
     Returns
     -------
         2d nd array of the corrected image
-    """
 
+    """
     # TODO How to find phase ramps in complex images
     img = np.zeros(size)
     if ramp is None:
@@ -129,34 +134,34 @@ def phase_unwrap(image):
 
 
 def remove_dead_pixels(img, sigma_lowpass=2.0, sigma_exclusion=6.0):
-    """
+    """Remove dead pixels.
+
     Parameters
     ----------
-
     img : np.array
         Input array
-
     sigma_lowpass : float
         How much of the low frequencies should be removed before
         finding bad pixels
-
     sigma_exclusion : float
         Pixels deviating more than this value from the mean will be
         removed
+
     """
     from libertem.corrections.detector import correct
     mask = exclusion_mask(highpass(img, sigma=sigma_lowpass), sigma=sigma_exclusion)
 
     coords = sparse.COO(mask)
     return correct(
-        buffer=img.reshape((1,) + img.shape),
+        buffer=img.reshape((1, *img.shape)),
         excluded_pixels=coords.coords,
-        sig_shape=tuple(img.shape)
+        sig_shape=tuple(img.shape),
     ).squeeze()
 
 
 def window_filter(input_array, window_type, window_shape):
-    """
+    """Apply window-based filter.
+
     Return a filtered array with the same size of the input array
 
     Parameters
@@ -171,6 +176,7 @@ def window_filter(input_array, window_type, window_shape):
     window_shape : tuple of int or int
         The shape of the window. If an integer is provided,
         a 2D window is generated.
+
     Notes
     -----
     This function is based on ``scipy.signal.get_window`` and thus can access
@@ -183,13 +189,13 @@ def window_filter(input_array, window_type, window_shape):
 
     it is recommended to check the that after fft shift, the input array has value of 0
     at the border.
+
     """
     if isinstance(window_shape, int):
         window_shape = (window_shape, window_shape)
     win = window(window_type, window_shape)
     array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win, mode="same"))
-    array_filtered = array_filtered / np.max(array_filtered)
-    return array_filtered
+    return array_filtered / np.max(array_filtered)
 
 
 def ramp_compensation(image):
@@ -222,5 +228,4 @@ def ramp_compensation(image):
     res1 = least_squares(fun, initial_value)
     gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
                                             res1.x[2], yv, xv)
-    phase_image_compensated = image - gradient_compensation
-    return phase_image_compensated
+    return image - gradient_compensation
