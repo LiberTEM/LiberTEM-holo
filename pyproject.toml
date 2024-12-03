@@ -60,3 +60,8 @@ path = "src/libertem_holo/__version__.py"
 
 [tool.hatch.build.hooks.custom]
 # this enables hatch_build.py
+
+[tool.ruff.lint]
+ignore = [
+    "PLR0913",  # too many arguments
+]
