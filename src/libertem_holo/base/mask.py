@@ -34,12 +34,20 @@ def disk_aperture(out_shape, radius, xp=np):
     return xp.fft.fftshift(bins[0])
 
 
-def line_filter(shape, sidebandpos, width, length, slice_fft):
+def line_filter(
+    shape: tuple[int, int],
+    sidebandpos: tuple[int, int],
+    width: int,
+    length: int,
+    slice_fft,
+):
     """
     A line filter function that is used to remove Fresnel fringes from biprism.
     Parameters. The line will be created with skimage.draw.line. The starting points are
     the sideband position. The end points depend on the length and in the direction to top
     right image.
+
+    Parameters
     ----------
     shape : 2D tuple, ()
         the shape of the image.
@@ -51,6 +59,7 @@ def line_filter(shape, sidebandpos, width, length, slice_fft):
         Length of the line (rectangle) in pixels.
     slice_fft : array
         contain minimum and maximum value in y and x axis.
+
     Returns
     -------
         2d array containing line filter

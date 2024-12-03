@@ -83,18 +83,7 @@ class HoloReconstructUDF(UDF):
         }
 
     def get_task_data(self) -> dict[str, Any]:
-        """Update `task_data`.
-
-        Returns
-        -------
-        kwargs : dict
-            A dictionary with the following keys:
-            kwargs['aperture'] : array-like
-            Side band filter aperture (mask)
-            kwargs['slice'] : slice
-            Slice for slicing FFT of the hologram
-
-        """
+        ""
         slice_fft = get_slice_fft(
             self.params.out_shape,
             self.meta.partition_shape.sig,
@@ -106,14 +95,7 @@ class HoloReconstructUDF(UDF):
         }
 
     def process_frame(self, frame: np.ndarray) -> None:
-        """Reconstructs holograms outputting results into 'wave'.
-
-        Parameters
-        ----------
-        frame
-           single frame (hologram) of the data
-
-        """
+        ""
         wav = reconstruct_frame(
             frame,
             sb_pos=self.params.sb_position,
@@ -138,7 +120,17 @@ class HoloReconstructUDF(UDF):
         sb_position: tuple[float, float],
         precision: bool = True,
     ) -> HoloReconstructUDF:
-        """Instantiate with a default disk-shaped aperture."""
+        """Instantiate with a default disk-shaped aperture.
+
+        Examples
+        --------
+
+        >>> udf = HoloReconstructUDF.with_default_aperture(
+        ...     out_shape=(128, 128),
+        ...     sb_size=7.6,
+        ...     sb_position=(32, 32),
+        ... )
+        """
         aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
         return cls(
             out_shape=out_shape,
