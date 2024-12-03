@@ -26,13 +26,15 @@ class HoloReconstructUDF(UDF):
 
     Examples
     --------
-    >>> assert False
     >>> shape = tuple(dataset.shape.sig)
     >>> sb_position = [2, 3]
     >>> sb_size = 4.4
-    >>> holo_udf = HoloReconstructUDF(out_shape=shape,
-    ...                               sb_position=sb_position,
-    ...                               sb_size=sb_size)
+    >>> aperture = disk_aperture(out_shape=shape, radius=sb_size)
+    >>> holo_udf = HoloReconstructUDF(
+    ...     out_shape=shape,
+    ...     sb_position=sb_position,
+    ...     aperture=aperture,
+    ... )
     >>> wave = ctx.run_udf(dataset=dataset, udf=holo_udf)['wave'].data
 
     """
@@ -46,6 +48,10 @@ class HoloReconstructUDF(UDF):
         precision: bool = True,
     ) -> None:
         """Off-axis electron holography reconstruction.
+
+        The aperture is built outside of the UDF, which enables
+        flexibility for both adding additional filtering (like a line filter),
+        and for applying smoothing.
 
         Parameters
         ----------
@@ -64,7 +70,9 @@ class HoloReconstructUDF(UDF):
 
         aperture
             The aperture used to mask out the sideband. Should have
-            a shape equal to the `out_shape` parameter.
+            a shape equal to the `out_shape` parameter, and should be
+            fft-shifted (i.e. assume that the side band is shifted to the
+            corners of the image)
 
         """
         super().__init__(
@@ -124,12 +132,12 @@ class HoloReconstructUDF(UDF):
 
         Examples
         --------
-
         >>> udf = HoloReconstructUDF.with_default_aperture(
         ...     out_shape=(128, 128),
         ...     sb_size=7.6,
         ...     sb_position=(32, 32),
         ... )
+
         """
         aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
         return cls(

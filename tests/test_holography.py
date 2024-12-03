@@ -10,39 +10,6 @@ from libertem_holo.base.mask import disk_aperture
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 
 
-@pytest.fixture
-def holo_data():
-    # Prepare image parameters and mesh
-    ny, nx = (5, 7)
-    sy, sx = (64, 64)
-    slice_crop = (slice(None),
-                  slice(None),
-                  slice(sy // 4, sy // 4 * 3),
-                  slice(sx // 4, sx // 4 * 3))
-
-    lny = np.arange(ny)
-    lnx = np.arange(nx)
-    lsy = np.arange(sy)
-    lsx = np.arange(sx)
-
-    mny, mnx, msy, msx = np.meshgrid(lny, lnx, lsy, lsx)
-
-    # Prepare phase image
-    phase_ref = np.pi * msx * (mnx.max() - mnx) * mny / sx**2 \
-        + np.pi * msy * mnx * (mny.max() - mny) / sy**2
-
-    # Generate holograms
-    holo = np.zeros_like(phase_ref)
-    ref = np.zeros_like(phase_ref)
-
-    for i in range(ny):
-        for j in range(nx):
-            holo[j, i, :, :] = hologram_frame(np.ones((sy, sx)), phase_ref[j, i, :, :])
-            ref[j, i, :, :] = hologram_frame(np.ones((sy, sx)), np.zeros((sy, sx)))
-
-    return holo, ref, phase_ref, slice_crop
-
-
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
@@ -57,7 +24,6 @@ def test_holo_reconstruction(lt_ctx: Context, backend: str, holo_data) -> None:
 
     # Prepare LT datasets and do reconstruction
     dataset_holo = MemoryDataSet(data=holo, num_partitions=2, sig_dims=2)
-
     dataset_ref = MemoryDataSet(data=ref, num_partitions=1, sig_dims=2)
 
     sb_position = [11, 6]
@@ -87,6 +53,7 @@ def test_holo_reconstruction(lt_ctx: Context, backend: str, holo_data) -> None:
     "backend", ["numpy", "cupy"],
 )
 def test_default_aperture(lt_ctx: Context, backend: str, holo_data) -> None:
+    ""
     holo, ref, phase_ref, slice_crop = holo_data
 
     if backend == "cupy":

@@ -1,11 +1,13 @@
+"""Functions for building apertures."""
+from __future__ import annotations
+
 import numpy as np
-from skimage.draw import line
 from libertem.masks import radial_bins
+from skimage.draw import line
 
 
-def disk_aperture(out_shape, radius, xp=np):
-    """
-    A disk-shaped aperture, fft-shifted.
+def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarray:
+    """Generate a disk-shaped aperture, fft-shifted.
 
     Parameters
     ----------
@@ -13,11 +15,14 @@ def disk_aperture(out_shape, radius, xp=np):
         Shape of the output array
     radius : float
         Radius of the disk
+    xp
+        Either numpy or cupy
 
     Returns
     -------
     aperture
         2d array containing aperture
+
     """
     center = int(out_shape[0] / 2), int(out_shape[1] / 2)
 
@@ -28,57 +33,56 @@ def disk_aperture(out_shape, radius, xp=np):
         imageSizeY=out_shape[0],
         radius=float(radius),
         n_bins=1,
-        use_sparse=False
+        use_sparse=False,
     ))
 
     return xp.fft.fftshift(bins[0])
 
 
 def line_filter(
-    shape: tuple[int, int],
-    sidebandpos: tuple[int, int],
+    orig_shape: tuple[int, int],
+    sb_pos: tuple[int, int],
     width: int,
     length: int,
-    slice_fft,
-):
-    """
-    A line filter function that is used to remove Fresnel fringes from biprism.
-    Parameters. The line will be created with skimage.draw.line. The starting points are
-    the sideband position. The end points depend on the length and in the direction to top
-    right image.
+    slice_fft: slice,
+) -> np.ndarray:
+    """Remove Fresnel fringes from biprism with a line filter in fourier space.
+
+    The starting point is the sideband position. The end points depend on the
+    length and in the direction to top right image.
 
     Parameters
     ----------
-    shape : 2D tuple, ()
+    orig_shape
         the shape of the image.
-    sidebandpos : 2d tuple, ()
+    sb_pos
         Position of the sideband that is used for reconstruction of holograms.
-    width: int
+    width
         Width of the line (rectangle) in pixels.
-    length : int
+    length
         Length of the line (rectangle) in pixels.
-    slice_fft : array
-        contain minimum and maximum value in y and x axis.
+    slice_fft
+        A slice in fft shifted coordinates
 
     Returns
     -------
         2d array containing line filter
-    """
-    start_pos = (sidebandpos[0], sidebandpos[1])
-    angle = np.arctan2(sidebandpos[0], shape[1] - sidebandpos[1])
-    end_pos = (sidebandpos[0] - int(np.floor(length * np.sin(angle))),
-               sidebandpos[1] + int(np.floor(length * np.cos(angle))))
 
+    """
+    start_pos = (sb_pos[0], sb_pos[1])
+    angle = np.arctan2(sb_pos[0], orig_shape[1] - sb_pos[1])
+    end_pos = (sb_pos[0] - int(np.floor(length * np.sin(angle))),
+               sb_pos[1] + int(np.floor(length * np.cos(angle))))
+
+    # FIXME: replace with `skimage.draw.polygon`?
     rr, cc = line(start_pos[0], start_pos[1], end_pos[0], end_pos[1])
-    mask = np.ones(shape)
+    mask = np.ones(orig_shape)
     mask[rr, cc] = 0
 
-    for i in range(0, int(np.ceil(width/2))):
+    for i in range(int(np.ceil(width/2))):
         rr, cc = line(start_pos[0], start_pos[1] + i, end_pos[0] + i, end_pos[1])
         mask[rr, cc] = 0
         rr, cc = line(start_pos[0], start_pos[1] - i, end_pos[0], end_pos[1] - i)
         mask[rr, cc] = 0
 
-    mask = np.fft.fftshift(np.fft.fftshift(mask)[slice_fft])
-
-    return mask
+    return np.fft.fftshift(np.fft.fftshift(mask)[slice_fft])
