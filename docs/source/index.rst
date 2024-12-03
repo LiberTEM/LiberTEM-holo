@@ -3,9 +3,6 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-LiberTEM-holo
-============================
-
 .. include:: ../../README.rst
 ..   see also: https://muffinresearch.co.uk/selectively-including-parts-readme-rst-in-your-docs/
 ..   later, maybe :start-after: inclusion-marker-do-not-remove
@@ -18,8 +15,15 @@ Documentation
    :maxdepth: 2
    :caption: Contents:
    
+   usage
    changelog
    acknowledgments
+
+.. toctree::
+    :maxdepth: 2
+    :caption: Rference
+
+    reference/index
 
 
 Indices and tables
