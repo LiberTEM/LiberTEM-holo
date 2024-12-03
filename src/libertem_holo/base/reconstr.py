@@ -1,3 +1,8 @@
+"""Core reconstruction functions of LiberTEM-holo.
+
+This includes both FFT-based and phase-shifting approaches.
+"""
+
 # Functions freq_array, aperture_function, estimate_sideband_position
 # estimate_sideband_size are adopted from Hyperspy
 # and are subject of following copyright:
@@ -23,17 +28,25 @@
 # Public License as published by the Free Software Foundation,
 # version 3 of the License.
 # see: https://github.com/LiberTEM/LiberTEM
+from __future__ import annotations
 
-import numpy as np
-from numpy.fft import fft2
-from libertem_holo.base.mask import disk_aperture
+from typing import Any, Literal, Union
+
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.colors import LogNorm
+from numpy.fft import fft2
+
+from libertem_holo.base.mask import disk_aperture
+
+XPType = Any  # Union[Module("numpy"), Module("cupy")]
 
 
-def freq_array(shape, sampling=(1., 1.)):
-    """
-    Makes up a frequency array.
+def freq_array(
+    shape: tuple[int, int],
+    sampling: tuple[float, float] = (1.0, 1.0),
+) -> np.ndarray:
+    """Generate a frequency array.
 
     Parameters
     ----------
@@ -41,19 +54,23 @@ def freq_array(shape, sampling=(1., 1.)):
         The shape of the array.
     sampling: (float, float), optional, (Default: (1., 1.))
         The sampling rates of the array.
+
     Returns
     -------
         Array of the frequencies.
+
     """
     f_freq_1d_y = np.fft.fftfreq(shape[0], sampling[0])
     f_freq_1d_x = np.fft.fftfreq(shape[1], sampling[1])
     f_freq_mesh = np.meshgrid(f_freq_1d_x, f_freq_1d_y)
-    f_freq = np.hypot(f_freq_mesh[0], f_freq_mesh[1])
-
-    return f_freq
+    return np.hypot(f_freq_mesh[0], f_freq_mesh[1])
 
 
-def get_slice_fft(out_shape, sig_shape):
+def get_slice_fft(
+    out_shape: tuple[int, int],
+    sig_shape: tuple[int, int],
+) -> tuple[slice, slice]:
+    """Get a slice in fourier space to achieve the given output shape."""
     sy, sx = sig_shape
     oy, ox = out_shape
 
@@ -61,20 +78,17 @@ def get_slice_fft(out_shape, sig_shape):
     y_max = int(sy / 2 + oy / 2)
     x_min = int(sx / 2 - ox / 2)
     x_max = int(sx / 2 + ox / 2)
-    slice_fft = (slice(y_min, y_max), slice(x_min, x_max))
-
-    return slice_fft
+    return (slice(y_min, y_max), slice(x_min, x_max))
 
 
 def estimate_sideband_position(
-    holo_data,
-    holo_sampling,
-    central_band_mask_radius=None,
-    sb='lower',
-    xp=np,
-):
-    """
-    Finds the position of the sideband and returns its position.
+    holo_data: np.ndarray,
+    holo_sampling: tuple[float, float],
+    central_band_mask_radius: float | None = None,
+    sb: Literal["lower", "upper"] = "lower",
+    xp: XPType = np,
+) -> tuple[float, float]:
+    """Find the position of the sideband and return its position.
 
     Parameters
     ----------
@@ -86,20 +100,22 @@ def estimate_sideband_position(
         The aperture radius used to mask out the centerband.
     sb : str, optional
         Chooses which sideband is taken. 'lower' or 'upper'
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
 
     Returns
     -------
     Tuple of the sideband position (y, x), referred to the unshifted FFT.
-    """
 
+    """
     sb_position = (0, 0)
 
     f_freq = freq_array(holo_data.shape, holo_sampling)
 
-    # If aperture radius of centerband is not given, it will be set to 5 % of the Nyquist
-    # frequency.
+    # If aperture radius of centerband is not given, it will be set to 5 % of
+    # the Nyquist frequency.
     if central_band_mask_radius is None:
-        central_band_mask_radius = 1 / 20. * np.max(f_freq)
+        central_band_mask_radius = 1 / 20.0 * np.max(f_freq)
 
     aperture = disk_aperture(
         holo_data.shape,
@@ -115,25 +131,31 @@ def estimate_sideband_position(
     fft_filtered = fft_holo * aperture_central_band
 
     # Sideband position in pixels referred to unshifted FFT
-    if sb == 'lower':
-        fft_sb = fft_filtered[:int(fft_filtered.shape[0] / 2), :]
-        sb_position = xp.asarray(np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape))
-    elif sb == 'upper':
-        fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2):, :]
-        sb_position = (np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape))
+    if sb == "lower":
+        fft_sb = fft_filtered[: int(fft_filtered.shape[0] / 2), :]
+        sb_position = xp.asarray(
+            np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape),
+        )
+    elif sb == "upper":
+        fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2) :, :]
+        sb_position = np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
         sb_position = xp.asarray(
             xp.add(
                 xp.asarray(sb_position),
                 xp.asarray([int(fft_filtered.shape[0] / 2), 0]),
-            )
+            ),
         )
 
     return tuple(sb_position)
 
 
-def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5, xp=np):
-    """
-    Estimates the size of sideband filter
+def estimate_sideband_size(
+    sb_position: tuple[float, float],
+    holo_shape: tuple[int, int],
+    sb_size_ratio: float = 0.5,
+    xp: XPType = np,
+) -> float:
+    """Estimate the size of sideband filter.
 
     Parameters
     ----------
@@ -143,6 +165,8 @@ def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5, xp=np):
         The sideband position (y, x), referred to the non-shifted FFT.
     sb_size_ratio : float, optional
         Size of sideband as a fraction of the distance to central band
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
 
     Returns
     -------
@@ -150,15 +174,50 @@ def estimate_sideband_size(sb_position, holo_shape, sb_size_ratio=0.5, xp=np):
         Size of sideband filter
 
     """
-
-    h = xp.array((xp.asarray(sb_position) - xp.asarray([0, 0]),
-                  xp.asarray(sb_position) - xp.asarray([0, holo_shape[1]]),
-                  xp.asarray(sb_position) - xp.asarray([holo_shape[0], 0]),
-                  xp.asarray(sb_position) - xp.asarray(holo_shape))) * sb_size_ratio
+    h = (
+        xp.array(
+            (
+                xp.asarray(sb_position) - xp.asarray([0, 0]),
+                xp.asarray(sb_position) - xp.asarray([0, holo_shape[1]]),
+                xp.asarray(sb_position) - xp.asarray([holo_shape[0], 0]),
+                xp.asarray(sb_position) - xp.asarray(holo_shape),
+            ),
+        )
+        * sb_size_ratio
+    )
     return xp.min(xp.linalg.norm(h, axis=1))
 
 
-def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True, xp=np):
+def reconstruct_frame(  # noqa: PLR0913
+    frame: np.ndarray,
+    sb_pos: tuple[float, float],
+    aperture: np.ndarray,
+    slice_fft: tuple[slice, slice],
+    *,
+    precision: bool = True,
+    xp: XPType = np,
+) -> np.ndarray:
+    """Reconstruct a single hologram.
+
+    Parameters
+    ----------
+    frame
+        A numpy or cupy array containing the input hologram
+    sb_pos
+        The sideband position, for example as returned by
+        `estimate_sideband_position`
+    aperture
+        A numpy or cupy array containing the aperture to apply in fourier space
+    slice_fft
+        A slice to crop to the selected output shape in fourier space,
+        as returned by `get_slice_fft`.
+    precision
+        Defines precision of the reconstruction, True for complex128 for the
+        resulting complex wave, otherwise results will be complex64
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
+
+    """
     frame = xp.array(frame)
 
     if not precision:
@@ -172,22 +231,37 @@ def reconstruct_frame(frame, sb_pos, aperture, slice_fft, precision=True, xp=np)
 
     fft_frame = fft_frame * aperture
 
-    wav = xp.fft.ifft2(fft_frame) * np.prod(frame_size)
-    return wav
+    return xp.fft.ifft2(fft_frame) * np.prod(frame_size)
 
 
-def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=True):
-    """
-    Reconstruct a stack of phase shifted holography with double resolution method.
+def reconstruct_double_resolution(  # noqa: PLR0913
+    frames: np.ndarray,
+    sb_pos: tuple[float, float],
+    aperture: np.ndarray,
+    slice_fft: tuple[slice, slice],
+    *,
+    precision: bool = True,
+    xp: XPType = np,
+) -> np.ndarray:
+    """Reconstruct a stack of phase shifted holography with double resolution method.
 
     Parameters
     ----------
-    Frame : array_like
-        Holographic data array with shape (2, height, width)
-    sb_pos : tuple
-        The sideband position (y, x), relative to the non-shifted FFT.
-    aperture : 2D Array
-        Array containing the mask for reconstruction
+    frames : array_like
+        Two holograms taken at a phase offset of π; shape (2, height, width)
+    sb_pos
+        The sideband position, for example as returned by
+        `estimate_sideband_position`
+    aperture
+        A numpy or cupy array containing the aperture to apply in fourier space
+    slice_fft
+        A slice to crop to the selected output shape in fourier space,
+        as returned by `get_slice_fft`.
+    precision
+        Defines precision of the reconstruction, True for complex128 for the
+        resulting complex wave, otherwise results will be complex64
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
 
     Returns
     -------
@@ -195,23 +269,33 @@ def reconstruct_double_resolution(frame, sb_pos, aperture, slice_fft, precision=
         the reconstructed complex image
 
     """
-    image_double_resolution = frame[1]-frame[0]
-    wav = reconstruct_frame(image_double_resolution,
-                            sb_pos, aperture, slice_fft,
-                            precision=precision)
-    return wav
+    image_double_resolution = frames[1] - frames[0]
+    return reconstruct_frame(
+        image_double_resolution,
+        sb_pos,
+        aperture,
+        slice_fft,
+        precision=precision,
+        xp=xp,
+    )
 
 
-def estimate_omega(image, sideband_position, flip=False, stack=True):
-    """
-    Estimates the frequency carrier of the hologram
+def estimate_omega(
+    image: np.ndarray,
+    sideband_position: tuple[float, float],
+    *,
+    flip: bool = False,
+) -> tuple[float, float]:
+    """Estimates the frequency carrier of the hologram.
 
     Parameters
     ----------
     image : array
             Holographic data array
-    sb_position : tuple
+    sideband_position : tuple
         The sideband position (y, x), referred to the non-shifted FFT.
+    flip
+        ??? TODO
 
     Returns
     -------
@@ -219,13 +303,10 @@ def estimate_omega(image, sideband_position, flip=False, stack=True):
         frequency carrier in y and x axis
 
     """
-    if stack:
-        width = image.shape[2]
-    else:
-        width = image.shape[1]
+    width = image.shape[-1]
 
     if sideband_position[1] >= width / 2:
-        omega = (-sideband_position[0], (width-sideband_position[1]))
+        omega = (-sideband_position[0], (width - sideband_position[1]))
     elif sideband_position[1] < width / 2:
         omega = (-sideband_position[0], sideband_position[1])
 
@@ -235,10 +316,14 @@ def estimate_omega(image, sideband_position, flip=False, stack=True):
     return omega
 
 
-def reconstruct_direct_euler(image, omega):
-    """
-    Reconstruct a stack of phase shifted holography with direct
-    reconstruction method by Ru et.al. 1994 (euler form)
+def reconstruct_direct_euler(
+    image: np.ndarray,
+    omega: tuple[float, float],
+) -> np.ndarray:
+    """Reconstruct a stack of phase shifted holograms.
+
+    This is using the direct reconstruction method by Ru et.al. 1994 (euler
+    form)
 
     Parameters
     ----------
@@ -257,8 +342,8 @@ def reconstruct_direct_euler(image, omega):
     phase_initial_euler = np.zeros(number_of_images, dtype="complex128")
 
     n = np.arange(number_of_images)
-    phase_initial = 2*np.pi*n/number_of_images
-    phase_initial_euler = np.exp(1j*phase_initial)
+    phase_initial = 2 * np.pi * n / number_of_images
+    phase_initial_euler = np.exp(1j * phase_initial)
 
     c22 = 0
     for i in range(number_of_images):
@@ -267,24 +352,26 @@ def reconstruct_direct_euler(image, omega):
 
     x = np.linspace(0, omega[1], image.shape[2], endpoint=False)
     y = np.linspace(0, omega[0], image.shape[1], endpoint=False)
-    irow, icol = np.meshgrid(x, y, indexing='xy')
+    irow, icol = np.meshgrid(x, y, indexing="xy")
 
-    ramp_carrier = np.exp(1j*2*np.pi*(irow+icol))
+    ramp_carrier = np.exp(1j * 2 * np.pi * (irow + icol))
 
     c22 = c22 / ramp_carrier
-    phase_final = np.angle(c22)
-    return phase_final
+    return np.angle(c22)
 
 
-def reconstruct_direct(frame, number_of_images, omega):
-    """
-    Reconstruct a stack of phase shifted holography with direct
-    reconstruction method
+def reconstruct_direct(
+    stack: np.ndarray,
+    omega: tuple[float, float],
+) -> np.ndarray:
+    """Reconstruct a stack of phase shifted holograms.
+
+    This is using the direct reconstruction method.
 
     Parameters
     ----------
-    Frame : array_like
-        Holographic data array
+    stack : array_like
+        Stack of holograms
     number_of_images : int
         The number of images inside the stack
     omega: tuple
@@ -298,42 +385,41 @@ def reconstruct_direct(frame, number_of_images, omega):
     """
     xspace = omega[1]
     yspace = omega[0]
-    compfront = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
-    compcar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
-    sin_value_sum = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
-    cos_value_sum = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
-    coscar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
-    sincar = np.zeros((frame.shape[1], frame.shape[2]), dtype="complex64")
+    compfront = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    compcar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    sin_value_sum = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    cos_value_sum = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    coscar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    sincar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
 
+    number_of_images = stack.shape[0]
     cos_value_sum = np.array(0)
     sin_value_sum = np.array(0)
     n = np.arange(number_of_images)
-    initial_phase_change = 2 * np.pi * (n/number_of_images)
+    initial_phase_change = 2 * np.pi * (n / number_of_images)
 
     for i in range(number_of_images):
-        cos_value = frame[i] * np.cos(initial_phase_change[i])
-        sin_value = frame[i] * np.sin(initial_phase_change[i])
+        cos_value = stack[i] * np.cos(initial_phase_change[i])
+        sin_value = stack[i] * np.sin(initial_phase_change[i])
         cos_value_sum = cos_value_sum + cos_value
         sin_value_sum = sin_value_sum + sin_value
     compfront = cos_value_sum + sin_value_sum * 1j
 
-    x = np.linspace(0, xspace, frame.shape[2], endpoint=False)
-    y = np.linspace(0, yspace, frame.shape[1], endpoint=False)
-    irow, icol = np.meshgrid(x, y, indexing='xy')
+    x = np.linspace(0, xspace, stack.shape[2], endpoint=False)
+    y = np.linspace(0, yspace, stack.shape[1], endpoint=False)
+    irow, icol = np.meshgrid(x, y, indexing="xy")
 
-    coscar = np.cos(2 * np.pi * (icol+irow)).astype('float32')
-    sincar = np.sin(2 * np.pi * (icol+irow)).astype('float32')
+    coscar = np.cos(2 * np.pi * (icol + irow)).astype("float32")
+    sincar = np.sin(2 * np.pi * (icol + irow)).astype("float32")
     compcar = coscar + sincar * 1j
 
-    compfinal = compfront/compcar
-    phase_final = np.arctan2(np.imag(compfinal), np.real(compfinal))
-
-    return phase_final
+    compfinal = compfront / compcar
+    return np.arctan2(np.imag(compfinal), np.real(compfinal))
 
 
 def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
-    """
-    Display the fft image
+    """Display an fft image.
+
     This function helps to show the steps of the reconstruction and to define
     the best length and width of line mask
 
@@ -348,6 +434,7 @@ def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
     mask : array
         contain the aperture and line mask
     detail : bolean
+
     """
     fft_original_image = np.fft.fft2(image) / np.prod(image.shape)
     fft_original_image1 = np.roll(fft_original_image, sb_position, axis=(0, 1))
@@ -366,12 +453,12 @@ def display_fft_image(image, sb_position, slice_fft, mask=1, detail=True):
         plt.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
         figure, (ax1, ax2) = plt.subplots(1, 2)
         ax1.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
-        ax1.set_title('Without Aperture Mask')
+        ax1.set_title("Without Aperture Mask")
         ax2.imshow(np.log1p(np.abs(fft_with_aperture)), cmap="gray")
-        ax2.set_title('FFT with Aperture Mask')
+        ax2.set_title("FFT with Aperture Mask")
     else:
         figure, (ax1, ax2) = plt.subplots(1, 2)
         ax1.imshow(np.abs(fft_original_image4), norm=LogNorm(), cmap="gray")
-        ax1.set_title('Without Aperture Mask')
+        ax1.set_title("Without Aperture Mask")
         ax2.imshow(np.abs(fft_with_aperture), vmax=0.01, cmap="gray")
-        ax2.set_title('FFT with Aperture Mask')
+        ax2.set_title("FFT with Aperture Mask")

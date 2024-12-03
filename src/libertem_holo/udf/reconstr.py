@@ -1,18 +1,20 @@
-from typing import Optional
+"""UDFs for hologram reconstruction.
+
+Based on the functions available in :code:`libertem_holo.base.reconstr`.
+"""
+from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
-import numpy.typing as npt
-
 from libertem.udf import UDF
 
-from libertem_holo.base.filters import window_filter
-from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
 from libertem_holo.base.mask import disk_aperture
+from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
 
 
 class HoloReconstructUDF(UDF):
-    """
-    Reconstruct off-axis electron holograms using a Fourier-based method.
+    """Reconstruct off-axis electron holograms using a Fourier-based method.
 
     Running :meth:`~libertem.api.Context.run_udf` on an instance of this class
     will reconstruct a complex electron wave. Use the :code:`wave` key to access
@@ -24,6 +26,7 @@ class HoloReconstructUDF(UDF):
 
     Examples
     --------
+    >>> assert False
     >>> shape = tuple(dataset.shape.sig)
     >>> sb_position = [2, 3]
     >>> sb_size = 4.4
@@ -31,127 +34,115 @@ class HoloReconstructUDF(UDF):
     ...                               sb_position=sb_position,
     ...                               sb_size=sb_size)
     >>> wave = ctx.run_udf(dataset=dataset, udf=holo_udf)['wave'].data
+
     """
 
     def __init__(
         self,
-        out_shape,
-        sb_position,
-        sb_size,
-        sb_smoothness=.05,
+        *,
+        out_shape: tuple[int, int],
+        sb_position: tuple[float, float],
+        aperture: np.ndarray,
         precision: bool = True,
-        custom_aperture: Optional[npt.NDArray] = None,
-    ):
-        """
-        out_shape : (int, int)
-            Shape of the returned complex wave image. Note that the result should fit into the
-            main memory.
+    ) -> None:
+        """Off-axis electron holography reconstruction.
+
+        Parameters
+        ----------
+        out_shape
+            Shape of the returned complex wave image. Note that the result
+            should fit into the main memory.
             See :ref:`holography app` for more details
 
-        sb_position : tuple, or vector
-            Coordinates of sideband position with respect to non-shifted FFT of a hologram
+        sb_position
+            Coordinates of sideband position with respect to non-shifted FFT of
+            a hologram
 
-        sb_size : float
-            Radius of side band filter in pixels
+        precision
+            Defines precision of the reconstruction, True for complex128 for the
+            resulting complex wave, otherwise results will be complex64
 
-        sb_smoothness : float, optional (Default: 0.05)
-            Fraction of `sb_size` over which the edge of the filter aperture to be smoothed
+        aperture
+            The aperture used to mask out the sideband. Should have
+            a shape equal to the `out_shape` parameter.
 
-        precision : bool, optional, (Default: True)
-            Defines precision of the reconstruction, True for complex128 for the resulting
-            complex wave, otherwise results will be complex64
         """
         super().__init__(
             out_shape=out_shape,
             sb_position=sb_position,
-            sb_size=sb_size,
-            sb_smoothness=sb_smoothness,
             precision=precision,
-            custom_aperture=custom_aperture,
+            aperture=aperture,
         )
 
-    def get_result_buffers(self):
-        """
-        Initializes :class:`~libertem.common.buffers.BufferWrapper` objects for reconstructed
-        wave function
-
-        Returns
-        -------
-        A dictionary that maps 'wave' to the corresponding
-        :class:`~libertem.common.buffers.BufferWrapper` objects
-        """
+    def get_result_buffers(self) -> dict[str, Any]:
+        ""
         extra_shape = self.params.out_shape
-        if not self.params.precision:
-            dtype = np.complex64
-        else:
-            dtype = np.complex128
+        dtype = np.complex128 if self.params.precision else np.complex64
         return {
-            "wave": self.buffer(kind="nav", dtype=dtype, extra_shape=extra_shape)
+            "wave": self.buffer(kind="nav", dtype=dtype, extra_shape=extra_shape),
         }
 
-    def get_task_data(self):
-        """
-        Updates `task_data`
+    def get_task_data(self) -> dict[str, Any]:
+        """Update `task_data`.
 
         Returns
         -------
         kwargs : dict
-        A dictionary with the following keys:
+            A dictionary with the following keys:
             kwargs['aperture'] : array-like
             Side band filter aperture (mask)
             kwargs['slice'] : slice
             Slice for slicing FFT of the hologram
-        """
 
+        """
         slice_fft = get_slice_fft(
             self.params.out_shape,
-            self.meta.partition_shape.sig
+            self.meta.partition_shape.sig,
         )
 
-        if self.params.custom_aperture is not None:
-            aperture = self.params.custom_aperture
-        else:
-            disk = disk_aperture(
-                out_shape=self.params.out_shape,
-                radius=self.params.sb_size,
-            )
-            aperture = window_filter(
-                disk, 
-            )
-            aperture = disk_aperture(
-                out_shape=self.params.out_shape,
-                sb_size=self.params.sb_size,
-                sb_smoothness=self.params.sb_smoothness,
-                sig_shape=self.meta.partition_shape.sig,
-            )
-
-        kwargs = {
-            'aperture': self.xp.array(aperture),
-            'slice': slice_fft,
+        return {
+            "aperture": self.xp.array(self.params.aperture),
+            "slice": slice_fft,
         }
-        return kwargs
 
-    def process_frame(self, frame):
-        """
-        Reconstructs holograms outputting results into 'wave'
+    def process_frame(self, frame: np.ndarray) -> None:
+        """Reconstructs holograms outputting results into 'wave'.
 
         Parameters
         ----------
         frame
            single frame (hologram) of the data
-        """
 
+        """
         wav = reconstruct_frame(
             frame,
             sb_pos=self.params.sb_position,
             aperture=self.task_data.aperture,
             slice_fft=self.task_data.slice,
-            precision=self.params.precision
+            precision=self.params.precision,
+            xp=self.xp,
         )
 
-        self.results.wave[:] = wav
+        self.results.wave[:] = self.forbuf(wav, self.results.wave)
 
-    def get_backends(self):
-        # CuPy support deactivated due to https://github.com/LiberTEM/LiberTEM/issues/815
-        return ('numpy',)
-        # return ('numpy', 'cupy')
+    def get_backends(self) -> tuple[str, ...]:
+        ""
+        return ("numpy", "cupy")
+
+    @classmethod
+    def with_default_aperture(
+        cls,
+        *,
+        out_shape: tuple[int, int],
+        sb_size: float,
+        sb_position: tuple[float, float],
+        precision: bool = True,
+    ) -> HoloReconstructUDF:
+        """Instantiate with a default disk-shaped aperture."""
+        aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
+        return cls(
+            out_shape=out_shape,
+            sb_position=sb_position,
+            aperture=aperture,
+            precision=precision,
+        )
