@@ -21,7 +21,7 @@ Documentation
 
 .. toctree::
     :maxdepth: 2
-    :caption: Rference
+    :caption: Reference
 
     reference/index
 

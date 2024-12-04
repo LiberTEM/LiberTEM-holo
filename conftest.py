@@ -45,6 +45,43 @@ def holo_data():
 
 
 @pytest.fixture
+def large_holo_data(tmpdir, lt_ctx):
+    from libertem_holo.base.generate import hologram_frame
+    npy_ds_path = tmpdir.join('large_holo.npy')
+
+    # Prepare image parameters and mesh
+    ny, nx = (2, 1)
+    sy, sx = (4096, 4096)
+    slice_crop = (slice(None),
+                  slice(None),
+                  slice(sy // 4, sy // 4 * 3),
+                  slice(sx // 4, sx // 4 * 3))
+
+    lny = np.arange(ny)
+    lnx = np.arange(nx)
+    lsy = np.arange(sy)
+    lsx = np.arange(sx)
+
+    mny, mnx, msy, msx = np.meshgrid(lny, lnx, lsy, lsx)
+
+    # Prepare phase image
+    phase_ref = np.pi * msx * (mnx.max() - mnx) * mny / sx**2 \
+        + np.pi * msy * mnx * (mny.max() - mny) / sy**2
+
+    # Generate holograms
+    holo = np.zeros_like(phase_ref)
+
+    for i in range(ny):
+        for j in range(nx):
+            holo[j, i, :, :] = hologram_frame(np.ones((sy, sx)), phase_ref[j, i, :, :])
+
+    with open(npy_ds_path, 'wb') as f:
+        np.save(f, holo)
+
+    return npy_ds_path, lt_ctx.load('npy', str(npy_ds_path))
+
+
+@pytest.fixture
 def lt_ctx():
     return Context(executor=InlineJobExecutor())
 
