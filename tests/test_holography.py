@@ -8,6 +8,9 @@ from libertem.utils.devices import detect
 from libertem_holo.base.mask import disk_aperture
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 
+from libertem_holo.base.filters import phase_ramp_removal
+from libertem_holo.base.filters import phase_ramp_finding
+
 
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
@@ -88,3 +91,13 @@ def test_default_aperture(lt_ctx: Context, backend: str, holo_data) -> None:
     phase = np.angle(w)
 
     assert np.allclose(phase_ref[slice_crop], phase[slice_crop], rtol=0.12)
+
+
+def test_phase_ramp_removal():
+    a = phase_ramp_removal((128, 128), ramp=(0.2, 0.01))
+    b = phase_ramp_finding(a)
+    assert np.allclose(b, (0.2, 0.01))
+
+
+def test_line_filter():
+    pass
