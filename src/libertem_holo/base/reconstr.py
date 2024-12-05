@@ -137,7 +137,7 @@ def estimate_sideband_position(
             np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape),
         )
     elif sb == "upper":
-        fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2) :, :]
+        fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2):, :]
         sb_position = np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
         sb_position = xp.asarray(
             xp.add(

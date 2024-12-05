@@ -52,10 +52,6 @@ def large_holo_data(tmpdir, lt_ctx):
     # Prepare image parameters and mesh
     ny, nx = (2, 1)
     sy, sx = (4096, 4096)
-    slice_crop = (slice(None),
-                  slice(None),
-                  slice(sy // 4, sy // 4 * 3),
-                  slice(sx // 4, sx // 4 * 3))
 
     lny = np.arange(ny)
     lnx = np.arange(nx)
@@ -85,6 +81,7 @@ def large_holo_data(tmpdir, lt_ctx):
 def lt_ctx():
     return Context(executor=InlineJobExecutor())
 
+
 @pytest.fixture(autouse=True)
 def auto_ds(doctest_namespace, holo_data):
     from libertem.io.dataset.memory import MemoryDataSet
@@ -101,4 +98,3 @@ def auto_ds(doctest_namespace, holo_data):
 def auto_ctx(doctest_namespace):
     ctx = Context(executor=InlineJobExecutor())
     doctest_namespace["ctx"] = ctx
-
