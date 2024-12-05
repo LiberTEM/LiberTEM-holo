@@ -1,7 +1,6 @@
 import pytest
 
 from libertem.utils.devices import detect
-from libertem.udf.sum import SumUDF
 from libertem.common.backend import set_use_cpu, set_use_cuda
 
 from libertem_holo.udf import HoloReconstructUDF
