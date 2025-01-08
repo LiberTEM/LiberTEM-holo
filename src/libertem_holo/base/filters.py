@@ -6,6 +6,7 @@ from scipy.optimize import least_squares
 from scipy.signal import fftconvolve
 from skimage.filters import window
 from skimage.restoration import unwrap_phase
+from numpy import unwrap as np_unwrap
 
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
@@ -111,7 +112,7 @@ def phase_ramp_removal(size, order=1, ramp=None):
     return img
 
 
-def phase_unwrap(image):
+def phase_unwrap(image, alg=1):
     """
     A phase_unwrap function that is unwrap the complex / wrapped phase image.
 
@@ -119,16 +120,26 @@ def phase_unwrap(image):
     ----------
     image : 2d nd array
         Complex or Wrapped phase image
+    alg : int
+        Define which algorithm for phase unwrapping.
+        1 by default to use skimage. 2 to use numpy.umwrap
     Returns
     -------
         2d nd array of the unwrapped phase image
     """
 
-    if image.dtype.kind != 'c':
-        image_new = unwrap_phase(image)
+    if image.dtype.kind == 'c':
+        img = np.angle(image)
     else:
-        angle = np.angle(image)
-        image_new = unwrap_phase(angle)
+        img = image
+    if alg == 1:
+        image_new = unwrap_phase(img)
+
+    elif alg == 2:
+        image_new = np_unwrap(img)
+
+    else:
+        pass
 
     return image_new
 
