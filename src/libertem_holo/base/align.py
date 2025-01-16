@@ -129,7 +129,7 @@ def is_left(
     c: np.ndarray,
 ) -> np.ndarray:
     """
-    Points a and b are points on a line and result is an array of 
+    Points a and b are points on a line and result is an array of
     True or False if c is left or right of line resp.
     """
     return (b[1] - a[1])*(c[0] - a[0]) - (b[0] - a[0])*(c[1] - a[1]) > 0
