@@ -1,7 +1,10 @@
 import typing
 
 import time
-import cupy as cp
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 import numpy as np
 import matplotlib.pyplot as plt
 from sparseconverter import NUMPY, for_backend
@@ -40,7 +43,7 @@ class HoloParams(typing.NamedTuple):
         )
 
 
-def get_phase(hologram, params: HoloParams, xp=cp) -> np.ndarray:
+def get_phase(hologram, params: HoloParams, xp=np) -> np.ndarray:
     t0 = time.perf_counter()
 
     slice_fft = get_slice_fft(params.out_shape, hologram.shape)
@@ -51,11 +54,12 @@ def get_phase(hologram, params: HoloParams, xp=cp) -> np.ndarray:
         slice_fft=slice_fft,
         xp=xp
     )
+
+    # phase_unwrap is numpy-only:
     phase = for_backend(np.angle(phase_amp), NUMPY)
 
     t1 = time.perf_counter()
-
-    # phase_unwrap is numpy-only:
+    
     phase_unwrapped = phase_unwrap(phase)
 
     t2 = time.perf_counter()
@@ -64,7 +68,7 @@ def get_phase(hologram, params: HoloParams, xp=cp) -> np.ndarray:
     return phase_unwrapped
 
 
-def cross_correlate(src, target, xp=cp, plot=False, plot_title=""):
+def cross_correlate(src, target, xp=np, plot=False, plot_title=""):
     """
     Parameters
     ==========
