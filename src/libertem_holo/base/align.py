@@ -59,7 +59,7 @@ def get_phase(hologram, params: HoloParams, xp=np) -> np.ndarray:
     phase = for_backend(np.angle(phase_amp), NUMPY)
 
     t1 = time.perf_counter()
-    
+
     phase_unwrapped = phase_unwrap(phase)
 
     t2 = time.perf_counter()
