@@ -142,10 +142,10 @@ class BiprismDeletionCorrelator(Correlator):
     def plot_get_coords(cls, img, coords_out):
         """
         At low magnification, plot image of area with biprism visible.
-        Click on edges of biprism to create the coordinates to mask it out, 
+        Click on edges of biprism to create the coordinates to mask it out,
         for cross correlation.
         First, click one edge of biprism from left side, then same edge, right side.
-        Then, click other edge of biprism from left side, then right side. 
+        Then, click other edge of biprism from left side, then right side.
         -----1-------2-----
         -----3-------4-----
         """
