@@ -57,7 +57,7 @@ def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     sb_dist = np.linalg.norm(np.array(center_to_sb))
     length = sb_dist * length_ratio
     length_rest = sb_dist * (1 - length_ratio)
-    
+
     # stretch such that the width (in x direction) corresponds to the length,
     # and the height (y direction) corresponds to the width of the filter:
     scale = np.array([
@@ -67,7 +67,7 @@ def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
 
     # angle from -pi to +pi between the "x-axis" and the vector from center to sb:
     angle = np.arctan2(*center_to_sb)
-    
+
     rotate = np.array([
         [np.cos(-angle), np.sin(-angle)],
         [-np.sin(-angle), np.cos(-angle)],
@@ -108,7 +108,7 @@ def central_line_filter(sb_position, out_shape, orig_shape, length_ratio=0.7, wi
     # frequency at the center of the image. we work in original shape,
     # and crop at the end.
     dest = np.zeros(orig_shape, dtype=bool)
-    
+
     # approx. positions of both sidebands (inferred from symmetry):
     sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
 
