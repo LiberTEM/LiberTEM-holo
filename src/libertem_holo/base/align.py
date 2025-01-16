@@ -15,23 +15,23 @@ from libertem_holo.base.filters import phase_unwrap
 
 
 class HoloParams(typing.NamedTuple):
-    sb_size: typing.Tuple[float, float]
-    sb_position: typing.Tuple[float, float]
+    sb_size: tuple[float, float]
+    sb_position: tuple[float, float]
     aperture: np.ndarray  # actually can be a cupy ndarray, too! hm...
-    orig_shape: typing.Tuple[int, int]
-    out_shape: typing.Tuple[int, int]
+    orig_shape: tuple[int, int]
+    out_shape: tuple[int, int]
     scale_factor: float  # by how much is the phase image scaled down in comparison to the hologram?
 
     @property
-    def sb_position_raw(self) -> typing.Tuple[float, float]:
+    def sb_position_raw(self) -> tuple[float, float]:
         # the actual sb_position contains arrays, convert them to floats:
         return tuple(
             float(for_backend(c, NUMPY))
             for c in self.sb_position
         )
-    
+
     @property
-    def sb_position_int(self) -> typing.Tuple[int, int]:
+    def sb_position_int(self) -> tuple[int, int]:
         return tuple(
             int(c)
             for c in self.sb_position_raw
@@ -86,7 +86,7 @@ def cross_correlate(src, target, xp=cp, plot=False, plot_title=""):
     else:
         pos = tuple(float(x) for x in pos)
     if plot:
-        fig, ax = plt.subplots(3, sharex=True, sharey=True)        
+        fig, ax = plt.subplots(3, sharex=True, sharey=True)
         ax[0].imshow(for_backend(shifted_corr, NUMPY))
         ax[0].plot(pos[1], pos[0], 'x', color='red')
         ax[1].imshow(for_backend(src, NUMPY))
@@ -138,7 +138,7 @@ class Correlator:
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         raise NotImplementedError()
-    
+
 class BiprismDeletionCorrelator(Correlator):
     """
     Cross correlation on low magnification while removing biprism.
@@ -159,7 +159,7 @@ class BiprismDeletionCorrelator(Correlator):
         overview[:] = img
         overview[self._mask] = img.mean()
         return overview
-    
+
     def correlate(
         self,
         ref_image: typing.Any,
@@ -172,7 +172,7 @@ class BiprismDeletionCorrelator(Correlator):
             pos[1] - (moving_image.shape[1]) // 2,
         )
         return pos, pos_rel
-    
+
     @classmethod
     def plot_get_coords(cls, img, coords_out):
         fig, ax = plt.subplots(1)
@@ -183,7 +183,7 @@ class BiprismDeletionCorrelator(Correlator):
             if len(coords_out) == 4:
                 fig.canvas.mpl_disconnect(cid)
         cid = fig.canvas.mpl_connect('button_press_event', onclick)
-        
+
     @classmethod
     def get_masked(cls, img, coords):
         yx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
@@ -229,7 +229,7 @@ class BrightFieldCorrelator(Correlator):
         )
         holo_bf = np.gradient(holo_bf)[0]
         return holo_bf
-    
+
     def correlate(
         self,
         ref_image: typing.Any,
