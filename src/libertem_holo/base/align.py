@@ -11,61 +11,11 @@ from sparseconverter import NUMPY, for_backend
 from scipy.ndimage import gaussian_filter
 import logging
 
-from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
+from libertem_holo.base.reconstr import get_slice_fft, HoloParams, get_phase
 from libertem_holo.base.bf import central_line_filter, reconstruct_bf
 from libertem_holo.base.mask import disk_aperture
-from libertem_holo.base.filters import phase_unwrap
 
 log = logging.getLogger(__name__)
-
-
-class HoloParams(typing.NamedTuple):
-    sb_size: tuple[float, float]
-    sb_position: tuple[float, float]
-    aperture: np.ndarray  # actually can be a cupy ndarray, too! hm...
-    orig_shape: tuple[int, int]
-    out_shape: tuple[int, int]
-    scale_factor: float  # by how much is the phase image scaled down in comparison to the hologram?
-
-    @property
-    def sb_position_raw(self) -> tuple[float, float]:
-        # the actual sb_position contains arrays, convert them to floats:
-        return tuple(
-            float(for_backend(c, NUMPY))
-            for c in self.sb_position
-        )
-
-    @property
-    def sb_position_int(self) -> tuple[int, int]:
-        return tuple(
-            int(c)
-            for c in self.sb_position_raw
-        )
-
-
-def get_phase(hologram, params: HoloParams, xp=np) -> np.ndarray:
-    t0 = time.perf_counter()
-
-    slice_fft = get_slice_fft(params.out_shape, hologram.shape)
-    phase_amp = reconstruct_frame(
-        hologram,
-        sb_pos=params.sb_position,
-        aperture=params.aperture,
-        slice_fft=slice_fft,
-        xp=xp
-    )
-
-    # phase_unwrap is numpy-only:
-    phase = for_backend(np.angle(phase_amp), NUMPY)
-
-    t1 = time.perf_counter()
-
-    phase_unwrapped = phase_unwrap(phase)
-
-    t2 = time.perf_counter()
-
-    log.debug(f"time: total={t2-t0:.3f}s, reconstruction={t1-t0:.3f}s, unwrapping={t2-t1:.3f}s")
-    return phase_unwrapped
 
 
 def cross_correlate(src, target, xp=np, plot=False, plot_title=""):
