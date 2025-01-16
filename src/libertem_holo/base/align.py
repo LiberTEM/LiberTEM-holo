@@ -1,5 +1,4 @@
 import typing
-from functools import lru_cache
 
 import time
 import cupy as cp
@@ -7,11 +6,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sparseconverter import NUMPY, for_backend
 from scipy.ndimage import gaussian_filter
+import logging
 
 from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
 from libertem_holo.base.bf import central_line_filter, reconstruct_bf
 from libertem_holo.base.mask import disk_aperture
 from libertem_holo.base.filters import phase_unwrap
+
+log = logging.getLogger(__name__)
 
 
 class HoloParams(typing.NamedTuple):
@@ -42,7 +44,13 @@ def get_phase(hologram, params: HoloParams, xp=cp) -> np.ndarray:
     t0 = time.perf_counter()
 
     slice_fft = get_slice_fft(params.out_shape, hologram.shape)
-    phase_amp = reconstruct_frame(hologram, sb_pos=params.sb_position, aperture=params.aperture, slice_fft=slice_fft, xp=xp)
+    phase_amp = reconstruct_frame(
+        hologram,
+        sb_pos=params.sb_position,
+        aperture=params.aperture,
+        slice_fft=slice_fft,
+        xp=xp
+    )
     phase = for_backend(np.angle(phase_amp), NUMPY)
 
     t1 = time.perf_counter()
@@ -52,7 +60,7 @@ def get_phase(hologram, params: HoloParams, xp=cp) -> np.ndarray:
 
     t2 = time.perf_counter()
 
-    #  print(f"time: total={t2-t0:.3f}s, reconstruction={t1-t0:.3f}s, unwrapping={t2-t1:.3f}s")
+    log.debug(f"time: total={t2-t0:.3f}s, reconstruction={t1-t0:.3f}s, unwrapping={t2-t1:.3f}s")
     return phase_unwrapped
 
 
@@ -116,11 +124,14 @@ def get_grad_xy(image, scale=3):
 
 
 def is_left(
-    a : np.ndarray,
-    b : np.ndarray,
-    c : np.ndarray,
-) -> bool :
-    """Points a and b are points on a line and result is True or False if c is left or right of line resp."""
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+) -> np.ndarray:
+    """
+    Points a and b are points on a line and result is an array of 
+    True or False if c is left or right of line resp.
+    """
     return (b[1] - a[1])*(c[0] - a[0]) - (b[0] - a[0])*(c[1] - a[1]) > 0
 
 
@@ -138,6 +149,7 @@ class Correlator:
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
         raise NotImplementedError()
+
 
 class BiprismDeletionCorrelator(Correlator):
     """
@@ -177,6 +189,7 @@ class BiprismDeletionCorrelator(Correlator):
     def plot_get_coords(cls, img, coords_out):
         fig, ax = plt.subplots(1)
         ax.imshow(img)
+
         def onclick(event):
             plt.plot(event.xdata, event.ydata, 'ro')
             coords_out.append((event.ydata, event.xdata))
@@ -187,8 +200,9 @@ class BiprismDeletionCorrelator(Correlator):
     @classmethod
     def get_masked(cls, img, coords):
         yx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
-        mask = is_left(coords[0],coords[1],yx) & ~ is_left(coords[2],coords[3],yx)
+        mask = is_left(coords[0], coords[1], yx) & ~ is_left(coords[2], coords[3], yx)
         return mask
+
 
 class BrightFieldCorrelator(Correlator):
     """
@@ -242,6 +256,7 @@ class BrightFieldCorrelator(Correlator):
             pos[1] - (moving_image.shape[1]) // 2,
         )
         return pos, pos_rel
+
 
 class PhaseImageCorrelator(Correlator):
     """
