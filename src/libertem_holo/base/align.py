@@ -1,6 +1,5 @@
 import typing
 
-import time
 try:
     import cupy as cp
 except ImportError:
@@ -141,6 +140,15 @@ class BiprismDeletionCorrelator(Correlator):
 
     @classmethod
     def plot_get_coords(cls, img, coords_out):
+        """
+        At low magnification, plot image of area with biprism visible.
+        Click on edges of biprism to create the coordinates to mask it out, 
+        for cross correlation.
+        First, click one edge of biprism from left side, then same edge, right side.
+        Then, click other edge of biprism from left side, then right side. 
+        -----1-------2-----
+        -----3-------4-----
+        """
         fig, ax = plt.subplots(1)
         ax.imshow(img)
 
@@ -153,6 +161,7 @@ class BiprismDeletionCorrelator(Correlator):
 
     @classmethod
     def get_masked(cls, img, coords):
+        """Uses coordinates from plot_get_coords to create a mask of biprism."""
         yx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
         mask = is_left(coords[0], coords[1], yx) & ~ is_left(coords[2], coords[3], yx)
         return mask
