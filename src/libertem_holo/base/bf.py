@@ -154,10 +154,9 @@ def reconstruct_bf(
     xp=np,
 ) -> np.ndarray:
     frame = xp.array(frame)
-    #  frame_size = frame.shape
-    fft_frame = xp.fft.fft2(frame) # / np.prod(frame_size)
+    fft_frame = xp.fft.fft2(frame)
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
     fft_frame = fft_frame * xp.array(aperture)
 
-    return xp.fft.ifft2(fft_frame)  # * np.prod(frame_size)
+    return xp.fft.ifft2(fft_frame)
