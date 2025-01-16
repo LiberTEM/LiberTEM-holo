@@ -122,12 +122,6 @@ def central_line_filter(
     # approx. positions of both sidebands (inferred from symmetry):
     sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
 
-    # vector from the center to the sb:
-    center = (orig_shape[0]//2, orig_shape[1]//2)
-    center_to_sb = (
-        sb_pos_shifted[0]-center[0],
-        sb_pos_shifted[1]-center[1],
-    )
     other_sb_pos = fft_shift_coords(other_sb(sb_position, orig_shape), orig_shape)
 
     _draw_lf_rect(
@@ -157,10 +151,10 @@ def reconstruct_bf(
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
     *,
-    xp = np,
+    xp=np,
 ) -> np.ndarray:
     frame = xp.array(frame)
-    # frame_size = frame.shape
+    #  frame_size = frame.shape
     fft_frame = xp.fft.fft2(frame) # / np.prod(frame_size)
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
