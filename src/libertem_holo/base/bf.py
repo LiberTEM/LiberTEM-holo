@@ -1,10 +1,5 @@
-import typing
 from functools import lru_cache
-
-import cupy as cp
 import numpy as np
-import matplotlib.pyplot as plt
-from sparseconverter import NUMPY, for_backend
 from skimage.draw import polygon
 
 from libertem_holo.base.reconstr import get_slice_fft
@@ -14,9 +9,11 @@ from libertem_holo.base.reconstr import get_slice_fft
 def shifted_coords_for_shape(shape):
     return np.fft.fftshift(np.moveaxis(np.mgrid[0:shape[0], 0:shape[1]], 0, -1), axes=(0, 1))
 
+
 def fft_shift_coords(pos, shape):
     coords = shifted_coords_for_shape(shape)
     return tuple(int(n) for n in coords[pos[0], pos[1]])
+
 
 def other_sb(sb_position, shape):
     """
@@ -35,6 +32,7 @@ def other_sb(sb_position, shape):
         center[1] - center_to_sb[1],
     )
     return fft_shift_coords(other_sb, shape)
+
 
 def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     # let's start from a "unit rectangle" which is 1x1 and not rotated:
@@ -93,13 +91,25 @@ def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
 def _draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
     # we "draw" a rotated rectangle into `dest`, starting at `sb_position_shifted`
     # and ending at `length_ratio` times the vector in the direction to the center of `out_shape`.
-    coords = _line_filter_coords(length_ratio=length_ratio, sb_position_shifted=sb_position_shifted, width=width, orig_shape=orig_shape)
+    coords = _line_filter_coords(
+        length_ratio=length_ratio,
+        sb_position_shifted=sb_position_shifted,
+        width=width,
+        orig_shape=orig_shape
+    )
     # print(coords)
     rr, cc = polygon(coords[:, 0], coords[:, 1], shape=dest.shape)
     dest[rr, cc] = True
 
 
-def central_line_filter(sb_position, out_shape, orig_shape, length_ratio=0.7, width=20, crop_to_out_shape=False):
+def central_line_filter(
+    sb_position,
+    out_shape,
+    orig_shape,
+    length_ratio=0.7,
+    width=20,
+    crop_to_out_shape=False,
+):
     """
     Return a line filter for the central band, that can be applied
     by multiplying it with the aperture.
@@ -120,8 +130,20 @@ def central_line_filter(sb_position, out_shape, orig_shape, length_ratio=0.7, wi
     )
     other_sb_pos = fft_shift_coords(other_sb(sb_position, orig_shape), orig_shape)
 
-    _draw_lf_rect(dest, orig_shape=orig_shape, sb_position_shifted=sb_pos_shifted, length_ratio=length_ratio, width=width)
-    _draw_lf_rect(dest, orig_shape=orig_shape, sb_position_shifted=other_sb_pos, length_ratio=length_ratio, width=width)
+    _draw_lf_rect(
+        dest,
+        orig_shape=orig_shape,
+        sb_position_shifted=sb_pos_shifted,
+        length_ratio=length_ratio,
+        width=width,
+    )
+    _draw_lf_rect(
+        dest,
+        orig_shape=orig_shape,
+        sb_position_shifted=other_sb_pos,
+        length_ratio=length_ratio,
+        width=width,
+    )
 
     if crop_to_out_shape:
         slice_fft = get_slice_fft(out_shape=out_shape, sig_shape=orig_shape)
@@ -138,10 +160,10 @@ def reconstruct_bf(
     xp = np,
 ) -> np.ndarray:
     frame = xp.array(frame)
-    frame_size = frame.shape
+    # frame_size = frame.shape
     fft_frame = xp.fft.fft2(frame) # / np.prod(frame_size)
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
     fft_frame = fft_frame * xp.array(aperture)
 
-    return xp.fft.ifft2(fft_frame) # * np.prod(frame_size)
+    return xp.fft.ifft2(fft_frame)  # * np.prod(frame_size)
