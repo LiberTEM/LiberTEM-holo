@@ -7,6 +7,10 @@ from scipy.signal import fftconvolve
 from skimage.filters import window
 from skimage.restoration import unwrap_phase
 
+from libertem_holo.base.utils import (
+    fft_shift_coords, other_sb, draw_lf_rect, get_slice_fft,
+)
+
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
     """Return highpass by subtracting a gaussian lowpass filter."""
@@ -229,3 +233,81 @@ def ramp_compensation(image):
     gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
                                             res1.x[2], yv, xv)
     return image - gradient_compensation
+
+
+def line_filter(
+    sb_position,
+    out_shape,
+    orig_shape,
+    length_ratio=0.9,
+    width=20,
+    crop_to_out_shape=False,
+):
+    """Return a line filter for the sideband.
+
+    It can be applied by multiplying it with the aperture. The filter has the
+    zero frequency at the center of the image.
+    """
+    # we work in original shape, and crop at the end.
+    dest = np.zeros(orig_shape, dtype=bool)
+
+    # approx. positions of both sidebands (inferred from symmetry):
+    sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
+
+    draw_lf_rect(
+        dest,
+        orig_shape=orig_shape,
+        sb_position_shifted=sb_pos_shifted,
+        length_ratio=length_ratio,
+        width=width
+    )
+
+    if crop_to_out_shape:
+        slice_fft = get_slice_fft(out_shape=out_shape, sig_shape=orig_shape)
+        return dest[slice_fft]
+    else:
+        return dest
+
+
+def central_line_filter(
+    sb_position,
+    out_shape,
+    orig_shape,
+    length_ratio=0.9,
+    width=20,
+    crop_to_out_shape=False,
+):
+    """
+    Return a line filter for the central band, that can be applied
+    by multiplying it with the aperture.
+    """
+    # we are working in npn-fft-shifted space, meaning with the zero
+    # frequency at the center of the image. we work in original shape,
+    # and crop at the end.
+    dest = np.zeros(orig_shape, dtype=bool)
+
+    # approx. positions of both sidebands (inferred from symmetry):
+    sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
+
+    other_sb_pos = fft_shift_coords(other_sb(sb_position, orig_shape), orig_shape)
+
+    draw_lf_rect(
+        dest,
+        orig_shape=orig_shape,
+        sb_position_shifted=sb_pos_shifted,
+        length_ratio=length_ratio,
+        width=width,
+    )
+    draw_lf_rect(
+        dest,
+        orig_shape=orig_shape,
+        sb_position_shifted=other_sb_pos,
+        length_ratio=length_ratio,
+        width=width,
+    )
+
+    if crop_to_out_shape:
+        slice_fft = get_slice_fft(out_shape=out_shape, sig_shape=orig_shape)
+        return dest[slice_fft]
+    else:
+        return dest
