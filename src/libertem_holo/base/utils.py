@@ -42,7 +42,6 @@ log = logging.getLogger(__name__)
 XPType = Any  # Union[Module("numpy"), Module("cupy")]
 
 
-
 def freq_array(
     shape: tuple[int, int],
     sampling: tuple[float, float] = (1.0, 1.0),
@@ -189,10 +188,8 @@ def estimate_sideband_size(
     return xp.min(xp.linalg.norm(h, axis=1))
 
 
-
-
 class HoloParams(typing.NamedTuple):
-    """Here."""
+    """Holoparams class contians all parameters necessary for reconstruction."""
 
     sb_size: tuple[float, float]
     sb_position: tuple[float, float]

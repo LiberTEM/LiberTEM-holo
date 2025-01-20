@@ -276,12 +276,12 @@ def reconstruct_direct(
 
 
 def display_fft_image(
-        image: np.ndarray,
-        sb_position: tuple,
-        slice_fft: np.ndarray,
-        mask : np.ndarray = 1,
-        detail: bool = True,
-    ) -> None:
+    image: np.ndarray,
+    sb_position: tuple,
+    slice_fft: np.ndarray,
+    mask: np.ndarray = 1,
+    detail: bool = True,
+) -> None:
     """Display an fft image.
 
     This function helps to show the steps of the reconstruction and to define
@@ -329,10 +329,10 @@ def display_fft_image(
 
 
 def get_phase(
-        hologram: np.ndarray,
-        params: HoloParams,
-        xp: XPType = np,
-    ) -> np.ndarray:
+    hologram: np.ndarray,
+    params: HoloParams,
+    xp: XPType = np,
+) -> np.ndarray:
     """Reconstruct hologram using HoloParams and extract and unwrap phase."""
     t0 = time.perf_counter()
 
