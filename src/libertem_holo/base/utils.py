@@ -1,4 +1,3 @@
-
 """Utility functions for working with holography data."""
 
 # Functions freq_array, aperture_function, estimate_sideband_position
