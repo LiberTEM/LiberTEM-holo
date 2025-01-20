@@ -10,8 +10,8 @@ import numpy as np
 from libertem.udf import UDF
 
 from libertem_holo.base.mask import disk_aperture
-from libertem_holo.base.reconstr import get_slice_fft, reconstruct_frame
-
+from libertem_holo.base.reconstr import reconstruct_frame
+from libertem_holo.base.utils import get_slice_fft
 
 class HoloReconstructUDF(UDF):
     """Reconstruct off-axis electron holograms using a Fourier-based method.
