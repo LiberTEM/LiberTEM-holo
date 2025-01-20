@@ -359,3 +359,24 @@ def get_phase(
         f"reconstruction={t1-t0:.3f}s, unwrapping={t2-t1:.3f}s"
     )
     return phase_unwrapped
+
+
+def reconstruct_bf(
+    frame: np.ndarray,
+    aperture: np.ndarray,
+    slice_fft: tuple[slice, slice],
+    *,
+    xp=np,
+) -> np.ndarray:
+    """Reconstruct a brightfield image from a hologram.
+
+    Please use `libertem_holo.base.filter.central_line_filter` to
+    filter out fresnel fringes as appropriate.
+    """
+    frame = xp.array(frame)
+    fft_frame = xp.fft.fft2(frame)
+    fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
+
+    fft_frame = fft_frame * xp.array(aperture)
+
+    return xp.fft.ifft2(fft_frame)
