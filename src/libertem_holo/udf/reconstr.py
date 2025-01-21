@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from libertem.udf import UDF
 
-from libertem_holo.base.mask import disk_aperture
+from libertem_holo.base.filters import disk_aperture
 from libertem_holo.base.reconstr import reconstruct_frame
 from libertem_holo.base.utils import get_slice_fft
 

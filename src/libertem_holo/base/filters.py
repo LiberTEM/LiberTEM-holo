@@ -7,9 +7,43 @@ from scipy.signal import fftconvolve
 from skimage.filters import window
 from skimage.restoration import unwrap_phase
 
+from libertem.masks import radial_bins
 from libertem_holo.base.utils import (
     fft_shift_coords, other_sb, draw_lf_rect, get_slice_fft,
 )
+
+
+def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarray:
+    """Generate a disk-shaped aperture, fft-shifted.
+
+    Parameters
+    ----------
+    out_shape : interger
+        Shape of the output array
+    radius : float
+        Radius of the disk
+    xp
+        Either numpy or cupy
+
+    Returns
+    -------
+    aperture
+        2d array containing aperture
+
+    """
+    center = int(out_shape[0] / 2), int(out_shape[1] / 2)
+
+    bins = xp.asarray(radial_bins(
+        centerX=center[1],
+        centerY=center[0],
+        imageSizeX=out_shape[1],
+        imageSizeY=out_shape[0],
+        radius=float(radius),
+        n_bins=1,
+        use_sparse=False,
+    ))
+
+    return xp.fft.fftshift(bins[0])
 
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:

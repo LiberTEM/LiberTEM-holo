@@ -11,8 +11,7 @@ from scipy.ndimage import gaussian_filter
 import logging
 
 from libertem_holo.base.reconstr import get_slice_fft, HoloParams, get_phase, reconstruct_bf
-from libertem_holo.base.mask import disk_aperture
-from libertem_holo.base.filters import central_line_filter
+from libertem_holo.base.filters import central_line_filter, disk_aperture
 
 log = logging.getLogger(__name__)
 
