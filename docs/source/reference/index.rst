@@ -10,8 +10,14 @@ Holography UDFs
 Base holography functions
 -------------------------
 
-Image filtering
-~~~~~~~~~~~~~~~
+Reconstruction
+~~~~~~~~~~~~~~
+
+.. automodule:: libertem_holo.base.reconstr
+    :members:
+
+Image filtering and aperture building
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. automodule:: libertem_holo.base.filters
     :members:
@@ -22,14 +28,8 @@ Simulation
 .. automodule:: libertem_holo.base.generate
     :members:
 
-Masks and apertures
-~~~~~~~~~~~~~~~~~~~
+Utility functions
+~~~~~~~~~~~~~~~~~
 
-.. automodule:: libertem_holo.base.mask
-    :members:
-
-Reconstruction
-~~~~~~~~~~~~~~
-
-.. automodule:: libertem_holo.base.reconstr
+.. automodule:: libertem_holo.base.utils
     :members:

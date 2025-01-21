@@ -42,7 +42,6 @@ from numpy.fft import fft2
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from sparseconverter import NUMPY, for_backend
-from libertem_holo.base.mask import disk_aperture
 
 
 log = logging.getLogger(__name__)
@@ -116,6 +115,7 @@ def estimate_sideband_position(
     Tuple of the sideband position (y, x), referred to the unshifted FFT.
 
     """
+    from .filters import disk_aperture
     sb_position = (0, 0)
 
     f_freq = freq_array(holo_data.shape, holo_sampling)
@@ -229,7 +229,7 @@ class HoloParams(typing.NamedTuple):
         xp: XPType = np,
     ) -> HoloParams:
         """Return reconstruction parameters."""
-        from .filters import line_filter
+        from .filters import line_filter, disk_aperture
         hologram = xp.asarray(hologram)
 
         sb_position = estimate_sideband_position(

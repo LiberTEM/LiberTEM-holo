@@ -5,7 +5,7 @@ from libertem.common.backend import set_use_cpu, set_use_cuda
 from libertem.io.dataset.memory import MemoryDataSet
 from libertem.utils.devices import detect
 
-from libertem_holo.base.mask import disk_aperture
+from libertem_holo.base.filters import disk_aperture
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 
 
