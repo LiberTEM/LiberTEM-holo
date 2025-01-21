@@ -33,9 +33,14 @@ from typing import Any, Literal
 import typing
 import logging
 
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 import numpy as np
 from numpy.fft import fft2
 from skimage.draw import polygon
+from scipy.ndimage import gaussian_filter
 from sparseconverter import NUMPY, for_backend
 from libertem_holo.base.mask import disk_aperture
 
@@ -136,20 +141,22 @@ def estimate_sideband_position(
     # Sideband position in pixels referred to unshifted FFT
     if sb == "lower":
         fft_sb = fft_filtered[: int(fft_filtered.shape[0] / 2), :]
-        sb_position = xp.asarray(
-            np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape),
+        sb_position = (
+            np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
         )
     elif sb == "upper":
         fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2):, :]
         sb_position = np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
-        sb_position = xp.asarray(
+        sb_position = (
             xp.add(
                 xp.asarray(sb_position),
                 xp.asarray([int(fft_filtered.shape[0] / 2), 0]),
-            ),
+            )
         )
+        if xp is cp:
+            sb_position = sb_position.get()
 
-    return tuple(sb_position)
+    return tuple(float(c) for c in sb_position)
 
 
 def estimate_sideband_size(
@@ -200,32 +207,29 @@ class HoloParams(typing.NamedTuple):
     orig_shape: tuple[int, int]
     out_shape: tuple[int, int]
     scale_factor: float  # by how much is the phase image scaled down
-
-    @property
-    def sb_position_raw(self) -> tuple[float, float]:
-        """The actual sb_position contains arrays, convert them to floats."""
-        return tuple(
-            float(for_backend(c, NUMPY))
-            for c in self.sb_position
-        )
+    xp: XPType
 
     @property
     def sb_position_int(self) -> tuple[int, int]:
         """Sideband position from float to int."""
         return tuple(
             int(c)
-            for c in self.sb_position_raw
+            for c in self.sb_position
         )
 
     @classmethod
     def from_hologram(
         cls,
         hologram: np.ndarray,
+        *,
         central_band_mask_radius: int,
         out_shape: tuple = None,
+        line_filter_length: float = 0.9,
+        line_filter_width: float = 20,
         xp: XPType = np,
     ) -> HoloParams:
         """Return reconstruction parameters."""
+        from .filters import line_filter
         hologram = xp.asarray(hologram)
 
         sb_position = estimate_sideband_position(
@@ -241,8 +245,20 @@ class HoloParams(typing.NamedTuple):
             out_side = 2 * int(sb_size) + 16
             out_shape = (out_side, out_side)
 
-        #  Disk aperture, add line filter ?
+        #  Disk aperture
         aperture = disk_aperture(out_shape, sb_size, xp=xp)
+        sb_position_int = tuple(
+            int(c)
+            for c in sb_position
+        )
+        lf = line_filter(
+            sb_position=sb_position_int,
+            out_shape=out_shape,
+            orig_shape=hologram.shape,
+            length_ratio=line_filter_length,
+            width=line_filter_width,
+        )
+        aperture = aperture * ~xp.fft.fftshift(lf)
         aperture = xp.asarray(aperture)
 
         return cls(
@@ -252,6 +268,20 @@ class HoloParams(typing.NamedTuple):
             out_shape=out_shape,
             orig_shape=hologram.shape,
             scale_factor=out_shape[0] / hologram.shape[0],
+            xp=xp,
+        )
+
+    def filter_aperture_gaussian(self, sigma: float) -> HoloParams:
+        aperture = for_backend(self.aperture, NUMPY)
+        new_aperture = self.xp.asarray(gaussian_filter(aperture, sigma=sigma))
+        return HoloParams(
+            sb_size=self.sb_size,
+            sb_position=self.sb_position,
+            aperture=new_aperture,
+            orig_shape=self.orig_shape,
+            out_shape=self.out_shape,
+            scale_factor=self.scale_factor,
+            xp=self.xp,
         )
 
 
