@@ -275,7 +275,7 @@ def line_filter(
     orig_shape,
     length_ratio=0.9,
     width=20,
-    crop_to_out_shape=False,
+    crop_to_out_shape=True,
 ):
     """Return a line filter for the sideband.
 
