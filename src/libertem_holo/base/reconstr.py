@@ -83,7 +83,7 @@ def reconstruct_frame(
     frame_size = frame.shape
 
     fft_frame = xp.fft.fft2(frame) / np.prod(frame_size)
-    fft_frame = xp.roll(fft_frame, xp.array(sb_pos), axis=(0, 1))
+    fft_frame = xp.roll(fft_frame, xp.array(sb_pos).astype(xp.int64), axis=(0, 1))
 
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 

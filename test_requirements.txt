@@ -1,5 +1,6 @@
 pytest>=6
 pytest-cov
+pytest-benchmark
 
 numpy<2.1
 numba
