@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 from libertem.utils.devices import detect
 
-from libertem_holo.base.filters import disk_aperture
 from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import get_phase
 
