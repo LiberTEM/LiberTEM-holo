@@ -389,7 +389,7 @@ def phase_offset_correction(
     wtype: Literal['weighted'] | Literal['unweighted'] = 'weighted',
     threshold: float = 1e-12,
     return_stack: bool = False,
-) -> tuple[np.ndarray, typing.Union[np.ndarray, None]]:
+) -> tuple[np.ndarray, np.ndarray | None]:
     """
     This part of the code is to correct for the phase drift in the holograms due
     to the biprism drift with time.  Since we are dealing with the phase of the
