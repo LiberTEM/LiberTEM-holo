@@ -31,12 +31,14 @@ This includes both FFT-based and phase-shifting approaches.
 from __future__ import annotations
 
 import typing
+from typing import Literal
 import time
 from sparseconverter import NUMPY, for_backend
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
 import logging
+from scipy.sparse.linalg import eigsh
 
 from libertem_holo.base.filters import phase_unwrap
 from libertem_holo.base.utils import get_slice_fft, HoloParams
@@ -380,3 +382,84 @@ def reconstruct_bf(
     fft_frame = fft_frame * xp.array(aperture)
 
     return xp.fft.ifft2(fft_frame)
+
+
+def phase_offset_correction(
+    aligned_stack,
+    wtype: Literal['weighted'] | Literal['unweighted'] = 'weighted',
+    threshold: float = 1e-12,
+    return_stack: bool = False,
+) -> tuple[np.ndarray, typing.Union[np.ndarray, None]]:
+    """
+    This part of the code is to correct for the phase drift in the holograms due
+    to the biprism drift with time.  Since we are dealing with the phase of the
+    image which wraps from -pi to pi a simple scalar correction of the phase
+    doesnt work as the phase wraps around the phase axis. So the options for a
+    solution would be either iterative solution which is computationally heavy
+    or an eign value solution which is implemented here.
+
+    We start with a stack of holograms acquired using Holoworks or stack
+    acquisition and this function returns a phase corrected complex image
+
+    Adapted from a function by oleh.melnyk; for more details, see
+    https://arxiv.org/pdf/2005.02032.pdf
+
+    Parameters
+    ----------
+    aligned_stack
+        Array of shape (N, sy, sx) where N is the number of complex images;
+        should have dtype complex64 or complex128.
+
+    threshold
+        Minimum absolute value to be considered in finding the phase match for
+        stitching.
+
+    wtype
+        Selected type of weights to be used in the angular synchronization
+        There are 2 possible choices:
+        'unweighted' or 'weighted', depending on usage or not of the weights for
+        angular synchronization (explained above)
+
+    return_stack
+        Also returns a stack shaped like the input stack, where the phase
+        offset correction is applied.
+    """
+    R = aligned_stack.shape[0]
+    ph_diff = np.zeros((R, R), dtype=complex)
+    d1 = aligned_stack.shape[1]
+    d2 = aligned_stack.shape[2]
+
+    result_stack = np.zeros_like(aligned_stack)
+
+    for r1 in range(R):
+        for r2 in range(r1+1, R):
+            ph_diff[r1, r2] = np.einsum('ij,ij', aligned_stack[r1], aligned_stack[r2].conj())
+            ph_diff[r2, r1] = ph_diff[r1, r2].conj()
+
+    if wtype == 'weighted':
+        weights = np.abs(ph_diff)
+    elif wtype == 'unweighted':
+        weights = (np.abs(ph_diff) > threshold).astype(float)
+
+    idx = weights > 0
+    ph_diff[idx] = ph_diff[idx]/np.abs(ph_diff[idx])
+    degree = np.sum(weights, axis=1)
+    laplacian = np.diag(degree) - ph_diff * weights
+    _, phases = eigsh(laplacian, 1, which='SM')
+    idx = np.abs(phases) > threshold
+    phases[idx] = phases[idx]/np.abs(phases[idx])
+    phases[~idx] = 1
+    phases *= phases[0].conj()
+    result = np.zeros((d1, d2), dtype=complex)
+    count = np.zeros((d1, d2))
+    for r in range(R):
+        result[:, :] += phases[r].conj() * aligned_stack[r]
+        count[:, :] += np.abs(aligned_stack[r]) > threshold
+        if return_stack:
+            result_stack[r] = phases[r].conj() * aligned_stack[r]
+
+    np.divide(result, count, where=(count != 0), out=result)
+    if return_stack:
+        return result, result_stack
+    else:
+        return result, None
