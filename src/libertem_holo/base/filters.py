@@ -432,4 +432,3 @@ def butterworth_line(shape, width, sb_position, length_ratio=0.9, order=12):
                 dist = np.sqrt((y-cy-1)**2 + (x-cx)**2)
             result[y, x] = 1/np.sqrt(1 + np.pow((dist/width), 2*order))
     return 1 - result
-
