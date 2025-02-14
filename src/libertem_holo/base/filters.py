@@ -1,5 +1,6 @@
 """Useful image filtering helpers."""
 import numpy as np
+import numba
 import sparse
 from scipy import ndimage
 from scipy.optimize import least_squares
@@ -44,6 +45,31 @@ def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarra
     ))
 
     return xp.fft.fftshift(bins[0])
+
+
+@numba.njit
+def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12):
+    """
+    Parameters
+    ----------
+
+    shape
+        output shape of the aperture
+
+    radius
+        radius in pixels
+
+    order
+        order of the butterworth filter
+    """
+    result = np.zeros(shape, dtype=np.float32)
+    cy = shape[0]/2
+    cx = shape[1]/2
+    for y in range(shape[0]):
+        for x in range(shape[1]):
+            d = np.sqrt((y-cy)**2 + (x-cx)**2)
+            result[y, x] = 1/np.sqrt(1 + np.pow((d/radius), 2*order))
+    return result
 
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
@@ -345,3 +371,65 @@ def central_line_filter(
         return dest[slice_fft]
     else:
         return dest
+
+
+@numba.njit
+def butterworth_disk(shape, radius, order=12):
+    """
+    shape: output shape of the aperture
+
+    radius: radius in pixels
+
+    order: order of the butterworth filter
+    """
+    result = np.zeros(shape, dtype=np.float32)
+    cy = shape[0]/2
+    cx = shape[1]/2
+    for y in range(shape[0]):
+        for x in range(shape[1]):
+            d = np.sqrt((y-cy)**2 + (x-cx)**2)
+            result[y, x] = 1/np.sqrt(1 + np.pow((d/radius), 2*order))
+    return result
+
+
+@numba.njit
+def butterworth_line(shape, width, sb_position, length_ratio=0.9, order=12):
+    """
+    shape: output shape of the aperture
+
+    width: width of the line in pixels
+
+    order: order of the butterworth filter
+    """
+    result = np.zeros(shape, dtype=np.float32)
+    cy = shape[0] / 2 - 1
+    cx = shape[1] / 2 - 1
+    a = (sb_position[0] - cy) / (sb_position[1] - cx)
+    b = 1
+
+    # determine starting point:
+    sb_dist = np.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
+    length = sb_dist * (1 - length_ratio)
+
+    sb_sel = np.sign(sb_position[0] - cy)
+
+    # shift to starting point
+    cy += length * (sb_position[0] - cy) / sb_dist
+    cx += length * (sb_position[1] - cx) / sb_dist
+
+    c = -1/a
+    for y in range(shape[0]):
+        for x in range(shape[1]):
+            x0 = x - cx
+            y0 = y - cy
+            d = y0 - c * x0
+            xc = (d-c)/(a-b)
+            yc = a * xc + c
+
+            if sb_sel * xc < 0:
+                dist = np.abs(a*x0 - y0 + b)/np.sqrt(a**2 + 1)
+            else:
+                dist = np.sqrt((y-cy-1)**2 + (x-cx)**2)
+            result[y, x] = 1/np.sqrt(1 + np.pow((dist/width), 2*order))
+    return 1 - result
+

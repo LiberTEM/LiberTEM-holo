@@ -229,7 +229,7 @@ class HoloParams(typing.NamedTuple):
         xp: XPType = np,
     ) -> HoloParams:
         """Return reconstruction parameters."""
-        from .filters import line_filter, disk_aperture
+        from .filters import butterworth_line, butterworth_disk
         hologram = xp.asarray(hologram)
 
         sb_position = estimate_sideband_position(
@@ -245,20 +245,25 @@ class HoloParams(typing.NamedTuple):
             out_side = 2 * int(sb_size) + 16
             out_shape = (out_side, out_side)
 
+        fft_slice = get_slice_fft(out_shape, hologram.shape)
+
         #  Disk aperture
-        aperture = disk_aperture(out_shape, sb_size, xp=xp)
+        aperture = butterworth_disk(hologram.shape, radius=sb_size, order=20)
+
         sb_position_int = tuple(
             int(c)
             for c in sb_position
         )
-        lf = line_filter(
-            sb_position=sb_position_int,
-            out_shape=out_shape,
-            orig_shape=hologram.shape,
-            length_ratio=line_filter_length,
+        lf = butterworth_line(
+            shape=hologram.shape,
             width=line_filter_width,
+            sb_position=fft_shift_coords(
+                sb_position_int, shape=hologram.shape
+            ),
+            length_ratio=line_filter_length,
+            order=2,
         )
-        aperture = aperture * ~xp.fft.fftshift(lf)
+        aperture = np.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
         aperture = xp.asarray(aperture)
 
         return cls(
