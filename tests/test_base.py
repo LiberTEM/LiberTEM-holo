@@ -6,6 +6,7 @@ from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import get_phase
 
 
+@pytest.mark.with_numba
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
