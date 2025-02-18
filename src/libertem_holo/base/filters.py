@@ -374,25 +374,6 @@ def central_line_filter(
 
 
 @numba.njit
-def butterworth_disk(shape, radius, order=12):
-    """
-    shape: output shape of the aperture
-
-    radius: radius in pixels
-
-    order: order of the butterworth filter
-    """
-    result = np.zeros(shape, dtype=np.float32)
-    cy = shape[0]/2
-    cx = shape[1]/2
-    for y in range(shape[0]):
-        for x in range(shape[1]):
-            d = np.sqrt((y-cy)**2 + (x-cx)**2)
-            result[y, x] = 1/np.sqrt(1 + np.pow((d/radius), 2*order))
-    return result
-
-
-@numba.njit
 def butterworth_line(shape, width, sb_position, length_ratio=0.9, order=12):
     """
     shape: output shape of the aperture
@@ -424,7 +405,6 @@ def butterworth_line(shape, width, sb_position, length_ratio=0.9, order=12):
             y0 = y - cy
             d = y0 - c * x0
             xc = (d-c)/(a-b)
-            yc = a * xc + c
 
             if sb_sel * xc < 0:
                 dist = np.abs(a*x0 - y0 + b)/np.sqrt(a**2 + 1)

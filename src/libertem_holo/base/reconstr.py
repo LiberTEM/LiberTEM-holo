@@ -396,13 +396,16 @@ def phase_offset_correction(
     image which wraps from -pi to pi a simple scalar correction of the phase
     doesnt work as the phase wraps around the phase axis. So the options for a
     solution would be either iterative solution which is computationally heavy
-    or an eign value solution which is implemented here.
+    or an eigenvalue solution which is implemented here.
 
     We start with a stack of holograms acquired using Holoworks or stack
     acquisition and this function returns a phase corrected complex image
+    and optionally a stack of the phase corrected complex images before
+    averaging.
 
-    Adapted from a function by oleh.melnyk; for more details, see
-    https://arxiv.org/pdf/2005.02032.pdf
+    Adapted from a function by oleh.melnyk:
+    https://github.com/Ptychography-4-0/ptychography/blob/master/src/ptychography40/stitching/stitching.py
+    for more details, see https://arxiv.org/pdf/2005.02032.pdf
 
     Parameters
     ----------

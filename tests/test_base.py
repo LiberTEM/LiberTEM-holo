@@ -25,8 +25,7 @@ def test_get_phase(backend: str, holo_data) -> None:
         ref[0, 0],
         central_band_mask_radius=1,
         out_shape=(32, 32),
-        line_filter_length=0.9,
-        line_filter_width=0,
+        line_filter_width=None,
         xp=xp,
     )
 

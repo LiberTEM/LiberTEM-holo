@@ -185,17 +185,17 @@ def estimate_sideband_size(
 
     """
     h = (
-        xp.array(
+        np.array(
             (
-                xp.asarray(sb_position) - xp.asarray([0, 0]),
-                xp.asarray(sb_position) - xp.asarray([0, holo_shape[1]]),
-                xp.asarray(sb_position) - xp.asarray([holo_shape[0], 0]),
-                xp.asarray(sb_position) - xp.asarray(holo_shape),
+                np.asarray(sb_position) - np.asarray([0, 0]),
+                np.asarray(sb_position) - np.asarray([0, holo_shape[1]]),
+                np.asarray(sb_position) - np.asarray([holo_shape[0], 0]),
+                np.asarray(sb_position) - np.asarray(holo_shape),
             ),
         )
         * sb_size_ratio
     )
-    return xp.min(xp.linalg.norm(h, axis=1))
+    return float(np.min(np.linalg.norm(h, axis=1)))
 
 
 class HoloParams(typing.NamedTuple):
@@ -225,10 +225,37 @@ class HoloParams(typing.NamedTuple):
         central_band_mask_radius: int,
         out_shape: tuple = None,
         line_filter_length: float = 0.9,
-        line_filter_width: float = 20,
+        line_filter_width: float | None = 20,
         xp: XPType = np,
     ) -> HoloParams:
-        """Return reconstruction parameters."""
+        """Determine reconstruction parameters from a hologram.
+
+        Automatically estimates sideband position and size, and returns
+        the main parameters needed for holography reconstruction.
+
+        Parameters
+        ----------
+        hologram
+            A single hologram, can be either a numpy or a cupy array
+
+        central_band_mask_radius
+            When estimating the sideband position, use a mask of this size
+            to remove the central band
+
+        out_shape
+            The reconstruction shape, should be larger than the sideband size
+
+        line_filter_length
+            Length ratio of the line filter; as a fraction of the distance between
+            the central band and the sideband
+
+        line_filter_width
+            Width of the line filter, in pixels. Passing in `None` will disable
+            the line filter completely
+
+        xp
+            Pass in either the numpy or cupy module to select CPU or GPU processing
+        """
         from .filters import butterworth_line, butterworth_disk
         hologram = xp.asarray(hologram)
 
@@ -254,16 +281,19 @@ class HoloParams(typing.NamedTuple):
             int(c)
             for c in sb_position
         )
-        lf = butterworth_line(
-            shape=hologram.shape,
-            width=line_filter_width,
-            sb_position=fft_shift_coords(
-                sb_position_int, shape=hologram.shape
-            ),
-            length_ratio=line_filter_length,
-            order=2,
-        )
-        aperture = np.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
+        if line_filter_width is None:
+            aperture = np.fft.fftshift(aperture[fft_slice])
+        else:
+            lf = butterworth_line(
+                shape=hologram.shape,
+                width=line_filter_width,
+                sb_position=fft_shift_coords(
+                    sb_position_int, shape=hologram.shape
+                ),
+                length_ratio=line_filter_length,
+                order=2,
+            )
+            aperture = np.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
         aperture = xp.asarray(aperture)
 
         return cls(
