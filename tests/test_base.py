@@ -34,3 +34,31 @@ def test_get_phase(backend: str, holo_data) -> None:
 
     # TODO: ensure deterministic results for `get_phase`?
     # assert np.allclose(phase_ref[slice_crop][0, 0], phase[...], rtol=0.12)
+
+
+@pytest.mark.with_numba
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+@pytest.mark.parametrize(
+    "line_filter_width", [1, 10, None],
+)
+def test_params_from_hologram(backend: str, holo_data, line_filter_width) -> None:
+    holo, ref, phase_ref, slice_crop = holo_data
+
+    if backend == "cupy":
+        d = detect()
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
+    HoloParams.from_hologram(
+        ref[0, 0],
+        central_band_mask_radius=1,
+        out_shape=(32, 32),
+        line_filter_width=line_filter_width,
+        xp=xp,
+    )
