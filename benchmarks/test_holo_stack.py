@@ -35,7 +35,7 @@ def cpu_ctx():
 @pytest.mark.parametrize(
     'backend', ['numpy', 'cupy'],
 )
-def test_stack_reconstr_inline(backend, benchmark, lt_ctx, large_holo_data):
+def test_stack_reconstr(backend, benchmark, lt_ctx, large_holo_data):
     path, ds = large_holo_data
     if backend == 'cupy':
         d = detect()
