@@ -1,6 +1,9 @@
 """Useful image filtering helpers."""
+import math
+
 import numpy as np
 import numba
+from numba import cuda
 import sparse
 from scipy import ndimage
 from scipy.optimize import least_squares
@@ -47,12 +50,13 @@ def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarra
     return xp.fft.fftshift(bins[0])
 
 
-@numba.njit
-def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12):
-    """
+def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=np):
+    """Generate a filered disk-shaped aperture.
+
+    The edges are filtered with a butterworth filter of the given order.
+
     Parameters
     ----------
-
     shape
         output shape of the aperture
 
@@ -61,15 +65,52 @@ def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12):
 
     order
         order of the butterworth filter
+
+    xp
+        Either numpy or cupy
     """
+    if xp is np:
+        return _butterworth_disk_cpu(shape, radius, order)
+    else:
+        import cupy as cp
+        result = cp.zeros(shape, dtype=np.float32)
+        size = 32
+        threadsperblock = (size, size)
+        blockspergrid_x = math.ceil(result.shape[0] / threadsperblock[0])
+        blockspergrid_y = math.ceil(result.shape[1] / threadsperblock[1])
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+        _butterworth_disk_gpu[blockspergrid, threadsperblock](
+            result,
+            radius,
+            order
+        )
+        return result
+
+
+@numba.njit(cache=True, inline="always")
+def _butterworth_disk_kernel(y, x, cy, cx, radius, order):
+    d = math.sqrt((y-cy)**2 + (x-cx)**2)
+    return 1/math.sqrt(1 + math.pow((d/radius), 2*order))
+
+
+@numba.njit(cache=True, parallel=True)
+def _butterworth_disk_cpu(shape: tuple[int, int], radius: float, order: int = 12):
     result = np.zeros(shape, dtype=np.float32)
     cy = shape[0]/2
     cx = shape[1]/2
-    for y in range(shape[0]):
+    for y in numba.prange(shape[0]):
         for x in range(shape[1]):
-            d = np.sqrt((y-cy)**2 + (x-cx)**2)
-            result[y, x] = 1/np.sqrt(1 + np.pow((d/radius), 2*order))
+            result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
     return result
+
+
+@cuda.jit(cache=True)
+def _butterworth_disk_gpu(result, radius: float, order: int = 12):
+    y, x = cuda.grid(2)
+    cy = result.shape[0]/2
+    cx = result.shape[1]/2
+    if x < result.shape[1] and y < result.shape[0]:
+        result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
 
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
@@ -373,42 +414,128 @@ def central_line_filter(
         return dest
 
 
-@numba.njit
-def butterworth_line(shape, width, sb_position, length_ratio=0.9, order=12):
-    """
-    shape: output shape of the aperture
-
-    width: width of the line in pixels
-
-    order: order of the butterworth filter
-    """
-    result = np.zeros(shape, dtype=np.float32)
-    cy = shape[0] / 2 - 1
-    cx = shape[1] / 2 - 1
+@numba.njit(cache=True, inline="always")
+def _butterworth_line_kernel(
+    y, x, cy, cx,
+    shape,
+    width,
+    sb_position,
+    length_ratio,
+    order,
+):
     a = (sb_position[0] - cy) / (sb_position[1] - cx)
     b = 1
 
     # determine starting point:
-    sb_dist = np.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
+    sb_dist = math.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
     length = sb_dist * (1 - length_ratio)
 
-    sb_sel = np.sign(sb_position[0] - cy)
+    if sb_position[0] - cy >= 0:
+        sb_sel = 1
+    else:
+        sb_sel = -1
 
     # shift to starting point
     cy += length * (sb_position[0] - cy) / sb_dist
     cx += length * (sb_position[1] - cx) / sb_dist
 
     c = -1/a
-    for y in range(shape[0]):
-        for x in range(shape[1]):
-            x0 = x - cx
-            y0 = y - cy
-            d = y0 - c * x0
-            xc = (d-c)/(a-b)
+    x0 = x - cx
+    y0 = y - cy
+    d = y0 - c * x0
+    xc = (d-c)/(a-b)
 
-            if sb_sel * xc < 0:
-                dist = np.abs(a*x0 - y0 + b)/np.sqrt(a**2 + 1)
-            else:
-                dist = np.sqrt((y-cy-1)**2 + (x-cx)**2)
-            result[y, x] = 1/np.sqrt(1 + np.pow((dist/width), 2*order))
+    if sb_sel * xc < 0:
+        dist = abs(a*x0 - y0 + b)/math.sqrt(a**2 + 1)
+    else:
+        dist = math.sqrt((y-cy-1)**2 + (x-cx)**2)
+    return 1 / math.sqrt(1 + math.pow((dist/width), 2*order))
+
+
+@numba.njit(cache=True, parallel=True)
+def _butterworth_line_cpu(shape, width, sb_position, length_ratio=0.9, order=12):
+    result = np.zeros(shape, dtype=np.float32)
+    cy = shape[0] / 2 - 1
+    cx = shape[1] / 2 - 1
+
+    for y in numba.prange(shape[0]):
+        for x in range(shape[1]):
+            result[y, x] = _butterworth_line_kernel(
+                y, x, cy, cx,
+                shape,
+                width,
+                sb_position,
+                length_ratio,
+                order,
+            )
     return 1 - result
+
+
+def butterworth_line(
+    shape: tuple[int, int],
+    width: float,
+    sb_position: tuple[int, int],
+    length_ratio: float = 0.9,
+    order: int = 12,
+    xp=np
+):
+    """Generate a line filter.
+
+    This is useful to remove fresnel fringes.
+
+    Parameters
+    ----------
+    shape
+        output shape of the aperture
+
+    width
+        width of the line in pixels
+
+    order
+        order of the butterworth filter
+
+    xp
+        Either numpy or cupy
+    """
+    if xp is np:
+        return _butterworth_line_cpu(
+            shape=shape,
+            width=width,
+            sb_position=sb_position,
+            length_ratio=length_ratio,
+            order=order,
+        )
+    else:
+        import cupy as cp
+        result = cp.zeros(shape, dtype=np.float32)
+        size = 16
+        threadsperblock = (size, size)
+        blockspergrid_x = math.ceil(result.shape[0] / threadsperblock[0])
+        blockspergrid_y = math.ceil(result.shape[1] / threadsperblock[1])
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+        _butterworth_line_gpu[blockspergrid, threadsperblock](
+            result,
+            width,
+            sb_position,
+            length_ratio,
+            order,
+        )
+        return 1 - result
+
+
+@cuda.jit
+def _butterworth_line_gpu(
+    result, width, sb_position, length_ratio=0.9, order=12
+):
+    y, x = cuda.grid(2)
+    if x < result.shape[1] and y < result.shape[0]:
+        cy = result.shape[0] / 2 - 1
+        cx = result.shape[1] / 2 - 1
+        result[y, x] = _butterworth_line_kernel(
+            y, x, cy, cx,
+            result.shape,
+            width,
+            sb_position,
+            length_ratio,
+            order,
+        )
