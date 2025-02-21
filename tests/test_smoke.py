@@ -4,6 +4,7 @@ import numpy as np
 from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
+from libertem_holo.base.reconstr import phase_offset_correction
 
 
 @pytest.mark.parametrize(
@@ -38,7 +39,6 @@ def test_holo_params_happy_case(backend: str, holo_data) -> None:
     assert p2.sb_position_int == (53, 58)
 
 
-@pytest.mark.skip
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
@@ -54,13 +54,9 @@ def test_phase_offset_happy_case(backend: str, holo_data) -> None:
     else:
         xp = np
 
-    _ = HoloParams.from_hologram(
-        ref[0, 0],
-        central_band_mask_radius=1,
-        out_shape=(64, 64),
-        line_filter_length=0.9,
-        line_filter_width=2,
-        xp=xp,
-    )
+    phase_ref = xp.asarray(phase_ref)
 
-    raise NotImplementedError("TODO: make up a test case for phase offset correction")
+    phase_offset_correction(
+        phase_ref.reshape((-1, phase_ref.shape[2], phase_ref.shape[3])),
+        xp=xp
+    )
