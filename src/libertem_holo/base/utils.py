@@ -91,7 +91,7 @@ def get_slice_fft(
 def _hard_disk_aperture(shape: tuple[int, int], radius: float, xp=np):
     cy = shape[0]//2
     cx = shape[1]//2
-    ys, xs = xp.meshgrid(xp.arange(shape[0]), xp.arange(shape[1]))
+    ys, xs = xp.meshgrid(xp.arange(shape[0]), xp.arange(shape[1]), indexing='ij')
     result = xp.zeros(shape, dtype=bool)
     result[np.sqrt((xs - cx)**2 + (ys - cy)**2) < radius] = 1
     return np.fft.fftshift(result)
