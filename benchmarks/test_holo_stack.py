@@ -7,6 +7,28 @@ from libertem.common.backend import set_use_cpu, set_use_cuda
 from libertem_holo.udf import HoloReconstructUDF
 
 
+@pytest.fixture(scope="module")
+def gpu_ctx():
+    d = detect()
+    if not d['cudas'] or not d['has_cupy']:
+        yield None
+    else:
+        ctx = Context.make_with(gpus=1, cpus=0)
+        try:
+            yield ctx
+        finally:
+            ctx.close()
+
+
+@pytest.fixture(scope="module")
+def cpu_ctx():
+    ctx = Context.make_with(gpus=0)
+    try:
+        yield ctx
+    finally:
+        ctx.close()
+
+
 @pytest.mark.benchmark(
     group="stack"
 )
@@ -41,18 +63,19 @@ def test_stack_reconstr_inline(backend, benchmark, lt_ctx, large_holo_data):
 @pytest.mark.parametrize(
     'backend', ['numpy', 'cupy'],
 )
-@pytest.mark.parametrize(
-    'out_shape', [(1024, 1024), (512, 512), (256, 256)],
-)
-def test_stack_reconstr_parallel(backend, out_shape, benchmark, large_holo_data):
-    path, ds = large_holo_data
+def test_stack_reconstr_parallel(
+    backend, benchmark, large_holo_data, gpu_ctx, cpu_ctx
+):
+    path, _ = large_holo_data
+    out_shape = (1024, 1024)
     if backend == 'cupy':
-        d = detect()
-        if not d['cudas'] or not d['has_cupy']:
+        if gpu_ctx is None:
             pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
-        ctx = Context.make_with(gpus=1, cpus=0)
+        ctx = gpu_ctx
     else:
-        ctx = Context.make_with(gpus=0)
+        ctx = cpu_ctx
+
+    ds = ctx.load("npy", str(path))
 
     with ctx:
         udf = HoloReconstructUDF.with_default_aperture(

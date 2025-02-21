@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 from libertem.api import Context
 from libertem.executor.inline import InlineJobExecutor
+from libertem.utils.devices import detect
+from sparseconverter import for_backend, NUMPY
 
 
 @pytest.fixture
@@ -46,6 +48,11 @@ def holo_data():
 
 @pytest.fixture
 def large_holo_data(tmpdir, lt_ctx):
+    d = detect()
+    if not d['cudas'] or not d['has_cupy']:
+        xp = np
+    else:
+        import cupy as xp
     from libertem_holo.base.generate import hologram_frame
     npy_ds_path = tmpdir.join('large_holo.npy')
 
@@ -69,7 +76,10 @@ def large_holo_data(tmpdir, lt_ctx):
 
     for i in range(ny):
         for j in range(nx):
-            holo[j, i, :, :] = hologram_frame(np.ones((sy, sx)), phase_ref[j, i, :, :])
+            holo[j, i, :, :] = for_backend(
+                hologram_frame(np.ones((sy, sx)), phase_ref[j, i, :, :], xp=xp),
+                NUMPY
+            )
 
     with open(npy_ds_path, 'wb') as f:
         np.save(f, holo)
