@@ -4,6 +4,7 @@ from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import get_phase
+from libertem_holo.base.filters import butterworth_disk, butterworth_line
 
 
 @pytest.mark.with_numba
@@ -62,3 +63,42 @@ def test_params_from_hologram(backend: str, holo_data, line_filter_width) -> Non
         line_filter_width=line_filter_width,
         xp=xp,
     )
+
+
+def test_butterworth_disk_cpu_gpu_equiv():
+    d = detect()
+    if not d['cudas'] or not d['has_cupy']:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+
+    import cupy as cp
+    disk_gpu = butterworth_disk(shape=(4096, 4096), radius=128.0, order=12, xp=cp)
+    disk_cpu = butterworth_disk(shape=(4096, 4096), radius=128.0, order=12, xp=np)
+
+    assert np.allclose(disk_gpu.get(), disk_cpu)
+
+
+def test_butterworth_line_cpu_gpu_equiv():
+    d = detect()
+    if not d['cudas'] or not d['has_cupy']:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+
+    import cupy as cp
+
+    line_cpu = butterworth_line(
+        shape=(4096, 4096),
+        width=3,
+        sb_position=(100.1, 100),
+        length_ratio=0.9,
+        order=12,
+        xp=np,
+    )
+    line_gpu = butterworth_line(
+        shape=(4096, 4096),
+        width=3,
+        sb_position=(100.1, 100),
+        length_ratio=0.9,
+        order=12,
+        xp=cp,
+    )
+
+    assert np.allclose(line_gpu.get(), line_cpu)

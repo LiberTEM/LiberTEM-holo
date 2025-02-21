@@ -38,7 +38,6 @@ try:
 except ImportError:
     cp = None
 import numpy as np
-from numpy.fft import fft2
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from sparseconverter import NUMPY, for_backend
@@ -52,6 +51,7 @@ XPType = Any  # Union[Module("numpy"), Module("cupy")]
 def freq_array(
     shape: tuple[int, int],
     sampling: tuple[float, float] = (1.0, 1.0),
+    xp=np,
 ) -> np.ndarray:
     """Generate a frequency array.
 
@@ -67,10 +67,10 @@ def freq_array(
         Array of the frequencies.
 
     """
-    f_freq_1d_y = np.fft.fftfreq(shape[0], sampling[0])
-    f_freq_1d_x = np.fft.fftfreq(shape[1], sampling[1])
-    f_freq_mesh = np.meshgrid(f_freq_1d_x, f_freq_1d_y)
-    return np.hypot(f_freq_mesh[0], f_freq_mesh[1])
+    f_freq_1d_y = xp.fft.fftfreq(shape[0], sampling[0])
+    f_freq_1d_x = xp.fft.fftfreq(shape[1], sampling[1])
+    f_freq_mesh = xp.meshgrid(f_freq_1d_x, f_freq_1d_y)
+    return xp.hypot(f_freq_mesh[0], f_freq_mesh[1])
 
 
 def get_slice_fft(
@@ -86,6 +86,15 @@ def get_slice_fft(
     x_min = int(sx / 2 - ox / 2)
     x_max = int(sx / 2 + ox / 2)
     return (slice(y_min, y_max), slice(x_min, x_max))
+
+
+def _hard_disk_aperture(shape: tuple[int, int], radius: float, xp=np):
+    cy = shape[0]//2
+    cx = shape[1]//2
+    ys, xs = xp.meshgrid(xp.arange(shape[0]), xp.arange(shape[1]))
+    result = xp.zeros(shape, dtype=bool)
+    result[np.sqrt((xs - cx)**2 + (ys - cy)**2) < radius] = 1
+    return np.fft.fftshift(result)
 
 
 def estimate_sideband_position(
@@ -115,17 +124,16 @@ def estimate_sideband_position(
     Tuple of the sideband position (y, x), referred to the unshifted FFT.
 
     """
-    from .filters import disk_aperture
     sb_position = (0, 0)
 
-    f_freq = freq_array(holo_data.shape, holo_sampling)
+    f_freq = freq_array(holo_data.shape, holo_sampling, xp=xp)
 
     # If aperture radius of centerband is not given, it will be set to 5 % of
     # the Nyquist frequency.
     if central_band_mask_radius is None:
         central_band_mask_radius = 1 / 20.0 * np.max(f_freq)
 
-    aperture = disk_aperture(
+    aperture = _hard_disk_aperture(
         holo_data.shape,
         central_band_mask_radius,
         xp=xp,
@@ -135,7 +143,7 @@ def estimate_sideband_position(
     aperture_central_band = np.subtract(1.0, aperture)
     # imitates 0
 
-    fft_holo = fft2(holo_data) / np.prod(holo_data.shape)
+    fft_holo = xp.fft.fft2(holo_data) / np.prod(holo_data.shape)
     fft_filtered = fft_holo * aperture_central_band
 
     # Sideband position in pixels referred to unshifted FFT
@@ -275,7 +283,12 @@ class HoloParams(typing.NamedTuple):
         fft_slice = get_slice_fft(out_shape, hologram.shape)
 
         #  Disk aperture
-        aperture = butterworth_disk(hologram.shape, radius=sb_size, order=20)
+        aperture = butterworth_disk(
+            hologram.shape,
+            radius=sb_size,
+            order=20,
+            xp=xp,
+        )
 
         sb_position_int = tuple(
             int(c)
@@ -292,9 +305,9 @@ class HoloParams(typing.NamedTuple):
                 ),
                 length_ratio=line_filter_length,
                 order=2,
+                xp=xp,
             )
-            aperture = np.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
-        aperture = xp.asarray(aperture)
+            aperture = xp.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
 
         return cls(
             sb_size=sb_size,
