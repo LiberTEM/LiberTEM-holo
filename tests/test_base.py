@@ -71,8 +71,8 @@ def test_butterworth_disk_cpu_gpu_equiv():
         pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
 
     import cupy as cp
-    disk_gpu = butterworth_disk(shape=(512, 512), radius=128.0, order=12, xp=cp)
-    disk_cpu = butterworth_disk(shape=(512, 512), radius=128.0, order=12, xp=np)
+    disk_gpu = butterworth_disk(shape=(512, 511), radius=128.0, order=12, xp=cp)
+    disk_cpu = butterworth_disk(shape=(512, 511), radius=128.0, order=12, xp=np)
 
     assert np.allclose(disk_gpu.get(), disk_cpu)
 
@@ -85,7 +85,7 @@ def test_butterworth_line_cpu_gpu_equiv():
     import cupy as cp
 
     line_cpu = butterworth_line(
-        shape=(512, 512),
+        shape=(512, 511),
         width=3,
         sb_position=(100.1, 100),
         length_ratio=0.9,
@@ -93,7 +93,7 @@ def test_butterworth_line_cpu_gpu_equiv():
         xp=np,
     )
     line_gpu = butterworth_line(
-        shape=(512, 512),
+        shape=(512, 511),
         width=3,
         sb_position=(100.1, 100),
         length_ratio=0.9,

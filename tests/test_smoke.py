@@ -60,3 +60,22 @@ def test_phase_offset_happy_case(backend: str, holo_data) -> None:
         phase_ref.reshape((-1, phase_ref.shape[2], phase_ref.shape[3])),
         xp=xp
     )
+
+
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+def test_hard_aperture_disk_non_square(backend: str) -> None:
+    if backend == "cupy":
+        d = detect()
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
+    from libertem_holo.base.utils import _hard_disk_aperture
+
+    aperture = _hard_disk_aperture((512, 511), radius=7, xp=xp)
+    assert aperture.shape == (512, 511)
