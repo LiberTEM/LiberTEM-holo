@@ -93,12 +93,12 @@ def _butterworth_disk_kernel(y, x, cy, cx, radius, order):
     return 1/math.sqrt(1 + math.pow((d/radius), 2*order))
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, parallel=True)
 def _butterworth_disk_cpu(shape: tuple[int, int], radius: float, order: int = 12):
     result = np.zeros(shape, dtype=np.float32)
     cy = shape[0]/2
     cx = shape[1]/2
-    for y in range(shape[0]):
+    for y in numba.prange(shape[0]):
         for x in range(shape[1]):
             result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
     return result
@@ -452,13 +452,13 @@ def _butterworth_line_kernel(
     return 1 / math.sqrt(1 + math.pow((dist/width), 2*order))
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True, parallel=True)
 def _butterworth_line_cpu(shape, width, sb_position, length_ratio=0.9, order=12):
     result = np.zeros(shape, dtype=np.float32)
     cy = shape[0] / 2 - 1
     cx = shape[1] / 2 - 1
 
-    for y in range(shape[0]):
+    for y in numba.prange(shape[0]):
         for x in range(shape[1]):
             result[y, x] = _butterworth_line_kernel(
                 y, x, cy, cx,
