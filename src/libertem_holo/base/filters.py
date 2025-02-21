@@ -87,6 +87,12 @@ def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=
         return result
 
 
+@numba.njit(cache=True, inline="always")
+def _butterworth_disk_kernel(y, x, cy, cx, radius, order):
+    d = math.sqrt((y-cy)**2 + (x-cx)**2)
+    return 1/math.sqrt(1 + math.pow((d/radius), 2*order))
+
+
 @numba.njit(cache=True)
 def _butterworth_disk_cpu(shape: tuple[int, int], radius: float, order: int = 12):
     result = np.zeros(shape, dtype=np.float32)
@@ -94,8 +100,7 @@ def _butterworth_disk_cpu(shape: tuple[int, int], radius: float, order: int = 12
     cx = shape[1]/2
     for y in range(shape[0]):
         for x in range(shape[1]):
-            d = np.sqrt((y-cy)**2 + (x-cx)**2)
-            result[y, x] = 1/np.sqrt(1 + np.pow((d/radius), 2*order))
+            result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
     return result
 
 
@@ -105,8 +110,7 @@ def _butterworth_disk_gpu(result, radius: float, order: int = 12):
     cy = result.shape[0]/2
     cx = result.shape[1]/2
     if x < result.shape[1] and y < result.shape[0]:
-        d = math.sqrt((y-cy)**2 + (x-cx)**2)
-        result[y, x] = 1/math.sqrt(1 + math.pow((d/radius), 2*order))
+        result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
 
 
 def highpass(img: np.ndarray, sigma: float = 2) -> np.ndarray:
@@ -410,37 +414,60 @@ def central_line_filter(
         return dest
 
 
-@numba.njit
-def _butterworth_line_cpu(shape, width, sb_position, length_ratio=0.9, order=12):
-    result = np.zeros(shape, dtype=np.float32)
-    cy = shape[0] / 2 - 1
-    cx = shape[1] / 2 - 1
+@numba.njit(cache=True, inline="always")
+def _butterworth_line_kernel(
+    y, x, cy, cx,
+    shape,
+    width,
+    sb_position,
+    length_ratio,
+    order,
+):
     a = (sb_position[0] - cy) / (sb_position[1] - cx)
     b = 1
 
     # determine starting point:
-    sb_dist = np.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
+    sb_dist = math.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
     length = sb_dist * (1 - length_ratio)
 
-    sb_sel = np.sign(sb_position[0] - cy)
+    if sb_position[0] - cy >= 0:
+        sb_sel = 1
+    else:
+        sb_sel = -1
 
     # shift to starting point
     cy += length * (sb_position[0] - cy) / sb_dist
     cx += length * (sb_position[1] - cx) / sb_dist
 
     c = -1/a
+    x0 = x - cx
+    y0 = y - cy
+    d = y0 - c * x0
+    xc = (d-c)/(a-b)
+
+    if sb_sel * xc < 0:
+        dist = abs(a*x0 - y0 + b)/math.sqrt(a**2 + 1)
+    else:
+        dist = math.sqrt((y-cy-1)**2 + (x-cx)**2)
+    return 1 / math.sqrt(1 + math.pow((dist/width), 2*order))
+
+
+@numba.njit(cache=True)
+def _butterworth_line_cpu(shape, width, sb_position, length_ratio=0.9, order=12):
+    result = np.zeros(shape, dtype=np.float32)
+    cy = shape[0] / 2 - 1
+    cx = shape[1] / 2 - 1
+
     for y in range(shape[0]):
         for x in range(shape[1]):
-            x0 = x - cx
-            y0 = y - cy
-            d = y0 - c * x0
-            xc = (d-c)/(a-b)
-
-            if sb_sel * xc < 0:
-                dist = np.abs(a*x0 - y0 + b)/np.sqrt(a**2 + 1)
-            else:
-                dist = np.sqrt((y-cy-1)**2 + (x-cx)**2)
-            result[y, x] = 1/np.sqrt(1 + np.pow((dist/width), 2*order))
+            result[y, x] = _butterworth_line_kernel(
+                y, x, cy, cx,
+                shape,
+                width,
+                sb_position,
+                length_ratio,
+                order,
+            )
     return 1 - result
 
 
@@ -504,30 +531,11 @@ def _butterworth_line_gpu(
     if x < result.shape[1] and y < result.shape[0]:
         cy = result.shape[0] / 2 - 1
         cx = result.shape[1] / 2 - 1
-        a = (sb_position[0] - cy) / (sb_position[1] - cx)
-        b = 1
-
-        # determine starting point:
-        sb_dist = math.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
-        length = sb_dist * (1 - length_ratio)
-
-        if sb_position[0] - cy >= 0:
-            sb_sel = 1
-        else:
-            sb_sel = -1
-
-        # shift to starting point
-        cy += length * (sb_position[0] - cy) / sb_dist
-        cx += length * (sb_position[1] - cx) / sb_dist
-
-        c = -1/a
-        x0 = x - cx
-        y0 = y - cy
-        d = y0 - c * x0
-        xc = (d-c)/(a-b)
-
-        if sb_sel * xc < 0:
-            dist = abs(a*x0 - y0 + b)/math.sqrt(a**2 + 1)
-        else:
-            dist = math.sqrt((y-cy-1)**2 + (x-cx)**2)
-        result[y, x] = 1/math.sqrt(1 + math.pow((dist/width), 2*order))
+        result[y, x] = _butterworth_line_kernel(
+            y, x, cy, cx,
+            result.shape,
+            width,
+            sb_position,
+            length_ratio,
+            order,
+        )
