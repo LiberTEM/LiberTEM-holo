@@ -389,6 +389,7 @@ def phase_offset_correction(
     wtype: Literal['weighted'] | Literal['unweighted'] = 'weighted',
     threshold: float = 1e-12,
     return_stack: bool = False,
+    xp=np,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """
     This part of the code is to correct for the phase drift in the holograms due
@@ -426,13 +427,16 @@ def phase_offset_correction(
     return_stack
         Also returns a stack shaped like the input stack, where the phase
         offset correction is applied.
+
+    xp
+        Either numpy or cupy for GPU support
     """
     R = aligned_stack.shape[0]
-    ph_diff = np.zeros((R, R), dtype=complex)
+    ph_diff = xp.zeros((R, R), dtype=complex)
     d1 = aligned_stack.shape[1]
     d2 = aligned_stack.shape[2]
 
-    result_stack = np.zeros_like(aligned_stack)
+    result_stack = xp.zeros_like(aligned_stack)
 
     for r1 in range(R):
         for r2 in range(r1+1, R):
@@ -448,20 +452,25 @@ def phase_offset_correction(
     ph_diff[idx] = ph_diff[idx]/np.abs(ph_diff[idx])
     degree = np.sum(weights, axis=1)
     laplacian = np.diag(degree) - ph_diff * weights
-    _, phases = eigsh(laplacian, 1, which='SM')
+    # because cupyx.scipy.sparse.linalg.eigsh doesn't support which='SM',
+    # we transfer to CPU here (see also https://github.com/cupy/cupy/issues/4692):
+    _, phases = eigsh(for_backend(laplacian, NUMPY), 1, which='SM')
+    phases = xp.asarray(phases)
     idx = np.abs(phases) > threshold
     phases[idx] = phases[idx]/np.abs(phases[idx])
     phases[~idx] = 1
     phases *= phases[0].conj()
-    result = np.zeros((d1, d2), dtype=complex)
-    count = np.zeros((d1, d2))
+    result = xp.zeros((d1, d2), dtype=complex)
+    count = xp.zeros((d1, d2))
     for r in range(R):
         result[:, :] += phases[r].conj() * aligned_stack[r]
         count[:, :] += np.abs(aligned_stack[r]) > threshold
         if return_stack:
             result_stack[r] = phases[r].conj() * aligned_stack[r]
 
-    np.divide(result, count, where=(count != 0), out=result)
+    mask = count != 0
+    result[mask] = result[mask] / count[mask]
+
     if return_stack:
         return result, result_stack
     else:
