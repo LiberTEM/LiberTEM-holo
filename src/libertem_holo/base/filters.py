@@ -51,6 +51,24 @@ def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarra
 
 
 def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=np):
+    """Generate a filered disk-shaped aperture.
+
+    The edges are filtered with a butterworth filter of the given order.
+
+    Parameters
+    ----------
+    shape
+        output shape of the aperture
+
+    radius
+        radius in pixels
+
+    order
+        order of the butterworth filter
+
+    xp
+        Either numpy or cupy
+    """
     if xp is np:
         return _butterworth_disk_cpu(shape, radius, order)
     else:
@@ -434,12 +452,23 @@ def butterworth_line(
     order: int = 12,
     xp=np
 ):
-    """
-    shape: output shape of the aperture
+    """Generate a line filter.
 
-    width: width of the line in pixels
+    This is useful to remove fresnel fringes.
 
-    order: order of the butterworth filter
+    Parameters
+    ----------
+    shape
+        output shape of the aperture
+
+    width
+        width of the line in pixels
+
+    order
+        order of the butterworth filter
+
+    xp
+        Either numpy or cupy
     """
     if xp is np:
         return _butterworth_line_cpu(
