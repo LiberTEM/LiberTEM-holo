@@ -3,7 +3,7 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
-from libertem_holo.base.reconstr import get_phase
+from libertem_holo.base.reconstr import get_phase, phase_offset_correction
 from libertem_holo.base.filters import butterworth_disk, butterworth_line
 
 
@@ -102,3 +102,50 @@ def test_butterworth_line_cpu_gpu_equiv():
     )
 
     assert np.allclose(line_gpu.get(), line_cpu)
+
+
+@pytest.mark.with_numba
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
+    from libertem.io.dataset.memory import MemoryDataSet
+    from libertem_holo.base.filters import disk_aperture
+    from libertem_holo.udf.reconstr import HoloReconstructUDF
+    from libertem.common.backend import set_use_cpu, set_use_cuda
+    holo, ref, phase_ref, slice_crop = holo_data
+
+    if backend == "cupy":
+        d = detect()
+        cudas = detect()["cudas"]
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
+    # Prepare LT datasets and do reconstruction
+    dataset_holo = MemoryDataSet(data=holo, num_partitions=2, sig_dims=2)
+
+    sb_position = [11, 6]
+    sb_size = 6.26498204
+
+    out_shape = dataset_holo.shape.sig
+    aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
+    holo_udf = HoloReconstructUDF(out_shape=out_shape,
+                                  sb_position=sb_position,
+                                  aperture=aperture)
+    try:
+        if backend == "cupy":
+            set_use_cuda(cudas[0])
+        w_holo = lt_ctx.run_udf(dataset=dataset_holo, udf=holo_udf)["wave"].data
+    finally:
+        set_use_cpu(0)
+
+    w_holo = w_holo.reshape((-1,) + tuple(out_shape))
+
+    # pick two holograms and align the phase offset:
+    averaged, stack = phase_offset_correction(
+        w_holo[:2], return_stack=True, xp=xp,
+    )

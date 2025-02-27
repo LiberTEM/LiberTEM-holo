@@ -432,6 +432,17 @@ def phase_offset_correction(
         Either numpy or cupy for GPU support
     """
     R = aligned_stack.shape[0]
+    orig_R = R
+
+    # Otherwise eigsh is unhappy
+    if R <= 2:
+        # Not sure how broadcasting works here, but try to be equivalent
+        new_shape = (3,) + aligned_stack.shape[1:]
+        new_aligned_stack = np.zeros_like(aligned_stack, shape=new_shape)
+        new_aligned_stack[:R, :, :] = aligned_stack
+        R = 3
+        aligned_stack = new_aligned_stack
+
     ph_diff = xp.zeros((R, R), dtype=complex)
     d1 = aligned_stack.shape[1]
     d2 = aligned_stack.shape[2]
@@ -472,6 +483,6 @@ def phase_offset_correction(
     result[mask] = result[mask] / count[mask]
 
     if return_stack:
-        return result, result_stack
+        return result, result_stack[:orig_R]
     else:
         return result, None
