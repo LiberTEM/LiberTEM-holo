@@ -230,7 +230,7 @@ class HoloParams(typing.NamedTuple):
         cls,
         hologram: np.ndarray,
         *,
-        central_band_mask_radius: int,
+        central_band_mask_radius: float | None = None,
         out_shape: tuple = None,
         line_filter_length: float = 0.9,
         line_filter_width: float | None = 20,
