@@ -431,6 +431,7 @@ def phase_offset_correction(
     xp
         Either numpy or cupy for GPU support
     """
+    aligned_stack = xp.asarray(aligned_stack)
     R = aligned_stack.shape[0]
     orig_R = R
 
