@@ -63,16 +63,17 @@ def _plot_cross_correlate(*, shifted_corr, pos, plot_title, src, target):
 def cross_correlate(
     src,
     target,
-    plot=False,
-    plot_title="",
+    plot: bool = False,
+    plot_title: str = "",
     normalization: Literal['phase'] | None = 'phase',
     upsample_factor=1,
     xp=np,
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Rigid image registration by cross-correlation.
 
-    Supports optional with optional phase normalization. Some parts
-    are based on the `phase_cross_correlation` function of scikit-image.
+    Supports optional phase normalization. Based on the
+    `phase_cross_correlation` function of scikit-image, but with added GPU
+    support via cupy, and some debugging facilities built in.
 
     Parameters
     ==========
@@ -131,11 +132,11 @@ def cross_correlate(
         # Center of output array at dftshift + 1
         dftshift = xp.fix(upsampled_region_size / 2.0)
         # Matrix multiply DFT around the current shift estimate
-        sample_region_offset = dftshift - shift * upsample_factor
+        sample_region_offset = dftshift - np.round(shift * upsample_factor)
         cross_correlation = _upsampled_dft(
             image_product.conj(),
             frequencies,
-            upsample_factor,
+            upsampled_region_size,
             sample_region_offset,
         ).conj()
         # Locate maximum and map back to original pixel grid
