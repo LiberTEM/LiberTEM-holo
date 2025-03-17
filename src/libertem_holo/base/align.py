@@ -47,6 +47,17 @@ def _upsampled_dft(
     return upsampled
 
 
+def _plot_cross_correlate(*, shifted_corr, pos, plot_title, src, target):
+    fig, ax = plt.subplots(3, sharex=True, sharey=True)
+    ax[0].imshow(for_backend(shifted_corr, NUMPY))
+    ax[0].plot(pos[1], pos[0], 'x', color='red')
+    ax[1].imshow(for_backend(src, NUMPY))
+    ax[1].plot(pos[1], pos[0], 'x', color='red')
+    ax[2].imshow(for_backend(target, NUMPY))
+    ax[2].plot(pos[1], pos[0], 'x', color='red')
+    fig.suptitle(plot_title)
+
+
 def cross_correlate(
     src,
     target,
@@ -141,7 +152,18 @@ def cross_correlate(
         shift = tuple(float(for_backend(x, NUMPY)) for x in shift)
 
     # for "backwards compat", return correlation maxima and not shift
-    return xp.array(shift) + midpoint, shifted_corr
+    pos = xp.array(shift) + midpoint
+
+    if plot:
+        _plot_cross_correlate(
+            shifted_corr=shifted_corr,
+            pos=pos,
+            plot_title=plot_title,
+            src=src,
+            target=target,
+        )
+
+    return pos, shifted_corr
 
 
 def gradient(image: np.ndarray, scale=1):
@@ -195,12 +217,16 @@ class BiprismDeletionCorrelator(Correlator):
     Cross correlation on low magnification while removing biprism.
     """
     def __init__(
-            self,
-            mask: np.ndarray,
-            xp: typing.Any,
+        self,
+        mask: np.ndarray,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        xp: typing.Any = np,
     ) -> None:
         self._mask = mask
         self._xp = xp
+        self._upsample_factor = upsample_factor
+        self._normalization = normalization
 
     def prepare_input(
         self,
@@ -217,7 +243,14 @@ class BiprismDeletionCorrelator(Correlator):
         moving_image: typing.Any,
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
-        pos, corrmap = cross_correlate(ref_image, moving_image, xp=self._xp, plot=plot)
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            upsample_factor=self._upsample_factor,
+            normalization=self._normalization,
+        )
         pos_rel = (
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
@@ -260,10 +293,14 @@ class BrightFieldCorrelator(Correlator):
     def __init__(
         self,
         holoparams: HoloParams,
-        xp: typing.Any,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
+        self._normalization = normalization
+        self._upsample_factor = upsample_factor
 
     def prepare_input(
         self,
@@ -276,7 +313,7 @@ class BrightFieldCorrelator(Correlator):
             orig_shape=img.shape,
             length_ratio=0.95,
             width=20
-            )
+        )
         aperture = disk_aperture(out_shape=holoparams.out_shape, radius=holoparams.sb_size//3)
         slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
         line_filter = line_filter[slice_fft]
@@ -299,7 +336,14 @@ class BrightFieldCorrelator(Correlator):
         moving_image: typing.Any,
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
-        pos, corrmap = cross_correlate(ref_image, moving_image, xp=self._xp, plot=plot)
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            upsample_factor=self._upsample_factor,
+            normalization=self._normalization,
+        )
         pos_rel = (
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
@@ -315,10 +359,14 @@ class PhaseImageCorrelator(Correlator):
     def __init__(
         self,
         holoparams: HoloParams,
-        xp: typing.Any,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
+        self._normalization = normalization
+        self._upsample_factor = upsample_factor
 
     def prepare_input(
         self,
@@ -334,7 +382,14 @@ class PhaseImageCorrelator(Correlator):
         moving_image: typing.Any,
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
-        pos, corrmap = cross_correlate(ref_image, moving_image, xp=self._xp, plot=plot)
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            normalization=self._normalization,
+            upsample_factor=self._upsample_factor,
+        )
         pos_rel = (
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
@@ -350,10 +405,14 @@ class GradAngleCorrelator(Correlator):
     def __init__(
         self,
         holoparams: HoloParams,
-        xp: typing.Any,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
+        self._normalization = normalization
+        self._upsample_factor = upsample_factor
 
     def prepare_input(
         self,
@@ -369,7 +428,14 @@ class GradAngleCorrelator(Correlator):
         moving_image: typing.Any,
         plot: bool,
     ) -> tuple[tuple[float, float], tuple[float, float]]:
-        pos, corrmap = cross_correlate(ref_image, moving_image, xp=self._xp, plot=plot)
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            upsample_factor=self._upsample_factor,
+            normalization=self._normalization,
+        )
         pos_rel = (
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
@@ -385,7 +451,7 @@ class GradXYCorrelator(Correlator):
     def __init__(
         self,
         holoparams: HoloParams,
-        xp: typing.Any,
+        xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
@@ -418,10 +484,16 @@ class GradXYCorrelator(Correlator):
         ref_image_x, ref_image_y = ref_image
         moving_image_x, moving_image_y = moving_image
         pos_x, corrmap_x = cross_correlate(
-            ref_image_x, moving_image_x, xp=xp, plot=plot
+            ref_image_x,
+            moving_image_x,
+            xp=xp,
+            plot=plot,
         )
         pos_y, corrmap_y = cross_correlate(
-            ref_image_y, moving_image_y, xp=xp, plot=plot
+            ref_image_y,
+            moving_image_y,
+            xp=xp,
+            plot=plot,
         )
         corrmap = corrmap_x + corrmap_y
         pos = xp.unravel_index(xp.argmax(corrmap), corrmap.shape)
