@@ -32,12 +32,12 @@ from sparseconverter import for_backend, NUMPY
 )
 def test_cross_correlation(backend, upsample_factor, sig_shape, shift, crop, norm):
     if backend == "cupy":
-        from cupyx.scipy import ndimage as ni
         d = detect()
         if not d["cudas"] or not d["has_cupy"]:
             pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
         import cupy as cp
         xp = cp
+        from cupyx.scipy import ndimage as ni
     else:
         xp = np
         from scipy import ndimage as ni
