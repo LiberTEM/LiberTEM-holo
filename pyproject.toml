@@ -24,6 +24,7 @@ dependencies = [
     "numba>=0.61;python_version >= '3.14'",  
     "scipy",
     "sparse",
+    "sparseconverter",
     'scikit-image',
 ]
 keywords = ["electron microscopy", "holography", "off-axis holography"]
