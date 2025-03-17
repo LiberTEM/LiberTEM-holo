@@ -5,6 +5,7 @@ try:
 except ImportError:
     cp = None
 import numpy as np
+import numpy.typing as npt
 import matplotlib.pyplot as plt
 from sparseconverter import NUMPY, for_backend
 from scipy.ndimage import gaussian_filter
@@ -16,8 +17,49 @@ from libertem_holo.base.filters import central_line_filter, disk_aperture
 log = logging.getLogger(__name__)
 
 
-def cross_correlate(src, target, xp=np, plot=False, plot_title=""):
+def _upsampled_dft(
+    corrspecs: npt.NDArray,
+    frequencies: tuple[np.ndarray, np.ndarray],
+    upsampled_region_size: int,
+    axis_offsets: tuple[float, float],
+) -> np.ndarray:
     """
+    From https://github.com/LiberTEM/LiberTEM-blobfinder, which is itself
+    heavily adapted from skimage.registration._phase_cross_correlation.py
+    which is itself based on code by Manuel Guizar released initially under a
+    BSD 3-Clause license @ https://www.mathworks.com/matlabcentral/fileexchange/18401
+
+    :meta private:
+    """
+    im2pi = -1j * 2 * np.pi
+    upsampled = corrspecs
+    for (ax_freq, ax_offset) in zip(frequencies[::-1], axis_offsets[::-1]):
+        kernel = np.linspace(
+            -ax_offset,
+            (-ax_offset + upsampled_region_size - 1),
+            num=int(upsampled_region_size),
+        )
+        kernel = np.exp(kernel[:, None] * ax_freq * im2pi, dtype=np.complex64)
+        # Equivalent to:
+        #   data[i, j, k] = kernel[i, :] @ data[j, k].T
+        upsampled = np.tensordot(kernel, upsampled, axes=(1, -1))
+    return upsampled
+
+
+def cross_correlate(
+    src,
+    target,
+    plot=False,
+    plot_title="",
+    normalization='phase',
+    upsample_factor=20,
+    xp=np,
+):
+    """Rigid image registration by cross-correlation.
+
+    Supports optional with optional phase normalization. Some parts
+    are based on the `phase_cross_correlation` function of scikit-image.
+
     Parameters
     ==========
     src:
@@ -34,27 +76,63 @@ def cross_correlate(src, target, xp=np, plot=False, plot_title=""):
     src_freq = xp.fft.fftn(src)
     target_freq = xp.fft.fftn(target)
     image_product = src_freq * target_freq.conj()
+
+    if normalization == 'phase':
+        eps = np.finfo(image_product.real.dtype).eps
+        image_product /= np.maximum(np.abs(image_product), 100 * eps)
+    elif normalization is not None:
+        raise ValueError(f"unknown normalization {normalization}")
+
     cross_correlation = xp.fft.ifftn(image_product)
     shifted_corr = xp.fft.fftshift(np.abs(cross_correlation))
-    pos = xp.unravel_index(
+
+    maxima = xp.unravel_index(
         xp.argmax(shifted_corr),
         shifted_corr.shape
     )
-    # FIXME: sparseconverter needs fixes for this I think?
-    if xp is cp:
-        pos = tuple(float(for_backend(x, NUMPY)) for x in pos)
+    float_dtype = image_product.real.dtype
+    midpoint = xp.array([xp.fix(axis_size / 2) for axis_size in src_freq.shape])
+    shift = xp.stack(maxima).astype(float_dtype, copy=False)
+    shift -= midpoint
+
+    # estimate sublixel shifts using the upsampled DFT method:
+    if upsample_factor > 1:
+        frequencies = (
+            xp.fft.fftfreq(src.shape[0], upsample_factor),
+            xp.fft.fftfreq(src.shape[1], upsample_factor),
+        )
+
+        # Initial shift estimate in upsampled grid
+        upsample_factor = xp.array(upsample_factor, dtype=float_dtype)
+        shift = xp.round(shift * upsample_factor) / upsample_factor
+        upsampled_region_size = xp.ceil(upsample_factor * 1.5)
+        # Center of output array at dftshift + 1
+        dftshift = xp.fix(upsampled_region_size / 2.0)
+        # Matrix multiply DFT around the current shift estimate
+        sample_region_offset = dftshift - shift * upsample_factor
+        cross_correlation = _upsampled_dft(
+            image_product.conj(),
+            frequencies,
+            upsample_factor,
+            sample_region_offset,
+        ).conj()
+        # Locate maximum and map back to original pixel grid
+        maxima = xp.unravel_index(
+            xp.argmax(xp.abs(cross_correlation)), cross_correlation.shape
+        )
+
+        maxima = xp.stack(maxima).astype(float_dtype, copy=False)
+        maxima -= dftshift
+
+        shift += maxima / upsample_factor
+
+    if xp is np:
+        shift = tuple(float(x) for x in shift)
     else:
-        pos = tuple(float(x) for x in pos)
-    if plot:
-        fig, ax = plt.subplots(3, sharex=True, sharey=True)
-        ax[0].imshow(for_backend(shifted_corr, NUMPY))
-        ax[0].plot(pos[1], pos[0], 'x', color='red')
-        ax[1].imshow(for_backend(src, NUMPY))
-        ax[1].plot(pos[1], pos[0], 'x', color='red')
-        ax[2].imshow(for_backend(target, NUMPY))
-        ax[2].plot(pos[1], pos[0], 'x', color='red')
-        fig.suptitle(plot_title)
-    return pos, shifted_corr
+        shift = tuple(float(for_backend(x, NUMPY)) for x in shift)
+
+    # for "backwards compat", return correlation maxima and not shift
+    return xp.array(shift) + midpoint, shifted_corr
 
 
 def gradient(image: np.ndarray, scale=1):
@@ -171,9 +249,9 @@ class BrightFieldCorrelator(Correlator):
     Cross correlation on bright field of hologram.
     """
     def __init__(
-            self,
-            holoparams: HoloParams,
-            xp: typing.Any,
+        self,
+        holoparams: HoloParams,
+        xp: typing.Any,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
@@ -338,10 +416,10 @@ class GradXYCorrelator(Correlator):
         )
         corrmap = corrmap_x + corrmap_y
         pos = xp.unravel_index(xp.argmax(corrmap), corrmap.shape)
-        if xp is cp:
-            pos = tuple(float(for_backend(x, NUMPY)) for x in pos)
-        else:
+        if xp is np:
             pos = tuple(float(x) for x in pos)
+        else:
+            pos = tuple(float(for_backend(x, NUMPY)) for x in pos)
         pos_rel = (
             pos[0] - (moving_image_y.shape[0]) // 2,
             pos[1] - (moving_image_y.shape[1]) // 2,
