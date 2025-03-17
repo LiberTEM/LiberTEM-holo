@@ -1,4 +1,5 @@
 import typing
+from typing import Literal
 
 try:
     import cupy as cp
@@ -51,8 +52,8 @@ def cross_correlate(
     target,
     plot=False,
     plot_title="",
-    normalization='phase',
-    upsample_factor=20,
+    normalization: Literal['phase'] | None = 'phase',
+    upsample_factor=1,
     xp=np,
 ):
     """Rigid image registration by cross-correlation.
@@ -62,11 +63,19 @@ def cross_correlate(
 
     Parameters
     ==========
-    src:
-        the static image
+    src
+        The static image, either a numpy or cupy array
+        (if cupy, you should set `xp=cp`, too)
 
-    target:
-        the moving image
+    target
+        The moving image, either a numpy or cupy array
+        (if cupy, you should set `xp=cp`, too)
+
+    normalization
+        'phase' or None, same as for `phase_cross_correlation`
+
+    upsample_factor
+        Subpixel scaling factor, same as for `phase_cross_correlation`
 
     xp
         numpy or cupy
