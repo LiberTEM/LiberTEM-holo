@@ -89,7 +89,9 @@ def cross_correlate(
         'phase' or None, same as for `phase_cross_correlation`
 
     upsample_factor
-        Subpixel scaling factor, same as for `phase_cross_correlation`
+        Subpixel scaling factor, same as for `phase_cross_correlation`.
+        Note that we test with a factor of up to 10; with larger values
+        the results may not improve.
 
     xp
         numpy or cupy

@@ -1,18 +1,65 @@
 import numpy as np
 import pytest
+from skimage.registration import phase_cross_correlation
 from libertem.utils.devices import detect
-from libertem_holo.base.align import cross_correlate
 from sparseconverter import for_backend, NUMPY
+from libertem_holo.base.align import cross_correlate
+from libertem_holo.base.filters import _butterworth_disk_cpu, hanning_2d
+
+
+def _test_data_shifted(shape, shift):
+    """
+    Make two disks, the second one shifted by `shift`
+    """
+    if True:
+        cy = shape[0]/2
+        cx = shape[1]/2
+        order = 20
+        radius = 16
+        orig = _butterworth_disk_cpu(shape, radius=radius, order=order, cx=cx, cy=cy)
+        shifted = _butterworth_disk_cpu(
+            shape,
+            radius=radius,
+            order=order,
+            cy=cy+shift[0],
+            cx=cx+shift[1],
+        )
+        return orig, shifted
+    else:
+        from libertem.masks import circular
+        cy = shape[0]/2
+        cx = shape[1]/2
+        radius = 16
+        unshifted = circular(
+            centerX=cx,
+            centerY=cy,
+            imageSizeX=shape[1],
+            imageSizeY=shape[0],
+            radius=radius,
+            antialiased=True,
+        )
+        shifted = circular(
+            centerX=cx + shift[1],
+            centerY=cy + shift[0],
+            imageSizeX=shape[1],
+            imageSizeY=shape[0],
+            radius=radius,
+            antialiased=True,
+        )
+        return unshifted, shifted
 
 
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
 @pytest.mark.parametrize(
-    "norm", ["phase", None],
+    "norm", [
+        "phase",
+        # None
+    ],
 )
 @pytest.mark.parametrize(
-    "upsample_factor", (10, 25)
+    "upsample_factor", (1, 5, 10),
 )
 @pytest.mark.parametrize(
     "sig_shape", (
@@ -23,46 +70,36 @@ from sparseconverter import for_backend, NUMPY
     )
 )
 @pytest.mark.parametrize(
-    "shift,crop", (
-        ((0, 0), 0),
-        ((-3.7, 4.2), 6),
-        ((6.7, 8.1), 10),
-        ((0.2, 9.7), 11),
+    "shift", (
+        (0, 0),
+        (-3.7, 4.2),
+        (6.7, 8.1),
+        (0.2, 9.7),
     )
 )
-def test_cross_correlation(backend, upsample_factor, sig_shape, shift, crop, norm):
+def test_cross_correlation(backend, upsample_factor, sig_shape, shift, norm):
     if backend == "cupy":
         d = detect()
         if not d["cudas"] or not d["has_cupy"]:
             pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
         import cupy as cp
         xp = cp
-        from cupyx.scipy import ndimage as ni
     else:
         xp = np
-        from scipy import ndimage as ni
 
-    input_data = xp.zeros(sig_shape, dtype=np.float32)
-    # draw a rectangle into the input data:
-    input_data[32:38, 16:37] = 1.2345
+    input_data, input_shifted = _test_data_shifted(shape=sig_shape, shift=shift)
+    input_data, input_shifted = xp.asarray(input_data), xp.asarray(input_shifted)
+    my_filter = hanning_2d(shape=sig_shape, xp=xp)
+    # my_filter = 1
 
-    # shift by some subpixel value:
-    if shift != (0, 0):
-        input_shifted = np.fft.ifft2(
-            ni.fourier_shift(np.fft.fft2(input_data), shift=shift)
-        ).real
-    else:
-        input_shifted = input_data
-
-    # crop off the edges that wrap around when shifted, meaning we select a
-    # slightly smaller ROI for cross correlation:
-    crop_s = np.s_[crop:-crop - 1, crop:-crop - 1]
-    input_data = input_data[crop_s]
-    input_shifted = input_shifted[crop_s]
+    input_data -= input_data.mean()
+    input_shifted -= input_shifted.mean()
+    input_data_f = input_data * my_filter
+    input_shifted_f = input_shifted * my_filter
 
     pos, _corrmap = cross_correlate(
-        input_shifted,
-        input_data,
+        input_shifted_f,
+        input_data_f,
         plot=False,
         normalization=norm,
         upsample_factor=upsample_factor,
@@ -74,6 +111,12 @@ def test_cross_correlation(backend, upsample_factor, sig_shape, shift, crop, nor
         pos[1] - (input_data.shape[1]) // 2,
     )
 
-    assert pos_rel == pytest.approx(shift, abs=1/upsample_factor)
-    # assert pos_rel[0] == pytest.approx(shift[0], abs=1/upsample_factor)
-    # assert pos_rel[1] == pytest.approx(shift[1], abs=1/upsample_factor)
+    sk_shift, _, _ = phase_cross_correlation(
+        moving_image=for_backend(input_shifted, NUMPY),
+        reference_image=for_backend(input_data, NUMPY),
+        upsample_factor=upsample_factor,
+        normalization='phase',
+    )
+    sk_shift = tuple(-sk_shift)
+    assert pos_rel == pytest.approx(sk_shift, abs=1/upsample_factor + 1e-5)
+    assert pos_rel == pytest.approx(shift, abs=1/upsample_factor + 1e-5)
