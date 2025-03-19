@@ -70,7 +70,9 @@ def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=
         Either numpy or cupy
     """
     if xp is np:
-        return _butterworth_disk_cpu(shape, radius, order)
+        cy = shape[0]/2
+        cx = shape[1]/2
+        return _butterworth_disk_cpu(shape, radius, cy, cx, order)
     else:
         import cupy as cp
         result = cp.zeros(shape, dtype=np.float32)
@@ -94,10 +96,14 @@ def _butterworth_disk_kernel(y, x, cy, cx, radius, order):
 
 
 @numba.njit(cache=True, parallel=True)
-def _butterworth_disk_cpu(shape: tuple[int, int], radius: float, order: int = 12):
+def _butterworth_disk_cpu(
+    shape: tuple[int, int],
+    radius: float,
+    cy: float,
+    cx: float,
+    order: int = 12,
+):
     result = np.zeros(shape, dtype=np.float32)
-    cy = shape[0]/2
-    cx = shape[1]/2
     for y in numba.prange(shape[0]):
         for x in range(shape[1]):
             result[y, x] = _butterworth_disk_kernel(y, x, cy, cx, radius, order)
@@ -539,3 +545,7 @@ def _butterworth_line_gpu(
             length_ratio,
             order,
         )
+
+
+def hanning_2d(shape: tuple[int, int], xp=np):
+    return xp.outer(xp.hanning(shape[0]), xp.hanning(shape[1]))
