@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 import typing
-from typing import Literal
+from typing import Literal, NamedTuple
 
 try:
     import cupy as cp
@@ -201,6 +202,12 @@ def is_left(
     return (b[1] - a[1])*(c[0] - a[0]) - (b[0] - a[0])*(c[1] - a[1]) > 0
 
 
+class RegResult(NamedTuple):
+    maximum: tuple[float, float]
+    shift: tuple[float, float]
+    corrmap: np.ndarray
+
+
 class Correlator:
     def prepare_input(
         self,
@@ -213,8 +220,74 @@ class Correlator:
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         raise NotImplementedError()
+
+
+class ImageCorrelator(Correlator):
+    """
+    Cross correlation based image registration with some
+    pre-filtering. Assumes real-space images as input.
+    """
+    def __init__(
+        self,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        hanning: bool = True,
+        binning: int = 1,
+        xp: typing.Any = np,
+    ) -> None:
+        self._xp = xp
+        self._upsample_factor = upsample_factor
+        self._normalization = normalization
+        self._hanning = hanning
+        self._binning = binning
+        self._zoom_factor = 1 / binning
+
+    def prepare_input(
+        self,
+        img: np.ndarray,
+    ) -> typing.Any:
+        xp = self._xp
+        if xp is np:
+            import scipy.ndimage as ni
+        else:
+            import cupyx.scipy.ndimage as ni
+
+        # apply hanning filter:
+        if self._hanning:
+            img = img * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
+
+        # apply binning:
+        if self._zoom_factor != 1:
+            img = ni.zoom(img, self._zoom_factor)
+
+        return img
+
+    def correlate(
+        self,
+        ref_image: typing.Any,
+        moving_image: typing.Any,
+        plot: bool,
+    ) -> RegResult:
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            upsample_factor=self._upsample_factor,
+            normalization=self._normalization,
+        )
+        pos_rel = (
+            pos[0] - (moving_image.shape[0]) // 2,
+            pos[1] - (moving_image.shape[1]) // 2,
+        )
+        if self._binning != 1:
+            pos_rel = (
+                pos_rel[0] / self._zoom_factor,
+                pos_rel[1] / self._zoom_factor,
+            )
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
 
 class BiprismDeletionCorrelator(Correlator):
@@ -247,7 +320,7 @@ class BiprismDeletionCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
             moving_image,
@@ -260,7 +333,7 @@ class BiprismDeletionCorrelator(Correlator):
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
         )
-        return pos, pos_rel
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
     @classmethod
     def plot_get_coords(cls, img, coords_out):
@@ -340,7 +413,7 @@ class BrightFieldCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
             moving_image,
@@ -353,7 +426,7 @@ class BrightFieldCorrelator(Correlator):
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
         )
-        return pos, pos_rel
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
 
 class PhaseImageCorrelator(Correlator):
@@ -386,7 +459,7 @@ class PhaseImageCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
             moving_image,
@@ -399,7 +472,7 @@ class PhaseImageCorrelator(Correlator):
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
         )
-        return pos, pos_rel
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
 
 class GradAngleCorrelator(Correlator):
@@ -432,7 +505,7 @@ class GradAngleCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
             moving_image,
@@ -445,7 +518,7 @@ class GradAngleCorrelator(Correlator):
             pos[0] - (moving_image.shape[0]) // 2,
             pos[1] - (moving_image.shape[1]) // 2,
         )
-        return pos, pos_rel
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
 
 class GradXYCorrelator(Correlator):
@@ -484,7 +557,7 @@ class GradXYCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
+    ) -> RegResult:
         xp = self._xp
         ref_image_x, ref_image_y = ref_image
         moving_image_x, moving_image_y = moving_image
@@ -510,7 +583,7 @@ class GradXYCorrelator(Correlator):
             pos[0] - (moving_image_y.shape[0]) // 2,
             pos[1] - (moving_image_y.shape[1]) // 2,
         )
-        return pos, pos_rel
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
 
 
 class NoopCorrelator(Correlator):
@@ -527,5 +600,111 @@ class NoopCorrelator(Correlator):
         ref_image: typing.Any,
         moving_image: typing.Any,
         plot: bool,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
-        return (0.0, 0.0), (0.0, 0.0)
+    ) -> RegResult:
+        return RegResult(maximum=0.0, shift=0.0, corrmap=np.zeros_like(ref_image))
+
+
+def align_stack(
+    stack: np.ndarray,
+    wave_stack: np.ndarray,
+    static: np.ndarray | None,
+    correlator: Correlator | None = None,
+    xp=np,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Align stacks of N holograms.
+
+    Parameters
+    ==========
+
+    stack
+        Stack of images with shape (N, h, w) which is used
+        for the alignment. It should be of dtype float32 or float64,
+        so for holograms, you may want to align on the abs(wave).
+        You can also slice the original data, if you want to align
+        to a region of interest.
+
+    wave_stack
+        The (complex) result of the reconstruction. This should have
+        shape (N, h', w'), meaning it should have the same number of
+        complex images as the stack argument, but the 2d items in the
+        stack can have a different shape.
+
+    static
+        A reference image to align against. If this is not given,
+        the first image of the stack will be taken.
+
+    correlator
+        A :class:`Correlator` instance. By default, an :class:`ImageCorrelator`
+        is used, with reasonable default parameters. If you need control over
+        these, you can construct your own :class:`Correlator` and pass it in.
+        A requirement is that it has to work on the value given as the
+        stack parameter.
+
+    Returns
+    =======
+
+    aligned_stack
+        The aligned stack. Same shape and dtype as wave_stack
+
+    shifts
+        The shifts that were applied to the stack. Shape (N, 2)
+
+    reference
+        The pre-processed reference image, as used in the registration. Useful
+        for debugging, for example if the correlator filters its input.
+
+    corrs
+        The correlation maps, as returned from the correlator. Useful for
+        debugging.
+    """
+    aligned_stack = xp.zeros_like(wave_stack)
+
+    if correlator is None:
+        correlator = ImageCorrelator(
+            upsample_factor=10,
+            normalization='phase',
+            hanning=True,
+            binning=1,
+            xp=xp,
+        )
+
+    if static is None:
+        reference = stack[0]
+    else:
+        reference = static
+    reference = correlator.prepare_input(reference)
+
+    corrs = xp.zeros((stack.shape[0],) + reference.shape, dtype=np.float32)
+    shifts = xp.zeros((wave_stack.shape[0], 2), dtype="float32")
+
+    if xp is np:
+        import scipy.ndimage as ni
+    else:
+        import cupyx.scipy.ndimage as ni
+
+    for i, (reg_frame, wave_frame) in enumerate(zip(stack, wave_stack)):
+        wave_frame = xp.asarray(wave_frame)
+        pre_reg_frame = correlator.prepare_input(reg_frame)
+
+        reg_result = correlator.correlate(
+            reference,
+            pre_reg_frame,
+        )
+        corrs[i] = reg_result
+
+        aligned_stack[i] = xp.fft.ifft2(ni.fourier_shift(
+            xp.fft.fftn(wave_frame),
+            xp.asarray(reg_result.shift),
+        ))
+        shifts[i] = xp.stack(reg_result.shift)
+    return aligned_stack, shifts, reference, corrs
+
+
+def stack_alignment_quality(wave_stack: np.ndarray, shifts):
+    """Stack quality ,judged by standard deviation on the stacking axis.
+
+    This should be mostly noise, if not, there may be issues from the alignment.
+    """
+    std_image = np.std(np.abs(wave_stack), axis=0)
+    offset = math.ceil(shifts.max()) + 1
+    return std_image[offset:-offset, offset:-offset]
