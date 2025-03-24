@@ -3,7 +3,7 @@ import pytest
 from skimage.registration import phase_cross_correlation
 from libertem.utils.devices import detect
 from sparseconverter import for_backend, NUMPY
-from libertem_holo.base.align import cross_correlate
+from libertem_holo.base.align import cross_correlate, align_stack
 from libertem_holo.base.filters import _butterworth_disk_cpu, hanning_2d
 
 
@@ -11,42 +11,19 @@ def _test_data_shifted(shape, shift):
     """
     Make two disks, the second one shifted by `shift`
     """
-    if True:
-        cy = shape[0]/2
-        cx = shape[1]/2
-        order = 20
-        radius = 16
-        orig = _butterworth_disk_cpu(shape, radius=radius, order=order, cx=cx, cy=cy)
-        shifted = _butterworth_disk_cpu(
-            shape,
-            radius=radius,
-            order=order,
-            cy=cy+shift[0],
-            cx=cx+shift[1],
-        )
-        return orig, shifted
-    else:
-        from libertem.masks import circular
-        cy = shape[0]/2
-        cx = shape[1]/2
-        radius = 16
-        unshifted = circular(
-            centerX=cx,
-            centerY=cy,
-            imageSizeX=shape[1],
-            imageSizeY=shape[0],
-            radius=radius,
-            antialiased=True,
-        )
-        shifted = circular(
-            centerX=cx + shift[1],
-            centerY=cy + shift[0],
-            imageSizeX=shape[1],
-            imageSizeY=shape[0],
-            radius=radius,
-            antialiased=True,
-        )
-        return unshifted, shifted
+    cy = shape[0]/2
+    cx = shape[1]/2
+    order = 20
+    radius = 16
+    orig = _butterworth_disk_cpu(shape, radius=radius, order=order, cx=cx, cy=cy)
+    shifted = _butterworth_disk_cpu(
+        shape,
+        radius=radius,
+        order=order,
+        cy=cy+shift[0],
+        cx=cx+shift[1],
+    )
+    return orig, shifted
 
 
 @pytest.mark.parametrize(
@@ -120,3 +97,36 @@ def test_cross_correlation(backend, upsample_factor, sig_shape, shift, norm):
     sk_shift = tuple(-sk_shift)
     assert pos_rel == pytest.approx(sk_shift, abs=1/upsample_factor + 1e-5)
     assert pos_rel == pytest.approx(shift, abs=1/upsample_factor + 1e-5)
+
+
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+def test_align_stack(backend):
+    if backend == "cupy":
+        d = detect()
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
+    stack = xp.zeros((10, 64, 64), dtype=np.float32)
+    shifts = xp.zeros((10, 2), dtype=np.int64)
+
+    for i in range(stack.shape[0]):
+        shift = (i, i)
+        input_data, input_shifted = _test_data_shifted(shape=stack.shape[1:], shift=shift)
+        input_data, input_shifted = xp.asarray(input_data), xp.asarray(input_shifted)
+        stack[i] = input_shifted
+        shifts[i] = xp.stack(xp.asarray(shift))
+
+    aligned, shifts_found, reference, corrs = align_stack(
+        stack=stack,
+        wave_stack=stack,
+        static=None,
+        correlator=None,
+        xp=xp,
+    )
+    assert np.allclose(-shifts_found, shifts)
