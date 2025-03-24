@@ -695,10 +695,16 @@ def align_stack(
         )
         corrs[i] = reg_result.corrmap
 
-        aligned_stack[i] = xp.fft.ifft2(ni.fourier_shift(
+        shifted = xp.fft.ifft2(ni.fourier_shift(
             xp.fft.fftn(wave_frame),
             xp.asarray(reg_result.shift),
         ))
+
+        # support for non-complex data: explicitly discard imaginary part
+        if not np.iscomplexobj(wave_stack):
+            shifted = shifted.real
+
+        aligned_stack[i] = shifted
         shifts[i] = xp.stack(reg_result.shift)
     return aligned_stack, shifts, reference, corrs
 
