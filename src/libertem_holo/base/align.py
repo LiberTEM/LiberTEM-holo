@@ -219,7 +219,7 @@ class Correlator:
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         raise NotImplementedError()
 
@@ -268,7 +268,7 @@ class ImageCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
@@ -319,7 +319,7 @@ class BiprismDeletionCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
@@ -412,7 +412,7 @@ class BrightFieldCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
@@ -458,7 +458,7 @@ class PhaseImageCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
@@ -504,7 +504,7 @@ class GradAngleCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         pos, corrmap = cross_correlate(
             ref_image,
@@ -556,7 +556,7 @@ class GradXYCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         xp = self._xp
         ref_image_x, ref_image_y = ref_image
@@ -599,7 +599,7 @@ class NoopCorrelator(Correlator):
         self,
         ref_image: typing.Any,
         moving_image: typing.Any,
-        plot: bool,
+        plot: bool = False,
     ) -> RegResult:
         return RegResult(maximum=0.0, shift=0.0, corrmap=np.zeros_like(ref_image))
 
@@ -657,6 +657,8 @@ def align_stack(
         The correlation maps, as returned from the correlator. Useful for
         debugging.
     """
+    wave_stack = xp.asarray(wave_stack)
+    stack = xp.asarray(stack)
     aligned_stack = xp.zeros_like(wave_stack)
 
     if correlator is None:
@@ -689,8 +691,9 @@ def align_stack(
         reg_result = correlator.correlate(
             reference,
             pre_reg_frame,
+            plot=False,
         )
-        corrs[i] = reg_result
+        corrs[i] = reg_result.corrmap
 
         aligned_stack[i] = xp.fft.ifft2(ni.fourier_shift(
             xp.fft.fftn(wave_frame),
