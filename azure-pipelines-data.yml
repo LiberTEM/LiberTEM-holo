@@ -1,0 +1,189 @@
+variables:
+  - group: Packaging
+  - group: Coverage
+  - name: PIP_CACHE_DIR
+    value: $(Pipeline.Workspace)/.pip
+  - name: npm_config_cache
+    value: $(Pipeline.Workspace)/.npm
+  - name: tox_dir
+    value: $(Build.Repository.LocalPath)/.tox
+
+resources:
+  repositories:
+    - repository: LiberTEM
+      type: github
+      endpoint: LiberTEM
+      name: LiberTEM/LiberTEM
+
+parameters:
+  # by default, the tox environment is kept around, so we need this parameter
+  # as a way to manually re-create it, in case dependencies change.
+  - name: recreate_tox
+    displayName: Recreate tox environments?
+    type: boolean
+    default: false
+
+stages:
+  - stage: test
+    jobs:
+    - job: check_example_notebooks
+      pool: DataAccess
+      variables:
+        TESTDATA_BASE_PATH: '/data/'
+      steps:
+      - bash: find /data/
+        displayName: 'list available data'
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.9'
+        inputs:
+          versionSpec: '3.9'
+
+      - bash: python3.9 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install -U tox tox-uv uv
+        displayName: 'install tox'
+
+      - ${{ if eq(parameters.recreate_tox, true) }}:
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -r -- examples/*.ipynb -v
+          displayName: 'Run nbval tests $(Agent.OS) (recreating)'
+
+      - ${{ if eq(parameters.recreate_tox, false) }}:
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- examples/*.ipynb -v
+          displayName: 'Run nbval tests $(Agent.OS)'
+
+      - bash: ./scripts/codecov.sh -f ./coverage.xml
+        displayName: 'Submit coverage to codecov.io'
+        ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+          env:
+            CODECOV_TOKEN: $(CODECOV_TOKEN)
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFiles: 'junit.xml'
+          testRunTitle: 'Publish test results for Python $(python.version)'
+
+    - job: libertem_master_integration
+      pool: DataAccess
+      variables:
+        TESTDATA_BASE_PATH: '/data/'
+      steps:
+      - bash: find /data/
+        displayName: 'list available data'
+
+      - checkout: self
+      - checkout: LiberTEM
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.11'
+        inputs:
+          versionSpec: '3.11'
+
+      - bash: python3.11 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install uv
+        displayName: 'install uv'
+
+      - bash: source $(Agent.TempDirectory)/venv/bin/activate && $(Agent.TempDirectory)/venv/bin/uv pip install $(Build.SourcesDirectory)/LiberTEM/
+        displayName: 'install LiberTEM'
+
+      - bash: source $(Agent.TempDirectory)/venv/bin/activate && $(Agent.TempDirectory)/venv/bin/uv pip install $(Build.SourcesDirectory)/LiberTEM-holo/
+        displayName: 'install LiberTEM-holo'
+
+      - bash: source $(Agent.TempDirectory)/venv/bin/activate && $(Agent.TempDirectory)/venv/bin/uv pip install -r $(Build.SourcesDirectory)/LiberTEM-holo/test_requirements.txt
+        displayName: 'install LiberTEM-holo test requirements'
+
+      - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && $(Agent.TempDirectory)/venv/bin/pytest --durations=10 --cov=libertem_holo --cov-report=term --cov-report=html --cov-report=xml --cov-config=setup.cfg --junitxml=junit.xml tests/
+        displayName: 'run LiberTEM-holo tests'
+
+      - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && ./scripts/codecov.sh -f ./coverage.xml
+        displayName: 'Submit coverage to codecov.io'
+        ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+          env:
+            CODECOV_TOKEN: $(CODECOV_TOKEN)
+
+    - job: data_tests
+      pool: DataAccess
+      strategy:
+        matrix:
+          Python39:
+            python.version: '3.9'
+            TOXENV: 'py39-data'
+          Python310:
+            python.version: '3.10'
+            TOXENV: 'py310-data'
+          Python311:
+            python.version: '3.11'
+            TOXENV: 'py311-data'
+          Python312:
+            python.version: '3.12'
+            TOXENV: 'py312-data'
+      variables:
+        TESTDATA_BASE_PATH: '/data/'
+      steps:
+      - bash: find /data/
+        displayName: 'list available data'
+
+      - task: UsePythonVersion@0
+        displayName: 'Use Python $(python.version)'
+        inputs:
+          versionSpec: '$(python.version)'
+
+      - bash: python3.9 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install -U tox tox-uv uv
+        displayName: 'install tox'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/tox -r
+        displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
+
+      - bash: ./scripts/codecov.sh -f ./coverage.xml
+        displayName: 'Submit coverage to codecov.io'
+        ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+          env:
+            CODECOV_TOKEN: $(CODECOV_TOKEN)
+
+      - task: PublishTestResults@2
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFiles: 'junit.xml'
+          testRunTitle: 'Publish test results for Python $(python.version)'
+
+    - job: lint
+      pool: DataAccess
+      strategy:
+        matrix:
+          docs-check:
+            TOXENV: 'docs-check'
+      variables:
+        TOXENV: '$(TOXENV)'
+        TESTDATA_BASE_PATH: '/data/'
+      steps:
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.9'
+        inputs:
+          versionSpec: '3.9'
+
+      - bash: apt install -y pandoc
+        displayName: install required debian packages
+
+      - bash: rm -rf venv
+        displayName: 'clean up old venv, if any'
+
+      - bash: python3.9 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install -U tox
+        displayName: 'install tox'
+
+      - ${{ if eq(parameters.recreate_tox, true) }}:
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -r
+          displayName: 'Run tox tests $(TOXENV) $(Agent.OS) (recreating)'
+
+      - ${{ if eq(parameters.recreate_tox, false) }}:
+        - bash: $(Agent.TempDirectory)/venv/bin/tox
+          displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
