@@ -6,7 +6,6 @@ import numba
 from numba import cuda
 import sparse
 from scipy import ndimage
-from scipy.optimize import least_squares
 from scipy.signal import fftconvolve
 from skimage.filters import window
 from skimage.restoration import unwrap_phase
@@ -148,80 +147,6 @@ def clipped(img: np.ndarray, sigma: float = 6):
     return img[sigma_mask]
 
 
-def phase_ramp_finding(img, order=1):
-    """Find a phase ramp in `img`.
-
-    A phase ramp finding function that is used to find the phase ramp across the
-    field of view.
-
-    Parameters
-    ----------
-    img : 2d nd array
-        Complex image or phase image.
-    order : int
-        Phase ramp, 1 (default) is linear.
-    ramp : 2d tuple, ()
-        Phase ramp in y, x, if not None.
-
-    Returns
-    -------
-        ramp, order, tuple, float
-
-    """
-    # The ramp is determined by the maximum and minimum values of the image.
-    # TODO least-square-fitting, polynomial order
-    # TODO How to find phase ramps in complex images
-    if img.dtype.kind != 'c':
-        if order == 1:
-            ramp_x = np.mean(np.gradient(img, axis=0))
-            ramp_y = np.mean(np.gradient(img, axis=1))
-            ramp = (ramp_y, ramp_x)
-        else:
-            raise ValueError(f"can only handle `order=1` for now, not order={order}")
-    else:
-        raise ValueError(f"cannot handle input of type {img.dtype}")
-
-    return ramp
-
-
-def phase_ramp_removal(size, order=1, ramp=None):
-    """Remove phase ramp.
-
-    A phase ramp removal function that finds and removes a phase ramp across the
-    field of view.
-
-    Parameters
-    ----------
-    size : 2d tuple, ()
-        Size of the Complex image or phase image
-    order : int
-        Phase ramp, 1 (default) is linear.
-    ramp : 2d tuple, ()
-        Phase ramp in y, x, if not None.
-
-    Returns
-    -------
-        2d nd array of the corrected image
-
-    """
-    # TODO How to find phase ramps in complex images
-    img = np.zeros(size)
-    if ramp is None:
-        ramp = phase_ramp_finding(size, order=1)
-    else:
-        (ramp_y, ramp_x) = ramp
-    yy = np.arange(0, size[0], 1)
-    xx = np.arange(0, size[1], 1)
-    y, x = np.meshgrid(yy, xx)
-    if order == 1:
-        img = ramp_x * x + ramp_y * y
-    else:
-        # To be expanded.
-        raise ValueError(f"cannot handle order={order}")
-
-    return img
-
-
 def phase_unwrap(image):
     """
     A phase_unwrap function that is unwrap the complex / wrapped phase image.
@@ -307,39 +232,6 @@ def window_filter(input_array, window_type, window_shape):
     win = window(window_type, window_shape)
     array_filtered = np.fft.fftshift(fftconvolve(np.fft.fftshift(input_array), win, mode="same"))
     return array_filtered / np.max(array_filtered)
-
-
-def ramp_compensation(image):
-    """
-    A ramp or wedge compensation for a 2D image with a linear optimization methods.
-
-    Parameters
-    ----------
-    image : 2D-Array
-        Input array
-    """
-
-    def linear_gradient(c, dy, dx, y, x):
-        return c+y*dy+x*dx
-    x = np.linspace(0, image.shape[0]-1, image.shape[0])
-    y = np.linspace(0, image.shape[1]-1, image.shape[1])
-
-    def fun(initial_value):
-        function = image_not_compensated - linear_gradient(initial_value[0], initial_value[1],
-                                                           initial_value[2], yv, xv)
-        return function.reshape((-1, ))
-    yv, xv = np.meshgrid(y, x)
-
-    image_not_compensated = np.copy(image)
-    m_initial = np.gradient(image_not_compensated)
-    dy_initial = np.mean(m_initial[0])
-    dx_initial = np.mean(m_initial[1])
-    c_initial = image[0, 0]
-    initial_value = np.array([c_initial, dy_initial, dx_initial])
-    res1 = least_squares(fun, initial_value)
-    gradient_compensation = linear_gradient(res1.x[0], res1.x[1],
-                                            res1.x[2], yv, xv)
-    return image - gradient_compensation
 
 
 def line_filter(

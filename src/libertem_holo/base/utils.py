@@ -1,4 +1,5 @@
 """Utility functions for working with holography data."""
+from __future__ import annotations
 
 # Functions freq_array, aperture_function, estimate_sideband_position
 # estimate_sideband_size are adopted from Hyperspy
@@ -40,6 +41,7 @@ except ImportError:
 import numpy as np
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
+from scipy.optimize import least_squares
 from sparseconverter import NUMPY, for_backend
 
 
@@ -424,3 +426,75 @@ def draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
     )
     rr, cc = polygon(coords[:, 0], coords[:, 1], shape=dest.shape)
     dest[rr, cc] = True
+
+
+def remove_phase_ramp(
+    img: np.ndarray,
+    *,
+    roi=None,
+    method: Literal['gradient'] | Literal['fit'] = 'gradient',
+) -> tuple[np.ndarray, np.ndarray]:
+    """Remove a phase ramp from `img`.
+
+    Returns both the compensated image and the ramp that was removed.
+
+    Parameters
+    ----------
+    img
+        The (phase) input image, has to be already unwrapped
+
+    roi
+        Either a slice (as returned by `np.s_` for example), or an array of the
+        region of interest in `img`. If not specified, the whole `img` is used.
+        In any case, the ramp is subtraced from the whole image.
+
+    method
+        * 'gradient': the average gradient in the specified region of interest
+        * 'fit': a least-square fit of a linear gradient to the data in the
+          region of interest
+    """
+    # select the correct ROI:
+    if roi is None:
+        img_roi = img
+    elif isinstance(roi, np.ndarray):
+        img_roi = roi
+    else:
+        img_roi = img[roi]
+
+    # determine ramp:
+    if method == 'gradient':
+        ramp_y = np.mean(np.gradient(img_roi, axis=0))
+        ramp_x = np.mean(np.gradient(img_roi, axis=1))
+    elif method == 'fit':
+
+        def linear_gradient(c, dy, dx, y, x):
+            return c+y*dy+x*dx
+
+        y = np.arange(0, img_roi.shape[0], 1)
+        x = np.arange(0, img_roi.shape[1], 1)
+
+        def fun(params):
+            c, dy, dx = params
+            function = img_roi - linear_gradient(c, dy, dx, yv, xv)
+            return function.reshape((-1, ))
+
+        yv, xv = np.meshgrid(y, x, indexing='ij')
+        m_initial = np.gradient(img_roi)
+        dy_initial = np.mean(m_initial[0])
+        dx_initial = np.mean(m_initial[1])
+        c_initial = img_roi[0, 0]
+        init_params = np.array([c_initial, dy_initial, dx_initial])
+        final_res = least_squares(fun, init_params)
+        final_c, final_dy, final_dx = final_res.x
+        # gradient_compensation = linear_gradient(final_c, final_dy, final_dx, yv, xv)
+
+        ramp_y = final_dy
+        ramp_x = final_dx
+
+    # subtract ramp from data:
+    yy = np.arange(0, img.shape[0], 1)
+    xx = np.arange(0, img.shape[1], 1)
+    y, x = np.meshgrid(yy, xx, indexing='ij')
+    ramp_found = ramp_x * x + ramp_y * y
+
+    return img - ramp_found, ramp_found
