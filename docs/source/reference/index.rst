@@ -22,6 +22,12 @@ Image filtering and aperture building
 .. automodule:: libertem_holo.base.filters
     :members:
 
+Stack alignment
+~~~~~~~~~~~~~~~
+
+.. automodule:: libertem_holo.base.align
+    :members:
+
 Simulation
 ~~~~~~~~~~
 
