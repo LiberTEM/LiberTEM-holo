@@ -234,8 +234,10 @@ class HoloParams(typing.NamedTuple):
         *,
         central_band_mask_radius: float | None = None,
         out_shape: tuple = None,
+        circle_filter_order: int = 20,
         line_filter_length: float = 0.9,
-        line_filter_width: float | None = 20,
+        line_filter_width: float | None = 3,
+        line_filter_order: int = 2,
         xp: XPType = np,
     ) -> HoloParams:
         """Determine reconstruction parameters from a hologram.
@@ -255,6 +257,9 @@ class HoloParams(typing.NamedTuple):
         out_shape
             The reconstruction shape, should be larger than the sideband size
 
+        circle_filter_order
+            Order of the butterworth filter applied to the circular part
+
         line_filter_length
             Length ratio of the line filter; as a fraction of the distance between
             the central band and the sideband
@@ -262,6 +267,9 @@ class HoloParams(typing.NamedTuple):
         line_filter_width
             Width of the line filter, in pixels. Passing in `None` will disable
             the line filter completely
+
+        line_filter_order
+            Order of the butterworth filter applied to the line part
 
         xp
             Pass in either the numpy or cupy module to select CPU or GPU processing
@@ -288,7 +296,7 @@ class HoloParams(typing.NamedTuple):
         aperture = butterworth_disk(
             hologram.shape,
             radius=sb_size,
-            order=20,
+            order=circle_filter_order,
             xp=xp,
         )
 
@@ -306,7 +314,7 @@ class HoloParams(typing.NamedTuple):
                     sb_position_int, shape=hologram.shape
                 ),
                 length_ratio=line_filter_length,
-                order=2,
+                order=line_filter_order,
                 xp=xp,
             )
             aperture = xp.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
