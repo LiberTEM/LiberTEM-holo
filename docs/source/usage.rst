@@ -155,6 +155,7 @@ Finally the :class:`~libertem_holo.udf.HoloReconstructUDF` class can be used to 
 reference holograms:
 
 .. testcode::
+
    # Create aperture:
    aperture = np.fft.fftshift(butterworth_disk(
        shape=output_shape,
