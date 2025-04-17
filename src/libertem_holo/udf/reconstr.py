@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 from libertem.udf import UDF
 
-from libertem_holo.base.filters import disk_aperture
 from libertem_holo.base.reconstr import reconstruct_frame
 from libertem_holo.base.utils import get_slice_fft
 
@@ -28,13 +27,15 @@ class HoloReconstructUDF(UDF):
     Examples
     --------
     >>> shape = tuple(dataset.shape.sig)
+    >>> # NOTE: in real use, one would use `HoloParams.from_hologram` to
+    >>> # directly estimate parameters from the data, instead of specifying manually
     >>> sb_position = [2, 3]
     >>> sb_size = 4.4
     >>> aperture = disk_aperture(out_shape=shape, radius=sb_size)
     >>> holo_udf = HoloReconstructUDF(
     ...     out_shape=shape,
     ...     sb_position=sb_position,
-    ...     aperture=aperture,
+    ...     aperture=np.fft.fftshift(aperture),
     ... )
     >>> wave = ctx.run_udf(dataset=dataset, udf=holo_udf)['wave'].data
 
@@ -119,31 +120,3 @@ class HoloReconstructUDF(UDF):
     def get_backends(self) -> tuple[str, ...]:
         ""
         return ("numpy", "cupy")
-
-    @classmethod
-    def with_default_aperture(
-        cls,
-        *,
-        out_shape: tuple[int, int],
-        sb_size: float,
-        sb_position: tuple[float, float],
-        precision: bool = True,
-    ) -> HoloReconstructUDF:
-        """Instantiate with a default disk-shaped aperture.
-
-        Examples
-        --------
-        >>> udf = HoloReconstructUDF.with_default_aperture(
-        ...     out_shape=(128, 128),
-        ...     sb_size=7.6,
-        ...     sb_position=(32, 32),
-        ... )
-
-        """
-        aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
-        return cls(
-            out_shape=out_shape,
-            sb_position=sb_position,
-            aperture=aperture,
-            precision=precision,
-        )

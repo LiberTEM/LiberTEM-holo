@@ -180,7 +180,7 @@ def estimate_sideband_size(
     Parameters
     ----------
     holo_shape : array_like
-            Holographic data array
+        Holographic data array
     sb_position : tuple
         The sideband position (y, x), referred to the non-shifted FFT.
     sb_size_ratio : float, optional
@@ -209,7 +209,7 @@ def estimate_sideband_size(
 
 
 class HoloParams(typing.NamedTuple):
-    """Holoparams class contians all parameters necessary for reconstruction."""
+    """HoloParams class contians all parameters necessary for reconstruction."""
 
     sb_size: tuple[float, float]
     sb_position: tuple[float, float]

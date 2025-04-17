@@ -132,7 +132,7 @@ def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
     sb_size = 6.26498204
 
     out_shape = dataset_holo.shape.sig
-    aperture = disk_aperture(out_shape=out_shape, radius=sb_size)
+    aperture = np.fft.fftshift(disk_aperture(out_shape=out_shape, radius=sb_size))
     holo_udf = HoloReconstructUDF(out_shape=out_shape,
                                   sb_position=sb_position,
                                   aperture=aperture)

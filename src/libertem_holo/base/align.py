@@ -395,8 +395,8 @@ class BrightFieldCorrelator(Correlator):
         aperture = disk_aperture(out_shape=holoparams.out_shape, radius=holoparams.sb_size//3)
         slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
         line_filter = line_filter[slice_fft]
-        aperture[np.fft.fftshift(line_filter)] = 0
-        aperture = np.fft.fftshift(gaussian_filter(np.fft.fftshift(aperture), sigma=6))
+        aperture[line_filter] = 0
+        aperture = np.fft.fftshift(gaussian_filter(aperture, sigma=6))
         holo_bf = np.abs(
             reconstruct_bf(
                 frame=img,
