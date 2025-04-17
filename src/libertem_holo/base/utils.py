@@ -133,7 +133,7 @@ def estimate_sideband_position(
     # If aperture radius of centerband is not given, it will be set to 5 % of
     # the Nyquist frequency.
     if central_band_mask_radius is None:
-        central_band_mask_radius = 1 / 20.0 * np.max(f_freq)
+        central_band_mask_radius = np.mean(holo_data.shape) / 20.0 * np.max(f_freq)
 
     aperture = _hard_disk_aperture(
         holo_data.shape,
@@ -234,6 +234,8 @@ class HoloParams(typing.NamedTuple):
         *,
         central_band_mask_radius: float | None = None,
         out_shape: tuple = None,
+        sb_size: float | None = None,
+        sb_position: tuple[float, float] | None = None,
         circle_filter_order: int = 20,
         line_filter_length: float = 0.9,
         line_filter_width: float | None = 3,
@@ -257,6 +259,12 @@ class HoloParams(typing.NamedTuple):
         out_shape
             The reconstruction shape, should be larger than the sideband size
 
+        sb_size
+            Override the sideband size; determined automatically if not given
+
+        sb_position
+            Override the sideband position; determined automatically if not given
+
         circle_filter_order
             Order of the butterworth filter applied to the circular part
 
@@ -277,14 +285,16 @@ class HoloParams(typing.NamedTuple):
         from .filters import butterworth_line, butterworth_disk
         hologram = xp.asarray(hologram)
 
-        sb_position = estimate_sideband_position(
-            holo_data=hologram,
-            holo_sampling=(1, 1),
-            sb='upper',
-            central_band_mask_radius=central_band_mask_radius,
-            xp=xp,
-        )
-        sb_size = estimate_sideband_size(sb_position, hologram.shape, xp=xp)
+        if sb_position is None:
+            sb_position = estimate_sideband_position(
+                holo_data=hologram,
+                holo_sampling=(1, 1),
+                sb='upper',  # as both sideband positions are equivalent, picking 'upper' here
+                central_band_mask_radius=central_band_mask_radius,
+                xp=xp,
+            )
+        if sb_size is None:
+            sb_size = estimate_sideband_size(sb_position, hologram.shape, xp=xp)
 
         if out_shape is None:
             out_side = 2 * int(sb_size) + 16
@@ -441,7 +451,7 @@ def remove_phase_ramp(
     *,
     roi=None,
     method: Literal['gradient'] | Literal['fit'] = 'gradient',
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
     """Remove a phase ramp from `img`.
 
     Returns both the compensated image and the ramp that was removed.
@@ -460,6 +470,17 @@ def remove_phase_ramp(
         * 'gradient': the average gradient in the specified region of interest
         * 'fit': a least-square fit of a linear gradient to the data in the
           region of interest
+
+    Returns
+    -------
+    corrected_img
+        The image with the ramp removed
+
+    ramp
+        The ramp that was found, as a 2D gradient
+
+    (ramp_y, ramp_x)
+        The ramp slopes
     """
     # select the correct ROI:
     if roi is None:
@@ -505,4 +526,4 @@ def remove_phase_ramp(
     y, x = np.meshgrid(yy, xx, indexing='ij')
     ramp_found = ramp_x * x + ramp_y * y
 
-    return img - ramp_found, ramp_found
+    return img - ramp_found, ramp_found, (ramp_y, ramp_x)
