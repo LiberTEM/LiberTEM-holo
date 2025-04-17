@@ -14,5 +14,13 @@
         "github": "jvvas",
         "contribution": "Documentation, feedback, data, etc",
         "orcid": "0009-0006-3796-9466"
+    },
+    {
+        "displayname": "Alexander Clausen",
+        "authorname": "Clausen, Alexander",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "github": "sk1p",
+        "contribution": "Code structure and repository management, GPU support, tests, UDF implementation, performance optimization and benchmarks, ...",
+        "orcid": "0000-0002-9555-7455"
     }
 ]
