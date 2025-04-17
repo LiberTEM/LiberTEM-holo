@@ -1,3 +1,20 @@
+|docs|_ |gitter|_ |github|_ |precommit|_ |pypi|_
+
+.. |docs| image:: https://img.shields.io/badge/%F0%9F%95%AE-docs-green.svg
+.. _docs: https://libertem.github.io/LiberTEM-holo/
+
+.. |gitter| image:: https://badges.gitter.im/join_chat.svg
+.. _gitter: https://gitter.im/LiberTEM/Lobby
+
+.. |github| image:: https://img.shields.io/badge/GitHub-GPLv3-informational
+.. _github: https://github.com/LiberTEM/LiberTEM-holo/
+
+.. |precommit| image:: https://results.pre-commit.ci/badge/github/LiberTEM/LiberTEM-holo/master.svg
+.. _precommit: https://results.pre-commit.ci/latest/github/LiberTEM/LiberTEM-holo/master
+
+.. |pypi| image:: https://badge.fury.io/py/libertem-holo.svg
+.. _pypi: https://pypi.org/project/libertem-holo/
+
 LiberTEM-holo
 =============
 
