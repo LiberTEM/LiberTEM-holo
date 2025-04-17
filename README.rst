@@ -18,18 +18,16 @@ Installation
 ------------
 .. code-block:: shell
 
-  $conda create -n LiberTEM_holo python=3.12
-  $conda activate LiberTEM_holo
-  $pip install git+https://github.com/LiberTEM/LiberTEM-holo.git
+  $ conda create -n holo python=3.12
+  $ conda activate holo
+  $ pip install git+https://github.com/LiberTEM/LiberTEM-holo.git
 
 Input File formats and i/o operations
 -------------------------------------
-LiberTEM-holo was designed specfically for inputting larger stacks of images without loading them into memory. The implementation is borrowed from LiberTEM.
+LiberTEM-holo was designed specfically for working on larger stacks of images without loading them into memory. Any file format supported by LiberTEM can be loaded.
 
 (1) Gatan Digital Micrograph (.dm3, .dm4)
-(2) Other file formats (Need to check with Alex)
-
-
+(2) Any other file formats `supported by LiberTEM <https://github.com/LiberTEM/LiberTEM>`_
 
 Associated functions
 --------------------
