@@ -372,7 +372,7 @@ def reconstruct_bf(
 ) -> np.ndarray:
     """Reconstruct a brightfield image from a hologram.
 
-    Please use `libertem_holo.base.filter.central_line_filter` to
+    Please use :func:`libertem_holo.base.filter.central_line_filter` to
     filter out fresnel fringes as appropriate.
     """
     frame = xp.array(frame)

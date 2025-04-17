@@ -17,7 +17,7 @@ from libertem_holo.base.utils import (
 
 
 def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarray:
-    """Generate a disk-shaped aperture, fft-shifted.
+    """Generate a disk-shaped aperture
 
     Parameters
     ----------
@@ -46,7 +46,7 @@ def disk_aperture(out_shape: tuple[int, int], radius: float, xp=np) -> np.ndarra
         use_sparse=False,
     ))
 
-    return xp.fft.fftshift(bins[0])
+    return bins[0]
 
 
 def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=np):
