@@ -62,15 +62,13 @@ A sample jupyter notebook is available `in the GitHub repository
 collected from a magnetic TEM lamella used for the example is available
 `on Zenodo <https://zenodo.org/records/15222400>`_.
 
-Not released yet - please install via git!
-
 Installation
 ------------
 .. code-block:: shell
 
   $ conda create -n holo python=3.12
   $ conda activate holo
-  $ pip install git+https://github.com/LiberTEM/LiberTEM-holo.git
+  $ pip install libertem-holo
 
 Input File formats
 ------------------
