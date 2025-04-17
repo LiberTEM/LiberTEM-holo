@@ -26,12 +26,13 @@ class HoloReconstructUDF(UDF):
 
     Examples
     --------
+    >>> from libertem_holo.base.filters import butterworth_disk
     >>> shape = tuple(dataset.shape.sig)
     >>> # NOTE: in real use, one would use `HoloParams.from_hologram` to
     >>> # directly estimate parameters from the data, instead of specifying manually
     >>> sb_position = [2, 3]
     >>> sb_size = 4.4
-    >>> aperture = disk_aperture(out_shape=shape, radius=sb_size)
+    >>> aperture = butterworth_disk(shape=shape, radius=sb_size)
     >>> holo_udf = HoloReconstructUDF(
     ...     out_shape=shape,
     ...     sb_position=sb_position,
