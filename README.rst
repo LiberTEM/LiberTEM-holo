@@ -15,7 +15,7 @@ Not released yet - please install via git!
 
 
 Installation
--------
+------------
 .. code-block:: shell
 
   $conda create -n LiberTEM_holo python=3.12
@@ -23,7 +23,7 @@ Installation
   $pip install git+https://github.com/LiberTEM/LiberTEM-holo.git
 
 Input File formats and i/o operations
--------
+-------------------------------------
 LiberTEM-holo was designed specfically for inputting larger stacks of images without loading them into memory. The implementation is borrowed from LiberTEM.
 
 (1) Gatan Digital Micrograph (.dm3, .dm4)
@@ -32,22 +32,22 @@ LiberTEM-holo was designed specfically for inputting larger stacks of images wit
 
 
 Associated functions
--------
-(0) HoloReconstructUDF
-(1) clipped
-(2) disk_aperture
-(3) butterworth_disk
-(4) butterworth_line
-(5) estimate_sideband_position
-(6) estimate_sideband_size
-(7) freq_array
-(8) HoloParams
-(9) get_slice_fft
-(10) fft_shift_coords
-(11) remove_phase_ramp
-(12) phase_offset_correction
-(13) align_stack
-(14) ImageCorrelator
+--------------------
+(1) HoloReconstructUDF
+(2) clipped
+(3) disk_aperture
+(4) butterworth_disk
+(5) butterworth_line
+(6) estimate_sideband_position
+(7) estimate_sideband_size
+(8) freq_array
+(9) HoloParams
+(10) get_slice_fft
+(11) fft_shift_coords
+(12) remove_phase_ramp
+(13) phase_offset_correction
+(14) align_stack
+(15) ImageCorrelator
 
 
 License
