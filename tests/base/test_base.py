@@ -147,11 +147,11 @@ def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
 
     # pick two holograms and align the phase offset
     # (in case of cupy, input data is implicitly moved to device):
-    averaged, stack = phase_offset_correction(
+    averaged, phase_offsets, stack = phase_offset_correction(
         w_holo[:2], return_stack=True, xp=xp,
     )
 
     # with explicit conversion it should still work:
-    averaged, stack = phase_offset_correction(
+    averaged, phase_offsets, stack = phase_offset_correction(
         xp.asarray(w_holo[:2]), return_stack=True, xp=xp,
     )

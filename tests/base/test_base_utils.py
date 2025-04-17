@@ -31,7 +31,7 @@ def test_remove_phase_ramp(shape, ramp_yx, method):
     y, x = np.meshgrid(yy, xx, indexing='ij')
     ramp = ramp_x * x + ramp_y * y
 
-    img_without_ramp, detected_ramp = remove_phase_ramp(
+    img_without_ramp, detected_ramp, (ramp_y_det, ramp_x_det) = remove_phase_ramp(
         ramp,
         roi=None,
         method=method,
@@ -83,7 +83,7 @@ def test_remove_phase_ramp_with_roi(shape, ramp_yx, method, roi_method):
     if roi_method == "arr":
         roi = space[slice_in_shape]
 
-    img_without_ramp, detected_ramp = remove_phase_ramp(
+    img_without_ramp, detected_ramp, (ramp_y_det, ramp_x_det) = remove_phase_ramp(
         space,
         roi=roi,
         method=method,

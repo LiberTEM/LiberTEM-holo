@@ -390,7 +390,7 @@ def phase_offset_correction(
     threshold: float = 1e-12,
     return_stack: bool = False,
     xp=np,
-) -> tuple[np.ndarray, np.ndarray | None]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     This part of the code is to correct for the phase drift in the holograms due
     to the biprism drift with time.  Since we are dealing with the phase of the
@@ -484,6 +484,6 @@ def phase_offset_correction(
     result[mask] = result[mask] / count[mask]
 
     if return_stack:
-        return result, result_stack[:orig_R]
+        return result, phases, result_stack[:orig_R]
     else:
-        return result, None
+        return result, phases, None
