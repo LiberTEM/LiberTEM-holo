@@ -110,6 +110,7 @@ simulated above as follows:
 
    from libertem.io.dataset.memory import MemoryDataSet
    from libertem_holo.udf import HoloReconstructUDF
+   from libertem_holo.base.filters import butterworth_disk
 
    dataset_holo = MemoryDataSet(data=holo.reshape((1, sy, sx)), sig_dims=2)
    dataset_ref = MemoryDataSet(data=ref.reshape((1, sy, sx)), sig_dims=2)
@@ -154,12 +155,18 @@ Finally the :class:`~libertem_holo.udf.HoloReconstructUDF` class can be used to 
 reference holograms:
 
 .. testcode::
+   # Create aperture:
+   aperture = np.fft.fftshift(butterworth_disk(
+       shape=output_shape,
+       radius=sb_size,
+       order=20,
+   ))
 
    # Create reconstruction UDF:
-   holo_udf = HoloReconstructUDF.with_default_aperture(
+   holo_udf = HoloReconstructUDF(
        out_shape=output_shape,
        sb_position=sb_position,
-       sb_size=sb_size
+       aperture=aperture,
    )
 
    # Reconstruct holograms, access data directly
