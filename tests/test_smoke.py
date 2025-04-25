@@ -7,6 +7,7 @@ from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import phase_offset_correction
 from libertem_holo.base.align import AmplitudeCorrelator
 
+
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
@@ -102,5 +103,4 @@ def test_amplitude_correlator(backend: str, holo_data) -> None:
     correlator = AmplitudeCorrelator(holoparams=params, xp=xp)
     input1 = correlator.prepare_input(holo1)
     input2 = correlator.prepare_input(holo2)
-    corr_res = correlator.correlate(ref_image=input1, moving_image=input2)
-    
+    _ = correlator.correlate(ref_image=input1, moving_image=input2)
