@@ -15,7 +15,9 @@ from sparseconverter import NUMPY, for_backend
 from scipy.ndimage import gaussian_filter
 import logging
 
-from libertem_holo.base.reconstr import get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
+from libertem_holo.base.reconstr import (
+    get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
+)
 from libertem_holo.base.filters import central_line_filter, disk_aperture
 
 log = logging.getLogger(__name__)
