@@ -500,8 +500,8 @@ class AmplitudeCorrelator(Correlator):
         slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
         amp = np.abs(
             reconstruct_frame(
-                img, sb_pos=holoparams.sb_position, 
-                aperture=holoparams.aperture, 
+                img, sb_pos=holoparams.sb_position,
+                aperture=holoparams.aperture,
                 slice_fft=slice_fft, xp=self._xp
             )
         )
