@@ -15,7 +15,7 @@ from sparseconverter import NUMPY, for_backend
 from scipy.ndimage import gaussian_filter
 import logging
 
-from libertem_holo.base.reconstr import get_slice_fft, HoloParams, get_phase, reconstruct_bf
+from libertem_holo.base.reconstr import get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
 from libertem_holo.base.filters import central_line_filter, disk_aperture
 
 log = logging.getLogger(__name__)
@@ -460,6 +460,59 @@ class PhaseImageCorrelator(Correlator):
         moving_image: typing.Any,
         plot: bool = False,
     ) -> RegResult:
+        pos, corrmap = cross_correlate(
+            ref_image,
+            moving_image,
+            xp=self._xp,
+            plot=plot,
+            normalization=self._normalization,
+            upsample_factor=self._upsample_factor,
+        )
+        pos_rel = (
+            pos[0] - (moving_image.shape[0]) // 2,
+            pos[1] - (moving_image.shape[1]) // 2,
+        )
+        return RegResult(maximum=pos, shift=pos_rel, corrmap=corrmap)
+
+
+class AmplitudeCorrelator(Correlator):
+    """
+    Cross correlation on reconstructed amplitude.
+    """
+
+    def __init__(
+        self,
+        holoparams: HoloParams,
+        upsample_factor: int = 1,
+        normalization: Literal['phase'] | None = 'phase',
+        xp: typing.Any = np,
+    ) -> None:
+        self._holoparams = holoparams
+        self._xp = xp
+        self._normalization = normalization
+        self._upsample_factor = upsample_factor
+
+    def prepare_input(
+        self,
+        img: np.ndarray,
+    ) -> typing.Any:
+        holoparams = self._holoparams
+        slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
+        amp = np.abs(
+            reconstruct_frame(
+                img, sb_pos=holoparams.sb_position, 
+                aperture=holoparams.aperture, 
+                slice_fft=slice_fft, xp=self._xp
+            )
+        )
+        return amp
+
+    def correlate(
+        self,
+        ref_image: typing.Any,
+        moving_image: typing.Any,
+        plot: bool = False,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
         pos, corrmap = cross_correlate(
             ref_image,
             moving_image,

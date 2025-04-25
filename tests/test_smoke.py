@@ -5,7 +5,7 @@ from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import phase_offset_correction
-
+from libertem_holo.base.align import AmplitudeCorrelator
 
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
@@ -79,3 +79,28 @@ def test_hard_aperture_disk_non_square(backend: str) -> None:
 
     aperture = _hard_disk_aperture((512, 511), radius=7, xp=xp)
     assert aperture.shape == (512, 511)
+
+
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+def test_amplitude_correlator(backend: str, holo_data) -> None:
+    holo, ref, phase_ref, slice_crop = holo_data
+
+    if backend == "cupy":
+        d = detect()
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        import cupy as cp
+        xp = cp
+    else:
+        xp = np
+
+    holo1 = holo[0, 0]
+    holo2 = holo[0, 1]
+    params = HoloParams.from_hologram(holo1, xp=xp)
+    correlator = AmplitudeCorrelator(holoparams=params, xp=xp)
+    input1 = correlator.prepare_input(holo1)
+    input2 = correlator.prepare_input(holo2)
+    corr_res = correlator.correlate(ref_image=input1, moving_image=input2)
+    
