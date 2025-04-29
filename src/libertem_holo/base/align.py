@@ -53,6 +53,7 @@ def _upsampled_dft(
 
 
 def _plot_cross_correlate(*, shifted_corr, pos, plot_title, src, target):
+    pos = tuple(for_backend(i, NUMPY) for i in pos)
     fig, ax = plt.subplots(3, sharex=True, sharey=True)
     ax[0].imshow(for_backend(shifted_corr, NUMPY))
     ax[0].plot(pos[1], pos[0], 'x', color='red')
@@ -255,6 +256,8 @@ class ImageCorrelator(Correlator):
             import scipy.ndimage as ni
         else:
             import cupyx.scipy.ndimage as ni
+
+        img = xp.asarray(img)
 
         # apply hanning filter:
         if self._hanning:

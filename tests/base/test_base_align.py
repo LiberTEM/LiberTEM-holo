@@ -1,10 +1,30 @@
+import contextlib
 import numpy as np
 import pytest
 from skimage.registration import phase_cross_correlation
 from libertem.utils.devices import detect
 from sparseconverter import for_backend, NUMPY
-from libertem_holo.base.align import cross_correlate, align_stack
+from libertem_holo.base.utils import HoloParams
+from libertem_holo.base.align import (
+    cross_correlate, align_stack, ImageCorrelator, AmplitudeCorrelator,
+    BiprismDeletionCorrelator, BrightFieldCorrelator, PhaseImageCorrelator,
+    GradAngleCorrelator, GradXYCorrelator, NoopCorrelator,
+)
 from libertem_holo.base.filters import _butterworth_disk_cpu, hanning_2d
+
+
+# inspired from https://stackoverflow.com/a/71901243/540644
+@contextlib.contextmanager
+def noninteractive_plot():
+    """Utility to disable plot interactivity for tests."""
+    import matplotlib
+
+    try:
+        backend = matplotlib.get_backend()
+        matplotlib.use('Agg')
+        yield
+    finally:
+        matplotlib.use(backend)
 
 
 def _test_data_shifted(shape, shift):
@@ -130,3 +150,84 @@ def test_align_stack(backend):
         xp=xp,
     )
     assert np.allclose(-shifts_found, shifts)
+
+
+def test_correlator_prepare_should_coerce_input():
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+    import cupy as cp
+    xp = cp
+
+    # inputs are _numpy_ arrays, not cupy!
+    a = np.zeros((128, 128), dtype=np.float32)
+    b = np.zeros((128, 128), dtype=np.float32)
+
+    params = HoloParams.from_hologram(
+        a,
+        central_band_mask_radius=1,
+        out_shape=(64, 64),
+        line_filter_length=0.9,
+        line_filter_width=2,
+        sb_position=(32, 32),
+        xp=xp,
+    )
+
+    factories = [
+        lambda: ImageCorrelator(xp=xp),
+        lambda: BiprismDeletionCorrelator(xp=xp, mask=np.zeros((128, 128), dtype=bool)),
+        lambda: AmplitudeCorrelator(xp=xp, holoparams=params),
+        lambda: BrightFieldCorrelator(xp=xp, holoparams=params),
+        lambda: PhaseImageCorrelator(xp=xp, holoparams=params),
+        lambda: GradAngleCorrelator(xp=xp, holoparams=params),
+        lambda: GradXYCorrelator(xp=xp, holoparams=params),
+        lambda: NoopCorrelator(),
+    ]
+
+    for fn in factories:
+        corr = fn()
+        a1 = corr.prepare_input(a)
+        b1 = corr.prepare_input(b)
+        _ = corr.correlate(ref_image=a1, moving_image=b1)
+
+
+def test_plot_should_work_with_cupy():
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+    import cupy as cp
+    xp = cp
+
+    # inputs are _numpy_ arrays, not cupy!
+    a = np.zeros((128, 128), dtype=np.float32)
+    b = np.zeros((128, 128), dtype=np.float32)
+
+    params = HoloParams.from_hologram(
+        a,
+        central_band_mask_radius=1,
+        out_shape=(64, 64),
+        line_filter_length=0.9,
+        line_filter_width=2,
+        sb_position=(32, 32),
+        xp=xp,
+    )
+
+    factories = [
+        lambda: ImageCorrelator(xp=xp),
+        lambda: BiprismDeletionCorrelator(
+            xp=xp, mask=np.zeros((128, 128), dtype=bool)
+        ),
+        lambda: AmplitudeCorrelator(xp=xp, holoparams=params),
+        lambda: BrightFieldCorrelator(xp=xp, holoparams=params),
+        lambda: PhaseImageCorrelator(xp=xp, holoparams=params),
+        lambda: GradAngleCorrelator(xp=xp, holoparams=params),
+        lambda: GradXYCorrelator(xp=xp, holoparams=params),
+        lambda: NoopCorrelator(),
+    ]
+
+    with noninteractive_plot():
+        for fn in factories:
+            corr = fn()
+            a1 = corr.prepare_input(a)
+            b1 = corr.prepare_input(b)
+            _ = corr.correlate(ref_image=a1, moving_image=b1, plot=True)
