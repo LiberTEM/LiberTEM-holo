@@ -490,10 +490,12 @@ class AmplitudeCorrelator(Correlator):
         holoparams: HoloParams,
         upsample_factor: int = 1,
         normalization: Literal['phase'] | None = 'phase',
+        hanning: bool = False,
         xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
+        self._hanning = hanning
         self._normalization = normalization
         self._upsample_factor = upsample_factor
 
@@ -510,6 +512,12 @@ class AmplitudeCorrelator(Correlator):
                 slice_fft=slice_fft, xp=self._xp
             )
         )
+
+        # apply hanning filter:
+        if self._hanning:
+            xp = self._xp
+            amp = amp * xp.outer(xp.hanning(amp.shape[0]), xp.hanning(amp.shape[1]))
+
         return amp
 
     def correlate(
