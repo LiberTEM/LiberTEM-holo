@@ -1,6 +1,3 @@
 pytest>=6
 pytest-cov
 pytest-benchmark
-
-numpy
-numba>=0.53
