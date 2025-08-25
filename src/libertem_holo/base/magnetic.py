@@ -69,7 +69,7 @@ class RectangularIntegration(Integrator):
         self._res = res
         self._shape = shape
         self._img = img
-    
+
     def get_samp_params(
         self,
         res: float,
@@ -133,4 +133,3 @@ class RectangularIntegration(Integrator):
                     values.append(img[x, y])
             I = np.sum(values)
             integrations.append(I)
-
