@@ -45,21 +45,18 @@ def get_neighbours_ud(idx: int, im_size: int, width: int):
 @numba.njit
 def get_neighbours(idx: int, height: int, width: int, connectivity: int):
     im_size = height * width
-    for _idx in get_neighbours_ud(idx, im_size, width):
-        yield _idx
+    yield from get_neighbours_ud(idx, im_size, width)
     left = idx - 1
     right = idx + 1
     col = idx % width
     if col > 0:
         yield left
         if connectivity > 4:
-            for _idx in get_neighbours_ud(left, im_size, width):
-                yield _idx
+            yield from get_neighbours_ud(left, im_size, width)
     if width - col > 1:
         yield right
         if connectivity > 4:
-            for _idx in get_neighbours_ud(right, im_size, width):
-                yield _idx
+            yield from get_neighbours_ud(right, im_size, width)
 
 
 @numba.njit
@@ -184,5 +181,3 @@ def phase_unwrap(
         image_new = unwrap_phase(angle)
 
     return image_new
-
-
