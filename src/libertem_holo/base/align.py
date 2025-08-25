@@ -23,6 +23,10 @@ from libertem_holo.base.filters import central_line_filter, disk_aperture
 log = logging.getLogger(__name__)
 
 
+def _hanning_2d(img, xp):
+    return img * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
+
+
 def _upsampled_dft(
     corrspecs: npt.NDArray,
     frequencies: tuple[np.ndarray, np.ndarray],
@@ -261,7 +265,7 @@ class ImageCorrelator(Correlator):
 
         # apply hanning filter:
         if self._hanning:
-            img = img * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
+            img = _hanning_2d(img, xp=xp)
 
         # apply binning:
         if self._zoom_factor != 1:
@@ -415,9 +419,7 @@ class BrightFieldCorrelator(Correlator):
         holo_bf = np.gradient(holo_bf)[0]
         # apply hanning filter:
         if self._hanning:
-            holo_bf = holo_bf * self._xp.outer(
-                self._xp.hanning(holo_bf.shape[0]), self._xp.hanning(holo_bf.shape[1])
-            )
+            holo_bf = _hanning_2d(holo_bf, xp=self._xp)
         return holo_bf
 
     def correlate(
@@ -469,9 +471,7 @@ class PhaseImageCorrelator(Correlator):
 
         # apply hanning filter:
         if self._hanning:
-            phase = phase * self._xp.outer(
-                self._xp.hanning(phase.shape[0]), self._xp.hanning(phase.shape[1])
-            )
+            phase = _hanning_2d(phase, xp=self._xp)
 
         return phase
 
@@ -531,8 +531,7 @@ class AmplitudeCorrelator(Correlator):
 
         # apply hanning filter:
         if self._hanning:
-            xp = self._xp
-            amp = amp * xp.outer(xp.hanning(amp.shape[0]), xp.hanning(amp.shape[1]))
+            amp = _hanning_2d(amp, xp=self._xp)
 
         return amp
 
