@@ -378,12 +378,14 @@ class BrightFieldCorrelator(Correlator):
         holoparams: HoloParams,
         upsample_factor: int = 1,
         normalization: Literal['phase'] | None = 'phase',
+        hanning: bool = True,
         xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
         self._normalization = normalization
         self._upsample_factor = upsample_factor
+        self._hanning = hanning
 
     def prepare_input(
         self,
@@ -411,6 +413,11 @@ class BrightFieldCorrelator(Correlator):
             )
         )
         holo_bf = np.gradient(holo_bf)[0]
+        # apply hanning filter:
+        if self._hanning:
+            holo_bf = holo_bf * self._xp.outer(
+                self._xp.hanning(holo_bf.shape[0]), self._xp.hanning(holo_bf.shape[1])
+            )
         return holo_bf
 
     def correlate(
@@ -444,12 +451,14 @@ class PhaseImageCorrelator(Correlator):
         holoparams: HoloParams,
         upsample_factor: int = 1,
         normalization: Literal['phase'] | None = 'phase',
+        hanning: bool = True,
         xp: typing.Any = np,
     ) -> None:
         self._holoparams = holoparams
         self._xp = xp
         self._normalization = normalization
         self._upsample_factor = upsample_factor
+        self._hanning = hanning
 
     def prepare_input(
         self,
@@ -457,6 +466,13 @@ class PhaseImageCorrelator(Correlator):
     ) -> typing.Any:
         holoparams = self._holoparams
         phase = get_phase(img, holoparams, xp=self._xp)
+
+        # apply hanning filter:
+        if self._hanning:
+            phase = phase * self._xp.outer(
+                self._xp.hanning(phase.shape[0]), self._xp.hanning(phase.shape[1])
+            )
+
         return phase
 
     def correlate(
