@@ -1,5 +1,4 @@
 variables:
-  - group: Packaging
   - group: Coverage
   - name: PIP_CACHE_DIR
     value: $(Pipeline.Workspace)/.pip
