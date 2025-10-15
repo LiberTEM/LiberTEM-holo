@@ -352,6 +352,10 @@ class HoloParams(typing.NamedTuple):
             xp=self.xp,
         )
 
+    @property
+    def slice_fft(self):
+        return get_slice_fft(self.out_shape, self.orig_shape)
+
 
 @lru_cache
 def shifted_coords_for_shape(shape):
