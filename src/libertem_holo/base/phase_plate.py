@@ -28,7 +28,7 @@ def apply_phase_plate(
     wave_f = np.fft.fft2(wave) / np.prod(wave.shape)
     xx = np.fft.fftfreq(n=wave.shape[1], d=px_size)
     yy = np.fft.fftfreq(n=wave.shape[0], d=px_size)
-    gx, gy = np.meshgrid(xx, yy, indexing='ij')
+    gx, gy = np.meshgrid(xx, yy, indexing='xy')
     g = gx + 1j * gy
     chi = np.pi * wavelength * np.real(defocus * g * np.conjugate(g))
     wave_f_defocused = wave_f * np.exp(1j * chi)
