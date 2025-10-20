@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def aberrations_homemade(
+def apply_phase_plate(
     wave: np.ndarray,
     px_size: float,
     defocus: float,
