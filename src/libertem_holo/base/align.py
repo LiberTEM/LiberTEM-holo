@@ -688,7 +688,7 @@ class NoopCorrelator(Correlator):
 def align_stack(
     stack: np.ndarray,
     wave_stack: np.ndarray,
-    static: np.ndarray | None,
+    static: np.ndarray | None = None,
     correlator: Correlator | None = None,
     xp=np,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
