@@ -328,10 +328,11 @@ def _butterworth_line_kernel(
     sb_dist = math.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
     length = sb_dist * (1 - length_ratio)
 
-    if sb_position[0] - cy >= 0:
-        sb_sel = 1
+    # right X half:
+    if sb_position[1] - cx >= 0:
+        direction_factor = -1
     else:
-        sb_sel = -1
+        direction_factor = 1
 
     # shift to starting point
     cy += length * (sb_position[0] - cy) / sb_dist
@@ -343,7 +344,7 @@ def _butterworth_line_kernel(
     d = y0 - c * x0
     xc = (d-c)/(a-b)
 
-    if sb_sel * xc < 0:
+    if direction_factor * xc < 0:
         dist = abs(a*x0 - y0 + b)/math.sqrt(a**2 + 1)
     else:
         dist = math.sqrt((y-cy-1)**2 + (x-cx)**2)
