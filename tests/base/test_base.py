@@ -65,6 +65,24 @@ def test_params_from_hologram(backend: str, holo_data, line_filter_width) -> Non
     )
 
 
+def test_params_sb_upper_lower(holo_data):
+    holo, ref, phase_ref, slice_crop = holo_data
+    p1 = HoloParams.from_hologram(
+        ref[0, 0],
+        central_band_mask_radius=1,
+        out_shape=(32, 32),
+        sb='upper',
+    )
+    p2 = HoloParams.from_hologram(
+        ref[0, 0],
+        central_band_mask_radius=1,
+        out_shape=(32, 32),
+        sb='lower',
+    )
+    assert p1.sb_position_int == (53, 58)
+    assert p2.sb_position_int == (11, 6)
+
+
 def test_butterworth_disk_cpu_gpu_equiv():
     d = detect()
     if not d['cudas'] or not d['has_cupy']:

@@ -240,6 +240,7 @@ class HoloParams(typing.NamedTuple):
         line_filter_length: float = 0.9,
         line_filter_width: float | None = 3,
         line_filter_order: int = 2,
+        sb: Literal["lower", "upper"] = "upper",
         xp: XPType = np,
     ) -> HoloParams:
         """Determine reconstruction parameters from a hologram.
@@ -289,7 +290,7 @@ class HoloParams(typing.NamedTuple):
             sb_position = estimate_sideband_position(
                 holo_data=hologram,
                 holo_sampling=(1, 1),
-                sb='upper',  # as both sideband positions are equivalent, picking 'upper' here
+                sb=sb,
                 central_band_mask_radius=central_band_mask_radius,
                 xp=xp,
             )
