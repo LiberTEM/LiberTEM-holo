@@ -3,6 +3,7 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
+from libertem_holo.base.generate import hologram_frame
 from libertem_holo.base.reconstr import get_phase, phase_offset_correction
 from libertem_holo.base.filters import butterworth_disk, butterworth_line
 
@@ -120,6 +121,35 @@ def test_butterworth_line_cpu_gpu_equiv():
     )
 
     assert np.allclose(line_gpu.get(), line_cpu)
+
+
+def test_linefilter_orientation_l_r():
+    sy, sx = 64, 64
+    ref = hologram_frame(np.ones((sy, sx)), np.zeros((sy, sx)), f_angle=30)
+    ref_rot = hologram_frame(np.ones((sy, sx)), np.zeros((sy, sx)), f_angle=120)
+    p = HoloParams.from_hologram(ref)
+    p_rot = HoloParams.from_hologram(ref_rot)
+    line = butterworth_line(
+        shape=(64, 64),
+        width=10,
+        sb_position=p.sb_position_int,
+        order=25
+    )
+    line_rot = butterworth_line(
+        shape=(64, 64),
+        width=10,
+        sb_position=p_rot.sb_position_int,
+        order=25
+    )
+
+    # line filter comes from top-left:
+    assert np.allclose(line[0, 0], 0)
+
+    # bottom right is all-ones:
+    assert np.allclose(line[-1, -1], 1)
+
+    # in the rotated case, line filter comes from bottom left:
+    assert np.allclose(line_rot[-1, 0], 0)
 
 
 @pytest.mark.with_numba
