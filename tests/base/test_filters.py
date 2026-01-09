@@ -7,6 +7,7 @@ from libertem_holo.base.generate import hologram_frame
 from libertem_holo.base.filters import butterworth_disk, butterworth_line
 
 
+@pytest.mark.with_numba
 def test_linefilter_orientation_l_r():
     sy, sx = 64, 64
     ref = hologram_frame(np.ones((sy, sx)), np.zeros((sy, sx)), f_angle=30)
@@ -36,6 +37,7 @@ def test_linefilter_orientation_l_r():
     assert np.allclose(line_rot[-1, 0], 0)
 
 
+@pytest.mark.with_numba
 def test_linefilter_orientation_upper_lower():
     sy, sx = 64, 64
     ref = hologram_frame(np.ones((sy, sx)), np.zeros((sy, sx)), f_angle=30)
