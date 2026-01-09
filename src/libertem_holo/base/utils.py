@@ -280,6 +280,9 @@ class HoloParams(typing.NamedTuple):
         line_filter_order
             Order of the butterworth filter applied to the line part
 
+        sb
+            Chooses which sideband is taken. 'lower' or 'upper'
+
         xp
             Pass in either the numpy or cupy module to select CPU or GPU processing
         """
