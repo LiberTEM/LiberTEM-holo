@@ -45,18 +45,21 @@ def get_neighbours_ud(idx: int, im_size: int, width: int):
 @numba.njit
 def get_neighbours(idx: int, height: int, width: int, connectivity: int):
     im_size = height * width
-    yield from get_neighbours_ud(idx, im_size, width)
+    for neigh in get_neighbours_ud(idx, im_size, width):
+        yield neigh
     left = idx - 1
     right = idx + 1
     col = idx % width
     if col > 0:
         yield left
         if connectivity > 4:
-            yield from get_neighbours_ud(left, im_size, width)
+            for neigh in get_neighbours_ud(left, im_size, width):
+                yield neigh
     if width - col > 1:
         yield right
         if connectivity > 4:
-            yield from get_neighbours_ud(right, im_size, width)
+            for neigh in get_neighbours_ud(right, im_size, width):
+                yield neigh
 
 
 @numba.njit
@@ -159,9 +162,8 @@ def quality_unwrap(
 
     return flat_uw_phase.reshape(img_shape)
 
-def phase_unwrap(
-        image: np.ndarray
-        ) -> np.ndarray:
+
+def phase_unwrap(image: np.ndarray) -> np.ndarray:
     """Unwrap the complex / wrapped phase image.
 
     Parameters
