@@ -1,7 +1,7 @@
+"""Magnetic phase analysis."""
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from scipy.constants import pi, mu_0
 from libertem_holo.base.filters import clipped
 
 # --- Physical constants (SI) ---
@@ -113,11 +113,11 @@ def get_samp_params(
         'm': m,
         'p': p,
         'phi0': 2.07e3,
-        'mu0': 4 * pi * 1e-7,
+        'mu0': 4 * np.pi * 1e-7,
         'muB': 9.274e3
     }
     constants['fov'] = constants['n'] * constants['p']
-    constants['fact'] = constants['phi0'] / (pi * constants['mu0'] * constants['muB'])
+    constants['fact'] = constants['phi0']/(np.pi * constants['mu0'] * constants['muB'])
     return constants
 
 def define_region(
@@ -133,17 +133,28 @@ def define_region(
     p = get_samp_params['p']
     i_vals = np.linspace(-samp, samp, 2 * samp + 1)
 
-    cira1 = round_coords(np.array([[center[0] + (a/p)*i/samp, center[1] - (b/p)] for i in i_vals]))
-    cira2 = round_coords(np.array([[center[0] + (a/p)*i/samp, center[1] + (b/p)] for i in i_vals]))
-    cirb1 = round_coords(np.array([[center[0] - (a/p), center[1] + (b/p)*i/samp] for i in i_vals]))
-    cirb2 = round_coords(np.array([[center[0] + (a/p), center[1] + (b/p)*i/samp] for i in i_vals]))
+    cira1 = round_coords(
+        np.array([[center[0] + (a/p)*i/samp, center[1] - (b/p)] for i in i_vals])
+    )
+    cira2 = round_coords(
+        np.array([[center[0] + (a/p)*i/samp, center[1] + (b/p)] for i in i_vals])
+    )
+    cirb1 = round_coords(
+        np.array([[center[0] - (a/p), center[1] + (b/p)*i/samp] for i in i_vals])
+    )
+    cirb2 = round_coords(
+        np.array([[center[0] + (a/p), center[1] + (b/p)*i/samp] for i in i_vals])
+    )
 
     if plot:
         for coords in [cira1, cira2, cirb1, cirb2]:
             xy = to_xy(coords)
         plt.figure()
-        plt.imshow(img, cmap='gray', origin='lower', vmin=np.min(clipped(img)), vmax=np.max(clipped(img)))
-        plt.plot(xy[:, 0], xy[:, 1], marker='o', markersize=2, linestyle='None', color='red')
+        plt.imshow(
+            img, cmap='gray', origin='lower',
+            vmin=np.min(clipped(img)), vmax=np.max(clipped(img)),
+        )
+        plt.plot(xy[:, 0], xy[:, 1], marker='o', markersize=2, linestyle='None', c='r')
         plt.plot(center[1], center[0], 'bo', label='Center')
 
     return np.array([cira1, cira2, cirb1, cirb2])
@@ -161,10 +172,13 @@ def integrate(
         for x, y in coords:
             if 0 <= x < img.shape[0] and 0 <= y < img.shape[1]:
                 values.append(img[x, y])
-        I = np.sum(values)
-        integrations.append(I)
+        integrations.append(np.sum(values))
 
-def profile_uniform_sphere(x, B_perp, a):
+def profile_uniform_sphere(
+        x: np.ndarray,
+        B_perp: float,
+        a: float,
+    ) -> np.ndarray:
     """Model line profile for a uniformly magnetized sphere from pyramid (maybe)."""
     epsilon=1e-12
     x = np.array(x)
@@ -221,7 +235,10 @@ def phase_uniform_rod(
 
     coeff = -b_0 / (4 * PHI_0)
 
-    def _F_0(x, y):
+    def _F_0(
+            x: float,
+            y: float,
+        ) -> float:
         """Factor for geometry of rod."""
         A = np.log(x**2 + y**2 + 1E-30)
         B = np.arctan2(y, x)
@@ -281,7 +298,10 @@ def profile_uniform_rod(
     PHI_0 = 2.067833848e-15  # Magnetic flux quantum in T*m^2
     coeff = -b_0 / (4 * PHI_0)
 
-    def _F_0(x, y):
+    def _F_0(
+            x: float,
+            y: float,
+        ) -> float:
         """Factor for geometry of rod."""
         A = np.log(x**2 + y**2 + 1E-30)
         B = np.arctan2(y, x)
