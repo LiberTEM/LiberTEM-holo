@@ -234,10 +234,10 @@ class ImageCorrelator(Correlator):
     """
     def __init__(
         self,
-        upsample_factor: int = 1,
+        upsample_factor: int = 10,
         normalization: Literal['phase'] | None = 'phase',
         hanning: bool = True,
-        binning: int = 1,
+        binning: int = 2,
         xp: typing.Any = np,
     ) -> None:
         self._xp = xp

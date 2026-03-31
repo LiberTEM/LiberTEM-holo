@@ -3,11 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from libertem_holo.base.filters import clipped
+from scipy.constants import hbar, mu_0, e
 
 # --- Physical constants (SI) ---
-HBAR = 1.054_571_817e-34      # Js
-MU0  = 4 * np.pi * 1e-7       # H/m
-E    = 1.602_176_634e-19      # C
 PHI_0 = 2.067833848e-15  # T*m^2
 MU_B = 9.274009e-24 # Am2
 
@@ -76,8 +74,8 @@ def estimate_magnetic_moment_loop_integral(
         integrand_x = -np.sin(theta) * phase_loop
         integrand_y = np.cos(theta) * phase_loop
 
-        m_B_x = (HBAR / (E * MU0)) * radius_m * np.trapz(integrand_x, theta)
-        m_B_y = (HBAR / (E * MU0)) * radius_m * np.trapz(integrand_y, theta)
+        m_B_x = (hbar / (e * mu_0)) * radius_m * np.trapz(integrand_x, theta)
+        m_B_y = (hbar / (e * mu_0)) * radius_m * np.trapz(integrand_y, theta)
 
         m_B_components.append((m_B_x, m_B_y))
 
@@ -186,12 +184,12 @@ def profile_uniform_sphere(
     abs_x = np.abs(x)
     inside = abs_x <= a
     result[inside] = (
-        (E / HBAR) * B_perp *
+        (e / hbar) * B_perp *
         ((a**3 - (a**2 - x[inside]**2)**(3/2)) / (x[inside] + epsilon))
     )
     outside = abs_x > a
     result[outside] = (
-        (E / HBAR) * B_perp *
+        (e / hbar) * B_perp *
         (a**3 / (x[outside] + epsilon))
     )
     return result
