@@ -21,10 +21,10 @@ and after reconstruction, saving the results in a simple numpy npz file.
 .. testcode:: load_data
    :skipif: path_to_data is None
 
-    from libertem_holo.base.io import InputData
+   from libertem_holo.base.io import InputData
 
-    # insert the full path to a dm3 or dm4 file here:
-    input_data = InputData.load_from_dm(path_to_data)
+   # insert the full path to a dm3 or dm4 file here:
+   input_data = InputData.load_from_dm(path_to_data)
 
 
 The data itself and the most important metadata is directly available:
@@ -32,17 +32,17 @@ The data itself and the most important metadata is directly available:
 .. testcode:: load_data
    :skipif: path_to_data is None
 
-    print(f"shape: {input_data.data.shape}")
-    print(f"pixel size: {input_data.pixelsize} nm")
-    print(f"total expsure time: {input_data.exposure_time} s")
+   print(f"shape: {input_data.data.shape}")
+   print(f"pixel size: {input_data.pixelsize} nm")
+   print(f"total expsure time: {input_data.exposure_time} s")
 
 This code will print, for example:
 
 .. testoutput:: load_data
 
-    shape: (20, 3838, 3710)
-    pixel size: 0.1671157330274582 nm
-    total expsure time: 120.0 s
+   shape: (20, 3838, 3710)
+   pixel size: 0.1671157330274582 nm
+   total expsure time: 120.0 s
 
 We make a few assumptions:
 
@@ -51,9 +51,9 @@ We make a few assumptions:
 
 .. note::
 
-    If you are using UDFs for reconstruction, you need to use
-    :ref:`the I/O functionality of LiberTEM <libertem:dataset api>` to load data.
-    This is especially useful for reconstructing very large stacks.
+   If you are using UDFs for reconstruction, you need to use
+   :ref:`the I/O functionality of LiberTEM <libertem:dataset api>` to load data.
+   This is especially useful for reconstructing very large stacks.
 
 
 Saving and loading results
@@ -89,18 +89,18 @@ format:
 .. testcode:: results
    :skipif: path_to_data is None
 
-    from libertem_holo.base.io import Results
+   from libertem_holo.base.io import Results
 
-    res = Results(
-        complex_wave=wave,
-        unwrapped_phase=phase,
-        brightfield=brightfield,
-        metadata={"custom": 12.34},
-    )
-    # save_path is the full or relative path that ends in .npz
-    # where your data will be saved:
-    print(f"saving to {save_path}")
-    res.save(save_path)
+   res = Results(
+       complex_wave=wave,
+       unwrapped_phase=phase,
+       brightfield=brightfield,
+       metadata={"custom": 12.34},
+   )
+   # save_path is the full or relative path that ends in .npz
+   # where your data will be saved:
+   print(f"saving to {save_path}")
+   res.save(save_path)
 
 .. testoutput:: results
    :options: +ELLIPSIS
@@ -113,15 +113,15 @@ in the results:
 .. testcode:: results
    :skipif: path_to_data is None
 
-    res.metadata_from_input(
-        input_data=input_data,
-        params=holo_params,  # a HoloParams instance
-    )
-    res.save(save_path)
-    print(f"effective pixel size: {res.metadata['effective_pixelsize']} nm")
-    print(f"stack shape: {res.metadata['stack_shape']}")
-    print(f"total exposure time: {res.metadata['exposure_time']} s")
-    print(f"a custom value: {res.metadata['custom']}")
+   res.metadata_from_input(
+       input_data=input_data,
+       params=holo_params,  # a HoloParams instance
+   )
+   res.save(save_path)
+   print(f"effective pixel size: {res.metadata['effective_pixelsize']} nm")
+   print(f"stack shape: {res.metadata['stack_shape']}")
+   print(f"total exposure time: {res.metadata['exposure_time']} s")
+   print(f"a custom value: {res.metadata['custom']}")
 
 This code will print, for example:
 
