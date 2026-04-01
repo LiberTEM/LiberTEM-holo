@@ -207,6 +207,16 @@ issues_github_path = "LiberTEM/LiberTEM-holo"
 # is not set up correctly
 doctest_test_doctest_blocks = ''
 
+doctest_global_setup = '''
+import os
+import pathlib
+base_path = os.environ.get('TESTDATA_BASE_PATH')
+if base_path is None or len(base_path) == 0:
+    path_to_data = None
+else:
+    path_to_data = pathlib.Path(base_path) / 'dm' / '3D' / 'alpha-50_obj.dm3'
+'''
+
 # -- Options for todo extension ----------------------------------------------
 
 # If true, `todo` and `todoList` produce output, else they produce nothing.
