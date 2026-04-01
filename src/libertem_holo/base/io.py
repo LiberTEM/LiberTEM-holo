@@ -8,7 +8,7 @@ results as numpy .npz files
 import numpy as np
 import json
 from typing import Any, NamedTuple
-from ncmepy.io.dm import fileDM
+from ncempy.io.dm import fileDM
 
 
 def save_results(

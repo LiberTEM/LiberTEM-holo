@@ -23,6 +23,7 @@ dependencies = [
     # otherwise, version resolution might try to install an ancient version
     # that isn't constrained properly:
     "numba>=0.61;python_version >= '3.15'",  
+    "ncempy",
     "scipy",
     "sparse",
     "sparseconverter",
