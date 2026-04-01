@@ -51,11 +51,11 @@ stages:
         displayName: 'install tox'
 
       - ${{ if eq(parameters.recreate_tox, true) }}:
-        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -r -- examples/*.ipynb -v
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -r -- notebooks/*.ipynb -v
           displayName: 'Run nbval tests $(Agent.OS) (recreating)'
 
       - ${{ if eq(parameters.recreate_tox, false) }}:
-        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- examples/*.ipynb -v
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- notebooks/*.ipynb -v
           displayName: 'Run nbval tests $(Agent.OS)'
 
       - bash: ./scripts/codecov.sh -f ./coverage.xml
