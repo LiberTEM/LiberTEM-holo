@@ -4,6 +4,10 @@
 * [ ] I have added [a changelog entry](https://github.com/LiberTEM/LiberTEM/tree/master/docs/source/changelog) for my contribution
 * [ ] I have added/updated documentation for all user-facing changes
 * [ ] I have added/updated test cases
+#
+## Reviewer Checklist:
+
+* [ ] `/azp run libertem.libertem-holo` passed
 
 <!--
 
