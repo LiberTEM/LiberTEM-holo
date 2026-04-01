@@ -38,11 +38,11 @@ def test_save_roudtrip(tmp_path):
 
 
 def test_optional_fields(tmp_path):
-    data = np.random.random((128, 128)) + 1j * np.random.random((128, 128))
+    wave = np.random.random((128, 128)) + 1j * np.random.random((128, 128))
     phase = np.random.random((128, 128))
     brightfield = np.random.random((128, 128))
     res = Results(
-        complex_wave=data,
+        complex_wave=wave,
         unwrapped_phase=phase,
         brightfield=brightfield,
         metadata={"stuff": 6.54},
