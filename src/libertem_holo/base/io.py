@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Basic I/O for holography data.
 
@@ -5,11 +6,16 @@ We mostly want to support loading holograms from DM{3,4} files, and save
 results as numpy .npz files
 """
 
-import numpy as np
 import json
-from typing import Any
-from ncempy.io.dm import fileDM
+import pathlib
+from typing import Any, TYPE_CHECKING
 from dataclasses import dataclass
+
+import numpy as np
+from ncempy.io.dm import fileDM
+
+if TYPE_CHECKING:
+    from libertem_holo.base.utils import HoloParams
 
 
 @dataclass
@@ -19,7 +25,8 @@ class Results:
     Parameters
     ----------
     complex_wave
-        2D numpy array (dtype complex64 or complex128)
+        the (averaged) complex wave as 2D numpy array (dtype complex64 or
+        complex128)
 
     unwrapped_phase
         2D numpy array of unwrapped phase (dtype float32 or float64)
@@ -32,30 +39,64 @@ class Results:
         Dictionary of custom metadata. The values have to be json-serializable
         (roughly numbers, strings, lists or dicts of these)
     """
+
     complex_wave: np.ndarray
     unwrapped_phase: np.ndarray | None = None
     brightfield: np.ndarray | None = None
     metadata: dict[str, Any] | None = None
 
-    def save(self, filename: str):
-        assert str(filename).endswith(".npz")
-        if self.metadata is None:
-            metadata = {}
-        else:
-            metadata = self.metadata
+    def metadata_from_input(
+        self,
+        input_data: "InputData",
+        params: HoloParams | None = None,
+    ):
+        """Update `metadata` from `input_data`.
+
+        The following keys will be set:
+         - `stack_shape`
+         - `exposure_time`
+         - `effective_pixelsize` if `params` are given and `input_data` has a pixel size
+
+        Parameters
+        ----------
+        input_data
+            The input hologram or hologram stack
+
+        params
+            The :class:`HoloParams` used for the reconstruction
+        """
+        self.metadata['stack_shape'] = list(input_data.data.shape)
+        self.metadata['exposure_time'] = float(input_data.exposure_time)
+        if params is not None and input_data.pixelsize is not None:
+            pxs = input_data.pixelsize / params.scale_factor
+            self.metadata['effective_pixelsize'] = pxs
+
+    def save(
+        self,
+        path: str | pathlib.Path,
+    ):
+        """Save result data as npz file.
+
+        Parameters
+        ----------
+        path
+            The path to the .npz file that will be created
+        """
+        assert str(path).endswith(".npz")
+
         arrays = {
             'complex_wave': self.complex_wave,
-            'metadata': json.dumps(metadata),
+            'metadata': json.dumps(self.metadata or {}),
         }
         if self.unwrapped_phase is not None:
             arrays['unwrapped_phase'] = self.unwrapped_phase
         if self.brightfield is not None:
             arrays['brightfield'] = self.brightfield
-        np.savez(filename, **arrays, allow_pickle=False)
+        np.savez(path, **arrays, allow_pickle=False)
 
     @classmethod
-    def load(cls, filename: str) -> "Results":
-        arrz = np.load(filename, allow_pickle=False)
+    def load(cls, path: str | pathlib.Path) -> "Results":
+        arrz = np.load(path, allow_pickle=False)
         kwargs = {}
         for name in ['complex_wave', 'unwrapped_phase', 'brightfield']:
             kwargs[name] = arrz.get(name)
@@ -69,22 +110,23 @@ class InputData:
     2D or 3D input data (holograms)
     """
     data: np.ndarray
+    """the data array"""
 
-    # in nm
     pixelsize: float | None = None
+    """in nm"""
 
-    # raw tags from DM
     tags: dict[str, Any] | None = None
+    """raw tags from the DM file"""
 
-    # in seconds, for the whole stack in the 3D case
     exposure_time: float | None = None
+    """in seconds, for the whole stack in the 3D case"""
 
     @classmethod
-    def load_from_dm(cls, filename) -> "InputData":
+    def load_from_dm(cls, path) -> "InputData":
         """
         Load .dm3 or .dm4 data. Assumes a single 2D or 3D data set per file.
         """
-        dm = fileDM(filename)
+        dm = fileDM(path)
         ds = dm.getDataset(0)
 
         # [z, y, x] in 3D case, but we don't care about z
