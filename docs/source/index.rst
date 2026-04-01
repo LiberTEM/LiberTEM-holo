@@ -24,6 +24,7 @@ Documentation
     :caption: Reference
 
     reference/index
+    development
 
 
 Indices and tables

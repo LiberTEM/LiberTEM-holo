@@ -29,3 +29,4 @@ pip-wheel-metadata
 .benchmarks
 src/libertem_holo/_baked_revision.py
 *.dm4
+junit.xml
