@@ -10,12 +10,23 @@ import json
 import pathlib
 from typing import Any, TYPE_CHECKING
 from dataclasses import dataclass
+import datetime
 
 import numpy as np
 from ncempy.io.dm import fileDM
 
 if TYPE_CHECKING:
     from libertem_holo.base.utils import HoloParams
+
+
+# inspired by https://stackoverflow.com/a/38880683/540644
+def dt_from_filetime(ft):
+    """
+    Convert a windows FILETIME to a datetime
+    """
+    EPOCH_AS_FILETIME = 116444736000000000
+    us = (ft - EPOCH_AS_FILETIME) // 10
+    return datetime.datetime(1970, 1, 1) + datetime.timedelta(microseconds=us)
 
 
 @dataclass
@@ -56,6 +67,7 @@ class Results:
          - `stack_shape`
          - `exposure_time`
          - `effective_pixelsize` if `params` are given and `input_data` has a pixel size
+         - `acquisition_timestamp` if available in the input data tags
 
         Parameters
         ----------
@@ -70,6 +82,12 @@ class Results:
         if params is not None and input_data.pixelsize is not None:
             pxs = input_data.pixelsize / params.scale_factor
             self.metadata['effective_pixelsize'] = pxs
+        if input_data.tags is not None:
+            ft = input_data.tags.get('DataBar Acquisition Time (OS)')
+            if ft is not None:
+                ft = int(ft)
+                dt = dt_from_filetime(ft)
+                self.metadata['acquisition_timestamp'] = dt.isoformat()
 
     def save(
         self,
