@@ -11,6 +11,18 @@ def test_save_results(tmp_path):
     res.save(tmp_path / "test1.npz")
 
 
+def test_no_metadata(tmp_path):
+    data = np.random.random((128, 128)) + 1j * np.random.random((128, 128))
+    res = Results(
+        complex_wave=data,
+    )
+    res.save(tmp_path / "test1.npz")
+
+    res_l = Results.load(tmp_path / "test1.npz")
+    assert np.allclose(res.complex_wave, res_l.complex_wave)
+    assert res.metadata is None
+
+
 def test_save_roudtrip(tmp_path):
     data = np.random.random((128, 128)) + 1j * np.random.random((128, 128))
     res = Results(
