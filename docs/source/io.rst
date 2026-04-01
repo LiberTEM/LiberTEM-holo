@@ -3,7 +3,10 @@
    import os
    import pathlib
    base_path = os.environ.get('TESTDATA_BASE_PATH')
-   path_to_data = pathlib.Path(base_path) / 'dm' / '3D' / 'alpha-50_obj.dm3'
+   if base_path is None:
+      path_to_data = None
+   else:
+      path_to_data = pathlib.Path(base_path) / 'dm' / '3D' / 'alpha-50_obj.dm3'
 
 
 Input and Output
@@ -16,6 +19,7 @@ In our :ref:`I/O module <io api>`, we provide helpers for both loading data,
 and after reconstruction, saving the results in a simple numpy npz file.
 
 .. testcode:: load_data
+   :skipif: path_to_data is None
 
     from libertem_holo.base.io import InputData
 
@@ -26,6 +30,7 @@ and after reconstruction, saving the results in a simple numpy npz file.
 The data itself and the most important metadata is directly available:
 
 .. testcode:: load_data
+   :skipif: path_to_data is None
 
     print(f"shape: {input_data.data.shape}")
     print(f"pixel size: {input_data.pixelsize} nm")
@@ -82,6 +87,7 @@ format:
     )
 
 .. testcode:: results
+   :skipif: path_to_data is None
 
     from libertem_holo.base.io import Results
 
@@ -105,6 +111,7 @@ You can also include metadata from the input data and reconstruction parameters
 in the results:
 
 .. testcode:: results
+   :skipif: path_to_data is None
 
     res.metadata_from_input(
         input_data=input_data,
