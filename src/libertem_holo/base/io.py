@@ -7,19 +7,14 @@ results as numpy .npz files
 
 import numpy as np
 import json
-from typing import Any, NamedTuple
+from typing import Any
 from ncempy.io.dm import fileDM
+from dataclasses import dataclass
 
 
-def save_results(
-    filename: str,
-    complex_wave: np.ndarray,
-    unwrapped_phase: np.ndarray | None = None,
-    brightfield: np.ndarray | None = None,
-    metadata: dict[str, Any] = None,
-):
-    """
-    Save a typical reconstruction result.
+@dataclass
+class Results:
+    """Reconstruction results
 
     Parameters
     ----------
@@ -37,33 +32,52 @@ def save_results(
         Dictionary of custom metadata. The values have to be json-serializable
         (roughly numbers, strings, lists or dicts of these)
     """
-    if metadata is None:
-        metadata = {}
-    arrays = {
-        'complex_wave': complex_wave,
-        'metadata': json.dumps(metadata),
-    }
-    if unwrapped_phase is not None:
-        arrays['unwrapped_phase'] = unwrapped_phase
-    if brightfield is not None:
-        arrays['brightfield'] = brightfield
-    np.savez(filename, **arrays, allow_pickle=False)
+    complex_wave: np.ndarray
+    unwrapped_phase: np.ndarray | None = None
+    brightfield: np.ndarray | None = None
+    metadata: dict[str, Any] | None = None
+
+    def save(self, filename: str):
+        assert str(filename).endswith(".npz")
+        if self.metadata is None:
+            metadata = {}
+        else:
+            metadata = self.metadata
+        arrays = {
+            'complex_wave': self.complex_wave,
+            'metadata': json.dumps(metadata),
+        }
+        if self.unwrapped_phase is not None:
+            arrays['unwrapped_phase'] = self.unwrapped_phase
+        if self.brightfield is not None:
+            arrays['brightfield'] = self.brightfield
+        np.savez(filename, **arrays, allow_pickle=False)
+
+    @classmethod
+    def load(cls, filename: str) -> "Results":
+        arrz = np.load(filename, allow_pickle=False)
+        kwargs = {}
+        for name in ['complex_wave', 'unwrapped_phase', 'brightfield']:
+            kwargs[name] = arrz.get(name)
+        kwargs['metadata'] = json.loads(str(arrz['metadata']))
+        return cls(**kwargs)
 
 
-class InputData(NamedTuple):
+@dataclass
+class InputData:
     """
     2D or 3D input data (holograms)
     """
     data: np.ndarray
 
     # in nm
-    pixelsize: float | None
+    pixelsize: float | None = None
 
     # raw tags from DM
-    tags: dict[str, Any] | None
+    tags: dict[str, Any] | None = None
 
     # in seconds, for the whole stack in the 3D case
-    exposure_time: float | None
+    exposure_time: float | None = None
 
     @classmethod
     def load_from_dm(cls, filename) -> "InputData":
