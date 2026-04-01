@@ -67,11 +67,19 @@ class InputData(NamedTuple):
 
     @classmethod
     def load_from_dm(cls, filename) -> "InputData":
+        """
+        Load .dm3 or .dm4 data. Assumes a single 2D or 3D data set per file.
+        """
         dm = fileDM(filename)
         ds = dm.getDataset(0)
-        assert ds['pixelUnit'] == 'nm'
-        assert ds['pixelSize'][0] == ds['pixelSize'][1]
-        pixelsize = ds['pixelSize'][0]
+
+        # [z, y, x] in 3D case, but we don't care about z
+        units = ds['pixelUnit'][-2:]
+        sizes = ds['pixelSize'][-2:]
+
+        assert units[0] == 'nm', f'pixelUnit should be nm, is {ds["pixelUnit"]}'
+        assert sizes[0] == sizes[1]
+        pixelsize = sizes[0]
         assert len(ds['data'].shape) in (2, 3), "data should be 2D or 3D"
         exposure_time = dm.getMetadata(0)['DataBar Exposure Time (s)']
         if len(ds['data'].shape) == 3:
