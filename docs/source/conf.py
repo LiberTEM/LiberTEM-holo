@@ -190,7 +190,7 @@ man_pages = [
 #  dir menu entry, description, category)
 texinfo_documents = [
     (master_doc, 'LiberTEM-holo', 'LiberTEM-holo Documentation',
-     author, 'LiberTEM-holo', 'One line description of project.',
+     author, 'LiberTEM-holo', 'Open-source electron holography reconstruction.',
      'Miscellaneous'),
 ]
 

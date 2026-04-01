@@ -70,6 +70,9 @@ def test_result_metadata_from_input_data(tmp_path, holo_data):
         data=holo,
         exposure_time=24.6,
         pixelsize=0.106725,
+        tags={
+            'DataBar Acquisition Time (OS)': np.uint64(133857343696094653),
+        },
     )
     params = HoloParams.from_hologram(
         holo[0],
@@ -94,6 +97,7 @@ def test_result_metadata_from_input_data(tmp_path, holo_data):
     # pixel size is 4 times larger than the input pixel size, as that
     # is our out_shape relative to our input data:
     assert res.metadata['effective_pixelsize'] == 0.4269
+    assert res.metadata['acquisition_timestamp'] == '2025-03-06T11:32:49.609465'
 
     # and our custom metadata survived:
     assert res.metadata['stuff'] == 6.54
