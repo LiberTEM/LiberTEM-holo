@@ -16,15 +16,16 @@ Documentation
    :caption: Contents:
    
    usage
+   io
    changelog
    acknowledgments
 
 .. toctree::
-    :maxdepth: 2
-    :caption: Reference
+   :maxdepth: 2
+   :caption: Reference
 
-    reference/index
-    development
+   reference/index
+   development
 
 
 Indices and tables

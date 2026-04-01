@@ -40,6 +40,8 @@ Utility functions
 .. automodule:: libertem_holo.base.utils
     :members:
 
+.. _`io api`:
+
 Input/output
 ~~~~~~~~~~~~
 
