@@ -39,3 +39,9 @@ Utility functions
 
 .. automodule:: libertem_holo.base.utils
     :members:
+
+Input/output
+~~~~~~~~~~~~
+
+.. automodule:: libertem_holo.base.io
+    :members:
