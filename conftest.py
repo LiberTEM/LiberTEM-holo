@@ -119,3 +119,9 @@ def dm_testdata_path(scope='module'):
     if base_path is None:
         pytest.skip('need test data, TESTDATA_BASE_PATH is not set')
     return pathlib.Path(base_path) / 'dm'
+
+
+def pytest_collectstart(collector):
+    # nbval: ignore some output types
+    if collector.fspath and collector.fspath.ext == '.ipynb':
+        collector.skip_compare += 'text/html', 'application/javascript', 'stderr',
