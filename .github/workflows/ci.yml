@@ -27,7 +27,7 @@ jobs:
             - version: "3.13"
               toxenv: "313"
             - version: "3.14"
-              toxenv: "313"
+              toxenv: "314"
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
