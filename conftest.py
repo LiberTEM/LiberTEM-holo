@@ -3,6 +3,9 @@
 Use this file to define fixtures to use
 in both doctests and regular tests.
 """
+import os
+import pathlib
+
 import numpy as np
 import pytest
 from libertem.api import Context
@@ -108,3 +111,11 @@ def auto_ds(doctest_namespace, holo_data):
 def auto_ctx(doctest_namespace):
     ctx = Context(executor=InlineJobExecutor())
     doctest_namespace["ctx"] = ctx
+
+
+@pytest.fixture
+def dm_testdata_path(scope='module'):
+    base_path = os.environ.get('TESTDATA_BASE_PATH')
+    if base_path is None:
+        pytest.skip('need test data, TESTDATA_BASE_PATH is not set')
+    return pathlib.Path(base_path) / 'dm'
