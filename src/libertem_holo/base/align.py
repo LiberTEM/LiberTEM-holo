@@ -32,6 +32,7 @@ def _upsampled_dft(
     frequencies: tuple[np.ndarray, np.ndarray],
     upsampled_region_size: int,
     axis_offsets: tuple[float, float],
+    xp: typing.Any = np,
 ) -> np.ndarray:
     """
     From https://github.com/LiberTEM/LiberTEM-blobfinder, which is itself
@@ -41,18 +42,22 @@ def _upsampled_dft(
 
     :meta private:
     """
-    im2pi = -1j * 2 * np.pi
+    im2pi = -1j * 2 * xp.pi
     upsampled = corrspecs
     for (ax_freq, ax_offset) in zip(frequencies[::-1], axis_offsets[::-1]):
-        kernel = np.linspace(
+        print(xp.array(upsampled_region_size, dtype=int))
+        kernel = xp.linspace(
             -ax_offset,
             (-ax_offset + upsampled_region_size - 1),
-            num=int(upsampled_region_size),
+            num=xp.array(30, dtype=int),
+            # num=xp.array(upsampled_region_size, dtype=int),
         )
-        kernel = np.exp(kernel[:, None] * ax_freq * im2pi, dtype=np.complex64)
+        kernel_b = kernel[:, None]
+        kernel = xp.exp(kernel_b * ax_freq * im2pi)
+        # kernel = xp.exp(kernel_b * ax_freq * im2pi, dtype=xp.complex64)
         # Equivalent to:
         #   data[i, j, k] = kernel[i, :] @ data[j, k].T
-        upsampled = np.tensordot(kernel, upsampled, axes=(1, -1))
+        upsampled = xp.tensordot(kernel, upsampled, axes=(1, -1))
     return upsampled
 
 
@@ -112,12 +117,12 @@ def cross_correlate(
 
     if normalization == 'phase':
         eps = np.finfo(image_product.real.dtype).eps
-        image_product /= np.maximum(np.abs(image_product), 100 * eps)
+        image_product /= xp.maximum(xp.abs(image_product), 100 * eps)
     elif normalization is not None:
         raise ValueError(f"unknown normalization {normalization}")
 
     cross_correlation = xp.fft.ifftn(image_product)
-    shifted_corr = xp.fft.fftshift(np.abs(cross_correlation))
+    shifted_corr = xp.fft.fftshift(xp.abs(cross_correlation))
 
     maxima = xp.unravel_index(
         xp.argmax(shifted_corr),
@@ -142,12 +147,13 @@ def cross_correlate(
         # Center of output array at dftshift + 1
         dftshift = xp.fix(upsampled_region_size / 2.0)
         # Matrix multiply DFT around the current shift estimate
-        sample_region_offset = dftshift - np.round(shift * upsample_factor)
+        sample_region_offset = dftshift - xp.round(shift * upsample_factor)
         cross_correlation = _upsampled_dft(
             image_product.conj(),
             frequencies,
             upsampled_region_size,
             sample_region_offset,
+            xp=xp,
         ).conj()
         # Locate maximum and map back to original pixel grid
         maxima = xp.unravel_index(
@@ -161,6 +167,8 @@ def cross_correlate(
 
     if xp is np:
         shift = tuple(float(x) for x in shift)
+    elif xp.__name__ == "jax.numpy":
+        pass
     else:
         shift = tuple(float(for_backend(x, NUMPY)) for x in shift)
 
@@ -242,6 +250,7 @@ class ImageCorrelator(Correlator):
         normalization: Literal['phase'] | None = 'phase',
         hanning: bool = True,
         binning: int = 1,
+        gaussian_blur: float | None = None,
         xp: typing.Any = np,
     ) -> None:
         self._xp = xp
@@ -250,6 +259,7 @@ class ImageCorrelator(Correlator):
         self._hanning = hanning
         self._binning = binning
         self._zoom_factor = 1 / binning
+        self._gaussian_blur = gaussian_blur
 
     def prepare_input(
         self,
@@ -270,6 +280,9 @@ class ImageCorrelator(Correlator):
         # apply binning:
         if self._zoom_factor != 1:
             img = ni.zoom(img, self._zoom_factor)
+
+        if self._gaussian_blur is not None:
+            img = ni.gaussian_filter(img, sigma=self._gaussian_blur)
 
         return img
 
