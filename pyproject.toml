@@ -60,6 +60,14 @@ authors = [
 Repository = "https://github.com/LiberTEM/LiberTEM-holo"
 Documentation = "https://libertem.github.io/LiberTEM-holo"
 
+[project.optional-dependencies]
+gpu = [
+    # numba-cuda now lives in an external package so we can
+    # install a more recent version than the one that comes
+    # with core numba:
+    "numba-cuda",  
+]
+
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 "content-type" = "text/x-rst"
 
