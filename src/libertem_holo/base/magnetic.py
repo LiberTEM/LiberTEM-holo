@@ -1,52 +1,96 @@
-"""Magnetic phase analysis."""
+"""Magnetic phase analysis for electron holography.
+
+This module provides tools for quantitative analysis of magnetic phase images,
+including radial integration and analytical phase modeling for uniformly magnetized
+rods and spheres.
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from libertem_holo.base.filters import clipped
 from scipy.constants import hbar, mu_0, e
 
 # --- Physical constants (SI) ---
-PHI_0 = 2.067833848e-15  # T*m^2
-MU_B = 9.274009e-24 # Am2
+PHI_0 = 2.067833848e-15  # Magnetic flux quantum (T·m²)
+MU_B = 9.274009e-24       # Bohr magneton (A·m²)
 
-def to_xy(
-    coords: np.ndarray,
-) -> np.ndarray:
-    """Convert to (x, y) format for plotting."""
-    return np.array([[y, x] for x, y in coords])
 
-def round_coords(
-    arr: np.ndarray,
-) -> np.ndarray:
-    """Round coordinates to ensure integer values."""
-    return np.round(arr).astype(int)
-
-def estimate_magnetic_moment_loop_integral(
-        phase_image: np.ndarray,
-        pixel_size_m: float = 1.0e-9,
-        min_radius_m: float = 12.5e-9,
-        max_radius_m: float = 32.0e-9,
-    ) -> dict:
-    """Estimate the magnetic moment from a phase image using a loop integral.
+def plot_radius_ranges(
+    phase_image: np.ndarray,
+    pixel_size_m: float,
+    min_radius_m: float,
+    max_radius_m: float,
+) -> None:
+    """Plot the minimum and maximum radius ranges on the magnetic phase image.
 
     Parameters
     ----------
     phase_image : numpy.ndarray
-        Phase image in radians.
+        2D phase image in radians.
     pixel_size_m : float
-        Size of a pixel in meters (default: 1 nm/px).
+        Size of a pixel in meters.
+    min_radius_m : float
+        Minimum radius in meters.
+    max_radius_m : float
+        Maximum radius in meters.
+
+    """
+    ny, nx = phase_image.shape
+    x_center, y_center = nx // 2, ny // 2
+
+    min_radius_px = int(min_radius_m / pixel_size_m)
+    max_radius_px = int(max_radius_m / pixel_size_m)
+
+    theta = np.linspace(0, 2 * np.pi, 360, endpoint=False)
+    x_min = min_radius_px * np.cos(theta)
+    y_min = min_radius_px * np.sin(theta)
+    x_max = max_radius_px * np.cos(theta)
+    y_max = max_radius_px * np.sin(theta)
+
+    plt.figure()
+    plt.imshow(phase_image, cmap='gray', origin='lower')
+    plt.plot(
+        x_min + x_center, y_min + y_center,
+        'r--', label=f'Min radius: {min_radius_m:.1e} m',
+        )
+    plt.plot(
+        x_max + x_center, y_max + y_center,
+        'b--', label=f'Max radius: {max_radius_m:.1e} m',
+        )
+    plt.legend()
+    plt.title('Radius Ranges for Radial Integration')
+    plt.show()
+
+
+def radial_integration(
+    phase_image: np.ndarray,
+    pixel_size_m: float,
+    min_radius_m: float,
+    max_radius_m: float,
+    num_radii: int = 50,
+) -> dict:
+    """Perform iterative radial integration of a magnetic phase image.
+
+    Parameters
+    ----------
+    phase_image : numpy.ndarray
+        2D phase image in radians.
+    pixel_size_m : float
+        Size of a pixel in meters.
     min_radius_m : float
         Minimum integration radius in meters.
     max_radius_m : float
         Maximum integration radius in meters.
+    num_radii : int, optional
+        Number of radii to sample between min and max (default: 50).
 
     Returns
     -------
     dict
         Dictionary containing:
-        - radii: List of radii used for integration (in meters).
-        - m_B_components: Inductive moment components for each radius (in A·m²).
-        - m_components: Magnetic moment components for each radius (in A·m²).
+        - radii: Array of radii used for integration (in m).
+        - m_B_components: Inductive moment components for each radius (in Am²).
+        - m_components: Magnetic moment components for each radius (in Am²).
 
     """
     min_radius_px = int(min_radius_m / pixel_size_m)
@@ -56,7 +100,9 @@ def estimate_magnetic_moment_loop_integral(
     y, x = np.indices((ny, nx))
     x_center, y_center = nx // 2, ny // 2
 
-    radii = np.linspace(min_radius_px, max_radius_px, 50, endpoint=True) * pixel_size_m
+    radii = np.linspace(
+        min_radius_px, max_radius_px, num_radii, endpoint=True
+        ) * pixel_size_m
     m_B_components = []
 
     for radius_m in radii:
@@ -74,8 +120,9 @@ def estimate_magnetic_moment_loop_integral(
         integrand_x = -np.sin(theta) * phase_loop
         integrand_y = np.cos(theta) * phase_loop
 
-        m_B_x = (hbar / (e * mu_0)) * radius_m * np.trapz(integrand_x, theta)
-        m_B_y = (hbar / (e * mu_0)) * radius_m * np.trapz(integrand_y, theta)
+        d_theta = theta[1] - theta[0]  # Angular step size (assumes uniform theta)
+        m_B_x = (hbar / (e * mu_0)) * radius_m * np.sum(integrand_x) * d_theta
+        m_B_y = (hbar / (e * mu_0)) * radius_m * np.sum(integrand_y) * d_theta
 
         m_B_components.append((m_B_x, m_B_y))
 
@@ -88,125 +135,44 @@ def estimate_magnetic_moment_loop_integral(
         "m_components": m_components,
     }
 
-def fit_result(result: dict) -> tuple:
-    """Fit quadratic curve to radial integration of phase."""
+
+def fit_magnetic_moment(result: dict) -> tuple:
+    """Fit the radial integration results to extract the magnetic moment.
+
+    Parameters
+    ----------
+    result : dict
+        Output of `radial_integration`.
+
+    Returns
+    -------
+    tuple
+        Fitted magnetic moment components (m_x, m_y) in A·m².
+
+    """
     def _quadratic(x: np.ndarray, a: float, b: float) -> np.ndarray:
-        return a*x**2+b
+        return a * x**2 + b
 
-    fit=curve_fit(_quadratic, result['radii'], result['m_components'][...,0])
-    mx_fit = _quadratic(0, *fit[0])
-    fit=curve_fit(_quadratic, result['radii'], result['m_components'][...,1])
-    my_fit = _quadratic(0, *fit[0])
-    return mx_fit, my_fit
+    fit_x = curve_fit(_quadratic, result['radii'], result['m_components'][:, 0])
+    fit_y = curve_fit(_quadratic, result['radii'], result['m_components'][:, 1])
 
-def get_samp_params(
-    res: float,
-    shape: tuple,
-) -> dict:
-    """Get experimental sampling parameters of phase images."""
-    n, m = shape
-    p = res/n
-    constants = {
-        'n': n,
-        'm': m,
-        'p': p,
-        'phi0': 2.07e3,
-        'mu0': 4 * np.pi * 1e-7,
-        'muB': 9.274e3
-    }
-    constants['fov'] = constants['n'] * constants['p']
-    constants['fact'] = constants['phi0']/(np.pi * constants['mu0'] * constants['muB'])
-    return constants
+    m_x = _quadratic(0, *fit_x[0])
+    m_y = _quadratic(0, *fit_y[0])
 
-def define_region(
-    img: np.ndarray,
-    samp: int,
-    center: tuple,
-    radius: tuple,
-    plot: bool = False,
-) -> np.ndarray:
-    """Define rectangular region from mininum and maximum radius length."""
-    a = radius[0]
-    b = radius[1]
-    p = get_samp_params['p']
-    i_vals = np.linspace(-samp, samp, 2 * samp + 1)
+    return m_x, m_y
 
-    cira1 = round_coords(
-        np.array([[center[0] + (a/p)*i/samp, center[1] - (b/p)] for i in i_vals])
-    )
-    cira2 = round_coords(
-        np.array([[center[0] + (a/p)*i/samp, center[1] + (b/p)] for i in i_vals])
-    )
-    cirb1 = round_coords(
-        np.array([[center[0] - (a/p), center[1] + (b/p)*i/samp] for i in i_vals])
-    )
-    cirb2 = round_coords(
-        np.array([[center[0] + (a/p), center[1] + (b/p)*i/samp] for i in i_vals])
-    )
-
-    if plot:
-        for coords in [cira1, cira2, cirb1, cirb2]:
-            xy = to_xy(coords)
-        plt.figure()
-        plt.imshow(
-            img, cmap='gray', origin='lower',
-            vmin=np.min(clipped(img)), vmax=np.max(clipped(img)),
-        )
-        plt.plot(xy[:, 0], xy[:, 1], marker='o', markersize=2, linestyle='None', c='r')
-        plt.plot(center[1], center[0], 'bo', label='Center')
-
-    return np.array([cira1, cira2, cirb1, cirb2])
-
-
-def integrate(
-    img: np.ndarray,
-    coords: np.ndarray,
-) -> float:
-    """Integrate phase around region."""
-    region = define_region()
-    integrations = []
-    for coords in region:
-        values = []
-        for x, y in coords:
-            if 0 <= x < img.shape[0] and 0 <= y < img.shape[1]:
-                values.append(img[x, y])
-        integrations.append(np.sum(values))
-
-def profile_uniform_sphere(
-        x: np.ndarray,
-        B_perp: float,
-        a: float,
-    ) -> np.ndarray:
-    """Model line profile for a uniformly magnetized sphere from pyramid (maybe)."""
-    epsilon=1e-12
-    x = np.array(x)
-    result = np.zeros_like(x)
-    abs_x = np.abs(x)
-    inside = abs_x <= a
-    result[inside] = (
-        (e / hbar) * B_perp *
-        ((a**3 - (a**2 - x[inside]**2)**(3/2)) / (x[inside] + epsilon))
-    )
-    outside = abs_x > a
-    result[outside] = (
-        (e / hbar) * B_perp *
-        (a**3 / (x[outside] + epsilon))
-    )
-    return result
 
 def phase_uniform_rod(
-        dim: tuple,
-        Lx: float,
-        Ly: float,
-        Lz: float,
-        b_0: float,
-        phi: float = np.pi/2,
-        theta: float = np.pi/2,
-        a: float = 1e-9,
-    ) -> np.ndarray:
+    dim: tuple,
+    Lx: float,
+    Ly: float,
+    Lz: float,
+    b_0: float,
+    phi: float = np.pi/2,
+    theta: float = np.pi/2,
+    a: float = 1e-9,
+) -> np.ndarray:
     """Calculate the 2D phase map for a uniformly magnetized rod in SI units.
-
-    From pyramid but numpy friendly.
 
     Parameters
     ----------
@@ -217,26 +183,22 @@ def phase_uniform_rod(
     b_0 : float
         Magnetic induction in tesla (T).
     phi : float, optional
-        Azimuthal angle of magnetization in radians (default: 0.0, along y-axis).
+        Azimuthal angle of magnetization in radians (default: π/2).
     theta : float, optional
-        Polar angle of magnetization in radians (default: np.pi/2, in xy-plane).
+        Polar angle of magnetization in radians (default: π/2).
     a : float, optional
-        Grid spacing in meters (default: 1 nm = 1e-9 m).
+        Grid spacing in meters (default: 1e-9 m).
 
     Returns
     -------
-    phase_map : numpy.ndarray (dim[0], dim[1])
+    numpy.ndarray
         2D array of phase values in radians.
 
     """
     y_dim, x_dim = dim
-
     coeff = -b_0 / (4 * PHI_0)
 
-    def _F_0(
-            x: float,
-            y: float,
-        ) -> float:
+    def _F_0(x: float, y: float) -> float:
         """Factor for geometry of rod."""
         A = np.log(x**2 + y**2 + 1E-30)
         B = np.arctan2(y, x)
@@ -263,62 +225,39 @@ def phase_uniform_rod(
     return phase_map
 
 
-def profile_uniform_rod(
-        x: np.ndarray,
-        Lx: float,
-        Ly: float,
-        Lz: float,
-        b_0: float,
-        phi: float = np.pi/2,
-        theta: float = np.pi/2,
-    ) -> np.ndarray:
-    """Model for phase profile along x at y=0 for a uniformly magnetized rod.
+def profile_uniform_sphere(
+    x: np.ndarray,
+    B_perp: float,
+    a: float,
+) -> np.ndarray:
+    """Calculate the 2D phase map for a uniformly magnetized sphere.
 
     Parameters
     ----------
     x : numpy.ndarray
-        x-coordinates along the line profile in meters.
-    Lx, Ly, Lz : float
-        Dimensions of the rod in meters.
-    b_0 : float
-        Magnetic induction in tesla (T).
-    phi : float, optional
-        Azimuthal angle of magnetization in radians.
-    theta : float, optional
-        Polar angle of magnetization in radians.
+        x-coordinates in meters.
+    B_perp : float
+        Perpendicular magnetic induction in tesla (T).
+    a : float
+        Radius of the sphere in meters.
 
     Returns
     -------
-    phase_profile : numpy.ndarray
-        Phase values along the line profile in radians.
+    numpy.ndarray
+        Phase values in radians.
 
     """
-    PHI_0 = 2.067833848e-15  # Magnetic flux quantum in T*m^2
-    coeff = -b_0 / (4 * PHI_0)
-
-    def _F_0(
-            x: float,
-            y: float,
-        ) -> float:
-        """Factor for geometry of rod."""
-        A = np.log(x**2 + y**2 + 1E-30)
-        B = np.arctan2(y, x)
-        return x * A - 2 * x + 2 * y * B
-
-    # y=0 for the line profile
-    phase_profile = coeff * Lz * (
-        -np.cos(phi) * np.sin(theta) * (
-            -_F_0(x - Lx/2, -Ly/2)
-            + _F_0(x + Lx/2, -Ly/2)
-            + _F_0(x - Lx/2, +Ly/2)
-            - _F_0(x + Lx/2, +Ly/2)
-        )
-        + np.sin(phi) * np.sin(theta) * (
-            -_F_0(-Ly/2, x - Lx/2)
-            + _F_0(+Ly/2, x - Lx/2)
-            + _F_0(-Ly/2, x + Lx/2)
-            - _F_0(+Ly/2, x + Lx/2)
-        )
+    epsilon = 1e-12
+    x = np.array(x)
+    result = np.zeros_like(x)
+    abs_x = np.abs(x)
+    inside = abs_x <= a
+    num = (a**3 - (a**2 - x[inside]**2)**(3/2))
+    result[inside] = (
+        (e / hbar) * B_perp * num / (x[inside] + epsilon)
     )
-
-    return phase_profile
+    outside = abs_x > a
+    result[outside] = (
+        (e / hbar) * B_perp * (a**3 / (x[outside] + epsilon))
+    )
+    return result
