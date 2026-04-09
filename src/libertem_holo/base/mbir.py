@@ -74,30 +74,6 @@ def exchange_loss_fn(mag, reg_mask):
     return loss
 
 
-def amplitude_loss_fn(mag, reg_mask, target_amp=None):
-    """
-    2D amplitude regularization on the in-plane magnitude.
-
-    If target_amp is None, penalizes variance of |m| within reg_mask_2d.
-    Otherwise, penalizes (|m| - target_amp)^2.
-    """
-    reg_mask = jnp.asarray(reg_mask)
-    if reg_mask.shape != mag.shape[1:]:
-        raise ValueError(
-            f"reg_mask must have shape {mag.shape[1:]}; got {reg_mask.shape}."
-        )
-    amplitude = jnp.sqrt(jnp.sum(mag * mag, axis=0) + 1e-12)
-    mask_count = jnp.sum(reg_mask) + 1e-9
-
-    if target_amp is None:
-        target = jnp.sum(amplitude * reg_mask) / mask_count
-    else:
-        target = jnp.asarray(target_amp, dtype=amplitude.dtype)
-
-    diff = (amplitude - target) * reg_mask
-    return jnp.sum(diff * diff)
-
-
 def get_freq_grid(height, width, voxel_size_nm):
     """Frequency grids for FFT-based phase propagation."""
     fy = jnp.fft.fftfreq(height, d=voxel_size_nm)
@@ -266,16 +242,8 @@ def mbir_loss_2d(
     lambda_exchange = jnp.asarray(
         reg_config.get("lambda_exchange", 0.0), dtype=loss.dtype
     )
-    lambda_amplitude = jnp.asarray(
-        reg_config.get("lambda_amplitude", 0.0), dtype=loss.dtype
-    )
 
     loss += lambda_exchange * exchange_loss_fn(magnetization, reg_mask)
-    loss += lambda_amplitude * amplitude_loss_fn(
-        magnetization,
-        reg_mask,
-        target_amp=reg_config.get("target_amplitude"),
-    )
 
     return loss
 
