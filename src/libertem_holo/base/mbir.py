@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import NamedTuple, Union
+from typing import Any, NamedTuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -31,25 +31,36 @@ class LCurveResult(NamedTuple):
     corner_index: int
 
 
+class BootstrapThresholdResult(NamedTuple):
+    """Result returned by :func:`bootstrap_threshold_uncertainty_2d`."""
+    threshold: float
+    threshold_low: float
+    threshold_high: float
+    threshold_draws: np.ndarray
+    magnetizations: jnp.ndarray
+    mean_magnetization: jnp.ndarray
+    mean_norm: np.ndarray
+    norm_low: np.ndarray
+    norm_high: np.ndarray
+    norm_ci95: np.ndarray
+    relative_ci95: np.ndarray
+    mask_frequency: np.ndarray
+
+
 @dataclasses.dataclass(frozen=True)
 class NewtonCGConfig:
     """Configuration for the Newton-CG solver.
 
     Parameters
     ----------
-    num_steps : int
-        Number of outer Newton iterations.  Each iteration
-        solves ``H @ delta = -g`` via CG and updates the
-        parameters.
     cg_maxiter : int
-        Maximum number of conjugate-gradient iterations per
-        Newton step.
+        Maximum number of conjugate-gradient iterations used to
+        solve the Newton system ``H @ delta = -g``.
     cg_tol : float
         CG convergence tolerance (relative residual norm).
     """
-    num_steps: int = 50
-    cg_maxiter: int = 200
-    cg_tol: float = 1e-5
+    cg_maxiter: int = 10000
+    cg_tol: float = 1e-10
 
 
 @dataclasses.dataclass(frozen=True)
@@ -263,7 +274,6 @@ def _rdfc_elementary_phase(
     geometry: str,
     n: jax.Array,
     m: jax.Array,
-    voxel_size_nm: float,
 ) -> jax.Array:
     """Compute the elementary kernel phase for the RDFC mapper.
 
@@ -275,9 +285,6 @@ def _rdfc_elementary_phase(
         Row coordinate array.
     m
         Column coordinate array.
-    voxel_size_nm
-        Pixel size in nanometres.
-
     Returns
     -------
     jax.Array
@@ -288,7 +295,7 @@ def _rdfc_elementary_phase(
         return m / (n**2 + m**2 + 1e-30) * in_or_out
     if geometry == "slab":
         def _F_a(n_val, m_val):
-            radius2 = voxel_size_nm**2 * (n_val**2 + m_val**2) + 1e-30
+            radius2 = n_val**2 + m_val**2 + 1e-30
             A = jnp.log(radius2)
             B = jnp.arctan(n_val / (m_val + 1e-30))
             return n_val * A - 2 * n_val + 2 * m_val * B
@@ -302,40 +309,37 @@ def _rdfc_elementary_phase(
     raise ValueError("Unknown geometry (use 'disc' or 'slab')")
 
 
+@jax.jit(static_argnames=["dim_uv", "b0_tesla", "geometry", "dtype"])
 def build_rdfc_kernel(
-    voxel_size_nm: float,
     dim_uv: tuple[int, int],
     b0_tesla: float = 1.0,
-    geometry: Literal["disc", "slab"] = "disc",
+    geometry: str = "disc",
     prw_vec: jax.Array | None = None,
-    dtype: Any = jnp.float64,
+    dtype: type = jnp.float64,
 ) -> dict[str, Any]:
-    """Build an RDFC phase-mapping kernel in Fourier space.
+    """Build an RDFC kernel in Fourier space using pixel coordinates.
 
-    JAX translation of ``pyramid.Kernel`` for ``PhaseMapperRDFC``.
+    The kernel is built on index-space coordinates ``(n, m)`` and therefore
+    does not include the physical pixel-size factor ``voxel_size_nm**2``.
+    Physical scaling is applied in :func:`forward_model_single_rdfc_2d`.
 
     Parameters
     ----------
-    voxel_size_nm
-        Pixel size in nanometres.
     dim_uv
         ``(height, width)`` of the magnetization field.
     b0_tesla
-        External magnetic field strength in Tesla, default 1.0.
+        External magnetic induction in Tesla.
     geometry
-        Voxel geometry used for the elementary phase kernel.
+        Elementary geometry, ``"disc"`` or ``"slab"``.
     prw_vec
         Optional projected reference wave vector ``(v, u)``.
-        When provided, the kernel accounts for the reference
-        wave tilt.
     dtype
-        JAX dtype for the kernel arrays, default ``jnp.float64``.
+        JAX dtype used for kernel arrays.
 
     Returns
     -------
     dict[str, Any]
-        Dictionary with keys ``'u_fft'``, ``'v_fft'`` (FFT'd kernel
-        components), ``'dim_uv'``, and ``'dim_pad'``.
+        Dictionary containing FFT'd kernel components and geometry metadata.
     """
     height, width = dim_uv
     dim_kern = (2 * height - 1, 2 * width - 1)
@@ -345,31 +349,29 @@ def build_rdfc_kernel(
     v_coords = jnp.linspace(-(height - 1), height - 1, num=dim_kern[0]).astype(dtype)
     uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
 
-    coeff = b0_tesla * voxel_size_nm**2 / (2 * PHI_0_T_NM2)
-    u_kernel = coeff * _rdfc_elementary_phase(geometry, uu, vv, voxel_size_nm)
-    v_kernel = -coeff * _rdfc_elementary_phase(geometry, vv, uu, voxel_size_nm)
+    coeff = b0_tesla / (2 * PHI_0_T_NM2)
+    
+    # Compute elementary phases once
+    elem_uv = _rdfc_elementary_phase(geometry, uu, vv)
+    elem_vu = _rdfc_elementary_phase(geometry, vv, uu)
+    
+    u_kernel = coeff * elem_uv
+    v_kernel = -coeff * elem_vu
 
     if prw_vec is not None:
         uu_prw = uu + prw_vec[1]
         vv_prw = vv + prw_vec[0]
-        u_kernel = u_kernel - coeff * _rdfc_elementary_phase(
-            geometry, uu_prw, vv_prw, voxel_size_nm
-        )
-        v_kernel = v_kernel + coeff * _rdfc_elementary_phase(
-            geometry, vv_prw, uu_prw, voxel_size_nm
-        )
+        elem_prw_uv = _rdfc_elementary_phase(geometry, uu_prw, vv_prw)
+        elem_prw_vu = _rdfc_elementary_phase(geometry, vv_prw, uu_prw)
+        u_kernel = u_kernel - coeff * elem_prw_uv
+        v_kernel = v_kernel + coeff * elem_prw_vu
 
-    u_pad = jnp.zeros(dim_pad, dtype=dtype)
-    v_pad = jnp.zeros(dim_pad, dtype=dtype)
-    u_pad = u_pad.at[:dim_kern[0], :dim_kern[1]].set(u_kernel)
-    v_pad = v_pad.at[:dim_kern[0], :dim_kern[1]].set(v_kernel)
-
-    u_fft = jnp.fft.rfft2(u_pad)
-    v_fft = jnp.fft.rfft2(v_pad)
+    u_pad = jnp.zeros(dim_pad, dtype=dtype).at[:dim_kern[0], :dim_kern[1]].set(u_kernel)
+    v_pad = jnp.zeros(dim_pad, dtype=dtype).at[:dim_kern[0], :dim_kern[1]].set(v_kernel)
 
     return {
-        "u_fft": u_fft,
-        "v_fft": v_fft,
+        "u_fft": jnp.fft.rfft2(u_pad),
+        "v_fft": jnp.fft.rfft2(v_pad),
         "dim_uv": dim_uv,
         "dim_pad": dim_pad,
     }
@@ -397,7 +399,12 @@ def phase_mapper_rdfc(
     Returns
     -------
     jax.Array
-        Magnetic phase-shift image of shape ``(H, W)``.
+        Pixel-coordinate phase image of shape ``(H, W)``.
+
+    Notes
+    -----
+    This mapper intentionally omits the physical ``voxel_size_nm**2`` factor.
+    Use :func:`forward_model_single_rdfc_2d` to obtain physically scaled phase.
     """
     height, width = u_field.shape
     dim_pad = (2 * height, 2 * width)
@@ -461,6 +468,10 @@ def forward_model_single_rdfc_2d(
     Computes the magnetic phase shift from a 2D projected
     magnetization field and adds a polynomial background ramp.
 
+    The Fourier mapper returns phase in pixel-coordinate units.
+    This function applies the physical pixel-size scaling
+    ``voxel_size_nm**2`` before adding the ramp.
+
     Parameters
     ----------
     magnetization
@@ -483,7 +494,9 @@ def forward_model_single_rdfc_2d(
     u_field = magnetization[..., 0]
     v_field = magnetization[..., 1]
 
-    phase = phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
+    # Convert mapper output from pixel-coordinate units to physical phase units.
+    phase_px = phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
+    phase = voxel_size_nm**2 * phase_px
     ramp = apply_ramp(ramp_coeffs, height, width, voxel_size_nm)
 
     return phase + ramp
@@ -566,19 +579,18 @@ def _run_newton_cg_solver_2d(
     mask: jax.Array,
     voxel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
-    num_steps: int = 50,
     rdfc_kernel: dict[str, Any] | None = None,
-    cg_tol: float = 1e-5,
-    cg_maxiter: int = 200,
+    cg_tol: float = 1e-8,
+    cg_maxiter: int = 10000,
     init_ramp_coeffs: jax.Array | None = None,
     reg_mask: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
-    """Minimize :func:`mbir_loss_2d` using iterated Newton-CG steps.
+    """Minimize :func:`mbir_loss_2d` using a single Newton-CG solve.
 
-    Each outer iteration computes the gradient and solves
-    ``H @ delta = -g`` with JAX's conjugate-gradient solver,
-    then updates the parameters.  For the quadratic MBIR loss
-    this is equivalent to iterative refinement of the CG solve.
+    The MBIR objective is quadratic in the reconstruction
+    parameters, so Newton-CG reduces to a single linear solve of
+    ``H @ delta = -g``.  The solver accuracy is therefore fully
+    controlled by the inner CG tolerance and iteration budget.
 
     Parameters
     ----------
@@ -594,15 +606,13 @@ def _run_newton_cg_solver_2d(
     reg_config
         Regularization configuration dictionary (see
         :func:`mbir_loss_2d`), default ``{}``.
-    num_steps
-        Number of outer Newton iterations, default 50.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
     cg_tol
-        Tolerance for the CG solver, default 1e-5.
+        Tolerance for the CG solver, default 1e-8.
     cg_maxiter
-        Maximum number of CG iterations per Newton step,
-        default 200.
+        Maximum number of CG iterations for the Newton solve,
+        default 10000.
     init_ramp_coeffs
         Initial ramp coefficients of shape ``(3,)``.  Defaults to
         zeros.
@@ -615,7 +625,7 @@ def _run_newton_cg_solver_2d(
     (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
         Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
     loss_history : jax.Array
-        Per-step loss values of length *num_steps*.
+        Length-1 array containing the loss after the Newton update.
     """
     if init_ramp_coeffs is None:
         init_ramp_coeffs = jnp.zeros((3,), dtype=init_mag.dtype)
@@ -639,23 +649,16 @@ def _run_newton_cg_solver_2d(
 
     loss_grad = jax.grad(objective_flat)
 
-    def newton_step(carry, _):
-        x_flat = carry
-        grad_at_x = loss_grad(x_flat)
+    grad_at_x0 = loss_grad(x0_flat)
 
-        def matvec_hvp(v):
-            return jax.jvp(loss_grad, (x_flat,), (v,))[1]
+    def matvec_hvp(v):
+        return jax.jvp(loss_grad, (x0_flat,), (v,))[1]
 
-        delta, _info = jax.scipy.sparse.linalg.cg(
-            matvec_hvp, -grad_at_x, tol=cg_tol, maxiter=cg_maxiter,
-        )
-        x_new = x_flat + delta
-        loss_val = objective_flat(x_new)
-        return x_new, loss_val
-
-    final_flat, history = jax.lax.scan(
-        newton_step, x0_flat, None, length=num_steps,
+    delta, _info = jax.scipy.sparse.linalg.cg(
+        matvec_hvp, -grad_at_x0, tol=cg_tol, maxiter=cg_maxiter,
     )
+    final_flat = x0_flat + delta
+    history = jnp.expand_dims(objective_flat(final_flat), axis=0)
 
     final_mag, final_ramp = unravel(final_flat)
 
@@ -1023,7 +1026,6 @@ def solve_mbir_2d(
     if isinstance(config, NewtonCGConfig):
         (mag, ramp), loss_history = _run_newton_cg_solver_2d(
             **shared,
-            num_steps=config.num_steps,
             cg_tol=config.cg_tol,
             cg_maxiter=config.cg_maxiter,
         )
@@ -1115,7 +1117,6 @@ def reconstruct_2d(
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
-            voxel_size_nm,
             phase.shape,
             b0_tesla=b0_tesla,
             geometry=geometry,
@@ -1154,6 +1155,10 @@ def forward_model_2d(
     Computes the magnetic phase shift from a magnetization field,
     automatically building the RDFC kernel when not provided.
 
+    Internally this uses a pixel-coordinate RDFC kernel and applies
+    ``voxel_size_nm**2`` scaling in
+    :func:`forward_model_single_rdfc_2d`.
+
     Parameters
     ----------
     magnetization : array_like
@@ -1183,7 +1188,6 @@ def forward_model_2d(
     magnetization = jnp.asarray(magnetization)
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
-            voxel_size_nm,
             magnetization.shape[:2],
             b0_tesla=b0_tesla,
             geometry=geometry,
@@ -1270,7 +1274,6 @@ def reconstruct_2d_ensemble(
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
-            voxel_size_nm,
             phase.shape,
             b0_tesla=b0_tesla,
             geometry=geometry,
@@ -1308,7 +1311,6 @@ def reconstruct_2d_ensemble(
                 mask=mask,
                 voxel_size_nm=voxel_size_nm,
                 reg_config=reg_config,
-                num_steps=config.num_steps,
                 rdfc_kernel=rdfc_kernel,
                 cg_tol=config.cg_tol,
                 cg_maxiter=config.cg_maxiter,
@@ -1350,10 +1352,6 @@ def reconstruct_2d_ensemble(
     solve_batch = jax.jit(jax.vmap(_solve_single, in_axes=(0, 0)))
     return solve_batch(masks, reg_masks)
 
-
-# ---------------------------------------------------------------------------
-# 3D projection & forward model
-# ---------------------------------------------------------------------------
 
 # Mapping from projection axis to (sum_axis, coeff_matrix, need_transpose).
 # coeff maps (mx, my, mz) -> (u, v) following pyramid's SimpleProjector.
@@ -1477,11 +1475,6 @@ def forward_model_3d(
     )
 
 
-# ---------------------------------------------------------------------------
-# L-curve analysis
-# ---------------------------------------------------------------------------
-
-
 def decompose_loss(
     magnetization,
     ramp_coeffs,
@@ -1491,6 +1484,292 @@ def decompose_loss(
     rdfc_kernel,
     voxel_size_nm,
 ):
+    """Decompose the MBIR loss into data-fidelity and regularization terms.
+
+    Evaluates the two components of the loss **without** the
+    ``lambda_exchange`` multiplier on the regularization term, so
+    that they can be compared on an L-curve plot.
+
+    Parameters
+    ----------
+    magnetization : array_like
+        Reconstructed magnetization of shape ``(N, M, 2)``.
+    ramp_coeffs : array_like
+        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+    phase : array_like
+        Observed phase image of shape ``(N, M)``.
+    mask : array_like
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization before the forward model.
+    reg_mask : array_like
+        Regularization mask of shape ``(N, M)`` passed to
+        :func:`exchange_loss_fn`.
+    rdfc_kernel : dict
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+
+    Returns
+    -------
+    data_misfit : float
+        ``0.5 * sum((predicted - observed)**2)``
+    exchange_norm : float
+        Unweighted exchange regularization norm (no lambda
+        multiplier).
+    """
+    magnetization = jnp.asarray(magnetization)
+    ramp_coeffs = jnp.asarray(ramp_coeffs)
+    phase = jnp.asarray(phase)
+    mask = jnp.asarray(mask)
+    reg_mask = jnp.asarray(reg_mask)
+
+    masked_mag = jnp.stack([
+        magnetization[..., 0] * mask,
+        magnetization[..., 1] * mask,
+    ], axis=-1)
+
+    predicted = forward_model_single_rdfc_2d(
+        masked_mag, ramp_coeffs, rdfc_kernel, voxel_size_nm,
+    )
+    residuals = predicted - phase
+    data_misfit = float(0.5 * jnp.sum(residuals ** 2))
+    exchange_norm = float(exchange_loss_fn(masked_mag, reg_mask))
+
+    return data_misfit, exchange_norm
+
+def bootstrap_threshold_uncertainty_2d(
+    phase,
+    mip_phase,
+    threshold,
+    voxel_size_nm,
+    b0_tesla=1.0,
+    lam=1e-3,
+    solver="newton_cg",
+    n_boot=50,
+    threshold_low=None,
+    threshold_high=None,
+    rng_seed=0,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+    solver_config=None,
+):
+    """Bootstrap a thresholded mask ensemble and summarize the uncertainty.
+
+    Threshold draws are sampled uniformly from ``[threshold_low, threshold_high]``.
+    Each draw defines a binary mask from ``abs(mip_phase) > threshold_draw``.
+    The masks are passed through :func:`reconstruct_2d_ensemble` and the
+    resulting magnetization ensemble is summarized with percentile maps for
+    ``|M|``.
+
+    Parameters
+    ----------
+    phase
+        Observed phase image of shape ``(H, W)``.
+    mip_phase
+        MIP phase image used for thresholding, shape ``(H, W)``.
+    threshold
+        Central threshold value around which the bootstrap draws are sampled.
+    voxel_size_nm
+        Pixel size in nanometres.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    lam : float, optional
+        Regularization weight (``lambda_exchange``), default 1e-3.
+    solver : str or SolverConfig, optional
+        Solver selection string or config object.  Ignored when
+        *solver_config* is provided.  Default ``"newton_cg"``.
+    n_boot : int, optional
+        Number of threshold draws, default 50.
+    threshold_low : float, optional
+        Lower bound for the threshold draws.  Defaults to
+        ``threshold - 0.25``.
+    threshold_high : float, optional
+        Upper bound for the threshold draws.  Defaults to
+        ``threshold + 0.25``.
+    rng_seed : int, optional
+        Seed for the pseudo-random number generator, default 0.
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel, default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Built automatically when ``None``.
+    solver_config : SolverConfig, optional
+        Explicit solver configuration object.
+
+    Returns
+    -------
+    BootstrapThresholdResult
+        Summary object containing the threshold draws, reconstructed
+        magnetizations, 2.5th and 97.5th percentile maps, their 95% width,
+        the relative 95% width, and the mask inclusion frequency.
+    """
+    phase = jnp.asarray(phase)
+    mip_phase = jnp.asarray(mip_phase)
+    if phase.shape != mip_phase.shape:
+        raise ValueError(
+            f"phase and mip_phase must have the same shape; got {phase.shape} and {mip_phase.shape}."
+        )
+
+    if threshold_low is None:
+        threshold_low = float(threshold) - 0.25
+    if threshold_high is None:
+        threshold_high = float(threshold) + 0.25
+    if threshold_high <= threshold_low:
+        raise ValueError(
+            f"threshold_high must be greater than threshold_low; got {threshold_low} and {threshold_high}."
+        )
+
+    rng = np.random.default_rng(rng_seed)
+    threshold_draws = rng.uniform(low=threshold_low, high=threshold_high, size=n_boot)
+
+    mip_abs = np.abs(np.asarray(mip_phase))
+    reference_mask = (mip_abs > threshold).astype(np.float64)
+    bootstrap_masks = (
+        mip_abs[None, ...] > threshold_draws[:, None, None]
+    ).astype(np.float64)
+
+    for draw_index in range(n_boot):
+        if bootstrap_masks[draw_index].sum() == 0:
+            bootstrap_masks[draw_index] = reference_mask
+
+    bootstrap_mag = reconstruct_2d_ensemble(
+        phase=phase,
+        masks=bootstrap_masks,
+        voxel_size_nm=voxel_size_nm,
+        b0_tesla=b0_tesla,
+        lam=lam,
+        solver=solver,
+        reg_masks=bootstrap_masks,
+        geometry=geometry,
+        prw_vec=prw_vec,
+        rdfc_kernel=rdfc_kernel,
+        solver_config=solver_config,
+    )
+
+    bootstrap_mag = jnp.asarray(bootstrap_mag)
+    mean_magnetization = jnp.mean(bootstrap_mag, axis=0)
+    mean_norm = np.linalg.norm(np.asarray(mean_magnetization), axis=-1)
+
+    norm_samples = np.linalg.norm(np.asarray(bootstrap_mag), axis=-1)
+    norm_low = np.percentile(norm_samples, 2.5, axis=0)
+    norm_high = np.percentile(norm_samples, 97.5, axis=0)
+    norm_ci95 = norm_high - norm_low
+    relative_ci95 = norm_ci95 / (mean_norm + 1e-12)
+    mask_frequency = bootstrap_masks.mean(axis=0)
+
+    return BootstrapThresholdResult(
+        threshold=threshold,
+        threshold_low=threshold_low,
+        threshold_high=threshold_high,
+        threshold_draws=threshold_draws,
+        magnetizations=bootstrap_mag,
+        mean_magnetization=mean_magnetization,
+        mean_norm=mean_norm,
+        norm_low=norm_low,
+        norm_high=norm_high,
+        norm_ci95=norm_ci95,
+        relative_ci95=relative_ci95,
+        mask_frequency=mask_frequency,
+    )
+
+
+def plot_bootstrap_threshold_uncertainty(result: BootstrapThresholdResult):
+    """Plot the summary produced by :func:`bootstrap_threshold_uncertainty_2d`."""
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(2, 3, figsize=(16, 11), constrained_layout=True)
+
+    def set_panel_title(ax, title, subtitle):
+        ax.set_title(f"{title}\n{subtitle}", fontsize=10)
+
+    display_mask = result.mask_frequency > 0.5
+    if not np.any(display_mask):
+        display_mask = np.ones_like(result.mean_norm, dtype=bool)
+
+    mean_region = result.mean_norm[display_mask]
+    low_region = result.norm_low[display_mask]
+    high_region = result.norm_high[display_mask]
+    ci_region = result.norm_ci95[display_mask]
+    rel_region = 100.0 * result.relative_ci95[display_mask]
+
+    vmax_mean = float(np.percentile(mean_region, 99))
+    vmax_low = float(np.percentile(low_region, 99))
+    vmax_high = float(np.percentile(high_region, 99))
+    vmax_ci = float(np.percentile(ci_region, 99))
+    vmax_rel = float(np.percentile(rel_region, 99))
+
+    im = axs[0, 0].imshow(
+        result.mean_norm, cmap="viridis", origin="lower", vmin=0, vmax=vmax_mean
+    )
+    set_panel_title(
+        axs[0, 0],
+        "Bootstrap mean |M|",
+        "Typical magnitude across draws.",
+    )
+    plt.colorbar(im, ax=axs[0, 0], fraction=0.046)
+
+    im = axs[0, 1].imshow(
+        result.norm_low, cmap="viridis", origin="lower", vmin=0, vmax=vmax_low
+    )
+    set_panel_title(
+        axs[0, 1],
+        "2.5% percentile of |M|",
+        "Lower 95% interval bound.",
+    )
+    plt.colorbar(im, ax=axs[0, 1], fraction=0.046)
+
+    im = axs[0, 2].imshow(
+        result.norm_high, cmap="viridis", origin="lower", vmin=0, vmax=vmax_high
+    )
+    set_panel_title(
+        axs[0, 2],
+        "97.5% percentile of |M|",
+        "Upper 95% interval bound.",
+    )
+    plt.colorbar(im, ax=axs[0, 2], fraction=0.046)
+
+    im = axs[1, 0].imshow(
+        result.norm_ci95, cmap="magma", origin="lower", vmin=0, vmax=vmax_ci
+    )
+    set_panel_title(
+        axs[1, 0],
+        "95% CI width of |M|",
+        "Larger values mean more spread.",
+    )
+    plt.colorbar(im, ax=axs[1, 0], fraction=0.046)
+
+    im = axs[1, 1].imshow(
+        100.0 * result.relative_ci95,
+        cmap="cividis",
+        origin="lower",
+        vmin=0,
+        vmax=vmax_rel,
+    )
+    set_panel_title(
+        axs[1, 1],
+        "Relative 95% CI width of |M| (%)",
+        "Width divided by the local mean.",
+    )
+    plt.colorbar(im, ax=axs[1, 1], fraction=0.046)
+
+    im = axs[1, 2].imshow(
+        result.mask_frequency, cmap="gray", origin="lower", vmin=0, vmax=1
+    )
+    set_panel_title(
+        axs[1, 2],
+        "Threshold inclusion frequency",
+        "Near 1 is stable; near 0 is rare.",
+    )
+    plt.colorbar(im, ax=axs[1, 2], fraction=0.046)
+
+    for ax in axs.flat:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    return fig, axs
     """Decompose the MBIR loss into data-fidelity and regularization terms.
 
     Evaluates the two components of the loss **without** the
@@ -1673,7 +1952,6 @@ def lcurve_sweep(
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
-            voxel_size_nm,
             phase.shape,
             b0_tesla=b0_tesla,
             geometry=geometry,
@@ -1800,14 +2078,12 @@ def lcurve_sweep_vmap(
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
-            voxel_size_nm,
             phase.shape,
             b0_tesla=b0_tesla,
             geometry=geometry,
             prw_vec=prw_vec,
         )
 
-    # Resolve solver config once (Python-level dispatch, outside vmap)
     if solver_config is not None:
         config = solver_config
     elif isinstance(solver, str):
@@ -1829,36 +2105,20 @@ def lcurve_sweep_vmap(
     init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
 
     # Build a vmappable function for the chosen solver.
-    # Newton-CG uses a single-step solve (no lax.scan) for vmap
-    # compatibility.  The MBIR loss is quadratic, so one Newton
-    # step with sufficient CG iterations gives the exact solution.
     if isinstance(config, NewtonCGConfig):
-        cg_maxiter = config.cg_maxiter * config.num_steps
-        cg_tol = config.cg_tol
-        init_ramp = jnp.zeros(3, dtype=jnp.float64)
-
         def _solve_for_lam(lam):
             reg_config = {"lambda_exchange": lam}
-            x0_tree = (init_mag, init_ramp)
-            x0_flat, unravel = ravel_pytree(x0_tree)
-
-            def obj(x_flat):
-                mag, ramp = unravel(x_flat)
-                return mbir_loss_2d(
-                    (mag, ramp), mask, phase, rdfc_kernel,
-                    voxel_size_nm, reg_config, reg_mask=reg_mask,
-                )
-
-            g = jax.grad(obj)
-            grad_at_x0 = g(x0_flat)
-
-            def hvp(v):
-                return jax.jvp(g, (x0_flat,), (v,))[1]
-
-            delta, _ = jax.scipy.sparse.linalg.cg(
-                hvp, -grad_at_x0, tol=cg_tol, maxiter=cg_maxiter,
+            (mag, ramp), _loss = _run_newton_cg_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                rdfc_kernel=rdfc_kernel,
+                cg_tol=config.cg_tol,
+                cg_maxiter=config.cg_maxiter,
+                reg_mask=reg_mask,
             )
-            mag, ramp = unravel(x0_flat + delta)
             return mag, ramp
     elif isinstance(config, AdamConfig):
         def _solve_for_lam(lam):
