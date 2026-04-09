@@ -33,8 +33,22 @@ class LCurveResult(NamedTuple):
 
 @dataclasses.dataclass(frozen=True)
 class NewtonCGConfig:
-    """Configuration for the Newton-CG solver."""
+    """Configuration for the Newton-CG solver.
+
+    Parameters
+    ----------
+    num_steps : int
+        Number of outer Newton iterations.  Each iteration
+        solves ``H @ delta = -g`` via CG and updates the
+        parameters.
+    cg_maxiter : int
+        Maximum number of conjugate-gradient iterations per
+        Newton step.
+    cg_tol : float
+        CG convergence tolerance (relative residual norm).
+    """
     num_steps: int = 50
+    cg_maxiter: int = 200
     cg_tol: float = 1e-5
 
 
@@ -555,14 +569,16 @@ def _run_newton_cg_solver_2d(
     num_steps: int = 50,
     rdfc_kernel: dict[str, Any] | None = None,
     cg_tol: float = 1e-5,
+    cg_maxiter: int = 200,
     init_ramp_coeffs: jax.Array | None = None,
     reg_mask: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
-    """Minimize :func:`mbir_loss_2d` using a Newton-CG step.
+    """Minimize :func:`mbir_loss_2d` using iterated Newton-CG steps.
 
-    Computes a single Newton update by solving ``H @ delta = -g``
-    with JAX's conjugate-gradient solver, where *H* is the Hessian
-    and *g* the gradient of the loss.
+    Each outer iteration computes the gradient and solves
+    ``H @ delta = -g`` with JAX's conjugate-gradient solver,
+    then updates the parameters.  For the quadratic MBIR loss
+    this is equivalent to iterative refinement of the CG solve.
 
     Parameters
     ----------
@@ -579,11 +595,14 @@ def _run_newton_cg_solver_2d(
         Regularization configuration dictionary (see
         :func:`mbir_loss_2d`), default ``{}``.
     num_steps
-        Maximum number of CG iterations, default 50.
+        Number of outer Newton iterations, default 50.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
     cg_tol
         Tolerance for the CG solver, default 1e-5.
+    cg_maxiter
+        Maximum number of CG iterations per Newton step,
+        default 200.
     init_ramp_coeffs
         Initial ramp coefficients of shape ``(3,)``.  Defaults to
         zeros.
@@ -596,7 +615,7 @@ def _run_newton_cg_solver_2d(
     (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
         Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
     loss_history : jax.Array
-        Array of length 1 containing the final loss value.
+        Per-step loss values of length *num_steps*.
     """
     if init_ramp_coeffs is None:
         init_ramp_coeffs = jnp.zeros((3,), dtype=init_mag.dtype)
@@ -620,21 +639,27 @@ def _run_newton_cg_solver_2d(
 
     loss_grad = jax.grad(objective_flat)
 
-    def matvec_hvp(v):
-        # Hessian-vector product: H @ v
-        return jax.jvp(loss_grad, (x0_flat,), (v,))[1]
+    def newton_step(carry, _):
+        x_flat = carry
+        grad_at_x = loss_grad(x_flat)
 
-    # Calculate initial gradient and solve H*delta = -g
-    grad_at_x0 = loss_grad(x0_flat)
-    delta, info = jax.scipy.sparse.linalg.cg(
-        matvec_hvp, -grad_at_x0, tol=cg_tol, maxiter=num_steps
+        def matvec_hvp(v):
+            return jax.jvp(loss_grad, (x_flat,), (v,))[1]
+
+        delta, _info = jax.scipy.sparse.linalg.cg(
+            matvec_hvp, -grad_at_x, tol=cg_tol, maxiter=cg_maxiter,
+        )
+        x_new = x_flat + delta
+        loss_val = objective_flat(x_new)
+        return x_new, loss_val
+
+    final_flat, history = jax.lax.scan(
+        newton_step, x0_flat, None, length=num_steps,
     )
 
-    final_mag, final_ramp = unravel(x0_flat + delta)
-    # Re-evaluate loss for compatibility (scalar)
-    final_loss = objective_flat(x0_flat + delta)
+    final_mag, final_ramp = unravel(final_flat)
 
-    return (final_mag, final_ramp), jnp.array([final_loss])
+    return (final_mag, final_ramp), history
 
 
 def _run_adam_solver_2d(
@@ -773,8 +798,8 @@ def _run_adam_solver_2d(
 
     final_params, _, steps_taken, final_history, _, _, _ = final_state
 
-    # Truncate history (technically zero-filled after stop) or return full array + valid count
-    return final_params, final_history[:steps_taken]
+    # Return full history (may contain trailing zeros after early stopping).
+    return final_params, final_history
 
 
 @jax.jit(static_argnames=("num_steps", "patience", "min_delta"))
@@ -1000,6 +1025,7 @@ def solve_mbir_2d(
             **shared,
             num_steps=config.num_steps,
             cg_tol=config.cg_tol,
+            cg_maxiter=config.cg_maxiter,
         )
     elif isinstance(config, AdamConfig):
         (mag, ramp), loss_history = _run_adam_solver_2d(
@@ -1285,6 +1311,7 @@ def reconstruct_2d_ensemble(
                 num_steps=config.num_steps,
                 rdfc_kernel=rdfc_kernel,
                 cg_tol=config.cg_tol,
+                cg_maxiter=config.cg_maxiter,
                 reg_mask=reg_mask,
             )
             return mag
@@ -1801,21 +1828,37 @@ def lcurve_sweep_vmap(
 
     init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
 
-    # Build a vmappable function for the chosen solver
+    # Build a vmappable function for the chosen solver.
+    # Newton-CG uses a single-step solve (no lax.scan) for vmap
+    # compatibility.  The MBIR loss is quadratic, so one Newton
+    # step with sufficient CG iterations gives the exact solution.
     if isinstance(config, NewtonCGConfig):
+        cg_maxiter = config.cg_maxiter * config.num_steps
+        cg_tol = config.cg_tol
+        init_ramp = jnp.zeros(3, dtype=jnp.float64)
+
         def _solve_for_lam(lam):
             reg_config = {"lambda_exchange": lam}
-            (mag, ramp), _loss = _run_newton_cg_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                voxel_size_nm=voxel_size_nm,
-                reg_config=reg_config,
-                num_steps=config.num_steps,
-                rdfc_kernel=rdfc_kernel,
-                cg_tol=config.cg_tol,
-                reg_mask=reg_mask,
+            x0_tree = (init_mag, init_ramp)
+            x0_flat, unravel = ravel_pytree(x0_tree)
+
+            def obj(x_flat):
+                mag, ramp = unravel(x_flat)
+                return mbir_loss_2d(
+                    (mag, ramp), mask, phase, rdfc_kernel,
+                    voxel_size_nm, reg_config, reg_mask=reg_mask,
+                )
+
+            g = jax.grad(obj)
+            grad_at_x0 = g(x0_flat)
+
+            def hvp(v):
+                return jax.jvp(g, (x0_flat,), (v,))[1]
+
+            delta, _ = jax.scipy.sparse.linalg.cg(
+                hvp, -grad_at_x0, tol=cg_tol, maxiter=cg_maxiter,
             )
+            mag, ramp = unravel(x0_flat + delta)
             return mag, ramp
     elif isinstance(config, AdamConfig):
         def _solve_for_lam(lam):
