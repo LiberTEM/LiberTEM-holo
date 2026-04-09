@@ -110,6 +110,32 @@ stages:
           env:
             CODECOV_TOKEN: $(CODECOV_TOKEN)
 
+    - job: gpu_cupy_tests
+      pool: GPUTests
+      variables:
+        TESTDATA_BASE_PATH: '/data/'
+        TOXENV: py3131-cupy
+      steps:
+      - task: UsePythonVersion@0
+        displayName: 'Use Python $(python.version)'
+        inputs:
+          versionSpec: '$(python.version)'
+
+      - bash: python3 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install -U tox tox-uv uv
+        displayName: 'install tox'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/tox -r
+        displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
+
+      - bash: ./scripts/codecov.sh -f ./coverage.xml
+        displayName: 'Submit coverage to codecov.io'
+        ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+          env:
+            CODECOV_TOKEN: $(CODECOV_TOKEN)
+
     - job: data_tests
       pool: DataAccess
       strategy:
