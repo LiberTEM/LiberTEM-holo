@@ -1770,58 +1770,6 @@ def plot_bootstrap_threshold_uncertainty(result: BootstrapThresholdResult):
         ax.set_yticks([])
 
     return fig, axs
-    """Decompose the MBIR loss into data-fidelity and regularization terms.
-
-    Evaluates the two components of the loss **without** the
-    ``lambda_exchange`` multiplier on the regularization term, so
-    that they can be compared on an L-curve plot.
-
-    Parameters
-    ----------
-    magnetization : array_like
-        Reconstructed magnetization of shape ``(N, M, 2)``.
-    ramp_coeffs : array_like
-        Background ramp coefficients ``[offset, slope_y, slope_x]``.
-    phase : array_like
-        Observed phase image of shape ``(N, M)``.
-    mask : array_like
-        Binary mask of shape ``(N, M)`` applied to the
-        magnetization before the forward model.
-    reg_mask : array_like
-        Regularization mask of shape ``(N, M)`` passed to
-        :func:`exchange_loss_fn`.
-    rdfc_kernel : dict
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-    voxel_size_nm : float
-        Pixel size in nanometres.
-
-    Returns
-    -------
-    data_misfit : float
-        ``0.5 * sum((predicted - observed)**2)``
-    exchange_norm : float
-        Unweighted exchange regularization norm (no lambda
-        multiplier).
-    """
-    magnetization = jnp.asarray(magnetization)
-    ramp_coeffs = jnp.asarray(ramp_coeffs)
-    phase = jnp.asarray(phase)
-    mask = jnp.asarray(mask)
-    reg_mask = jnp.asarray(reg_mask)
-
-    masked_mag = jnp.stack([
-        magnetization[..., 0] * mask,
-        magnetization[..., 1] * mask,
-    ], axis=-1)
-
-    predicted = forward_model_single_rdfc_2d(
-        masked_mag, ramp_coeffs, rdfc_kernel, voxel_size_nm,
-    )
-    residuals = predicted - phase
-    data_misfit = float(0.5 * jnp.sum(residuals ** 2))
-    exchange_norm = float(exchange_loss_fn(masked_mag, reg_mask))
-
-    return data_misfit, exchange_norm
 
 
 def kneedle_corner(data_misfits, reg_norms):

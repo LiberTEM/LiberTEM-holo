@@ -53,6 +53,8 @@ PYRAMID_DIR = os.path.join(
     "empyre-pyramid-master-tests",
     "tests",
 )
+PYRAMID_PHASEMAPPER_DIR = os.path.join(PYRAMID_DIR, "test_phasemapper")
+PYRAMID_PROJECTOR_DIR = os.path.join(PYRAMID_DIR, "test_projector")
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ def small_problem():
     gt_mag[..., 0] = mask.astype(np.float64)  # u-component
     gt_mag[..., 1] = 0.5 * mask.astype(np.float64)  # v-component
 
-    kernel = build_rdfc_kernel(voxel_size, (H, W), b0_tesla=b0, geometry="disc")
+    kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
 
     ramp = jnp.zeros(3, dtype=jnp.float64)
     phase = forward_model_single_rdfc_2d(
@@ -128,7 +130,7 @@ class TestBuildRDFCKernel:
     """Verify build_rdfc_kernel against pyramid's Kernel class."""
 
     def test_kernel_u_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel(1.0, (4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
         assert_allclose(
             np.asarray(kernel["u_fft"]),
             kernel_ref["ref_u_fft"],
@@ -137,7 +139,7 @@ class TestBuildRDFCKernel:
         )
 
     def test_kernel_v_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel(1.0, (4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
         assert_allclose(
             np.asarray(kernel["v_fft"]),
             kernel_ref["ref_v_fft"],
@@ -151,8 +153,8 @@ class TestBuildRDFCKernel:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 * 1.0**2 / (2 * PHI_0_T_NM2)
-        u_kernel = coeff * _rdfc_elementary_phase("disc", uu, vv, 1.0)
+        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        u_kernel = coeff * _rdfc_elementary_phase("disc", uu, vv)
         assert_allclose(
             np.asarray(u_kernel),
             kernel_ref["ref_u"],
@@ -165,8 +167,8 @@ class TestBuildRDFCKernel:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 * 1.0**2 / (2 * PHI_0_T_NM2)
-        v_kernel = -coeff * _rdfc_elementary_phase("disc", vv, uu, 1.0)
+        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        v_kernel = -coeff * _rdfc_elementary_phase("disc", vv, uu)
         assert_allclose(
             np.asarray(v_kernel),
             kernel_ref["ref_v"],
@@ -175,19 +177,19 @@ class TestBuildRDFCKernel:
         )
 
     def test_kernel_dim_metadata(self):
-        kernel = build_rdfc_kernel(5.0, (10, 12))
+        kernel = build_rdfc_kernel((10, 12))
         assert kernel["dim_uv"] == (10, 12)
         assert kernel["dim_pad"] == (20, 24)
         assert kernel["u_fft"].shape == (20, 13)  # rfft2
         assert kernel["v_fft"].shape == (20, 13)
 
     def test_kernel_slab_geometry_runs(self):
-        kernel = build_rdfc_kernel(1.0, (4, 4), geometry="slab")
+        kernel = build_rdfc_kernel((4, 4), geometry="slab")
         assert kernel["u_fft"].shape == (8, 5)
 
     def test_kernel_with_prw_vec(self):
-        kernel_no_prw = build_rdfc_kernel(10.0, (4, 4))
-        kernel_prw = build_rdfc_kernel(10.0, (4, 4), prw_vec=jnp.array([1.0, 0.0]))
+        kernel_no_prw = build_rdfc_kernel((4, 4))
+        kernel_prw = build_rdfc_kernel((4, 4), prw_vec=jnp.array([1.0, 0.0]))
         # Should differ
         assert not np.allclose(
             np.asarray(kernel_no_prw["u_fft"]),
@@ -196,11 +198,11 @@ class TestBuildRDFCKernel:
 
     def test_kernel_invalid_geometry_raises(self):
         with pytest.raises(ValueError, match="Unknown geometry"):
-            build_rdfc_kernel(1.0, (4, 4), geometry="cube")
+            build_rdfc_kernel((4, 4), geometry="cube")
 
     def test_kernel_b0_scaling(self):
-        k1 = build_rdfc_kernel(1.0, (4, 4), b0_tesla=1.0)
-        k2 = build_rdfc_kernel(1.0, (4, 4), b0_tesla=2.0)
+        k1 = build_rdfc_kernel((4, 4), b0_tesla=1.0)
+        k2 = build_rdfc_kernel((4, 4), b0_tesla=2.0)
         assert_allclose(
             np.asarray(k2["u_fft"]),
             2.0 * np.asarray(k1["u_fft"]),
@@ -224,8 +226,8 @@ class TestPhaseMapperRDFC:
         phase_ref = phasemapper_ref["phase_ref"]
         voxel_size = float(phasemapper_ref["voxel_size"])
 
-        kernel = build_rdfc_kernel(voxel_size, (4, 4), b0_tesla=1.0, geometry="disc")
-        phase = phase_mapper_rdfc(u_field, v_field, kernel)
+        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
 
         assert_allclose(
             np.asarray(phase),
@@ -238,8 +240,7 @@ class TestPhaseMapperRDFC:
         """RDFC mapper should be linear: f(a*u) = a*f(u)."""
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
-        voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(voxel_size, u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
 
         phase1 = phase_mapper_rdfc(u, v, kernel)
         phase2 = phase_mapper_rdfc(2.0 * u, 2.0 * v, kernel)
@@ -252,7 +253,7 @@ class TestPhaseMapperRDFC:
         )
 
     def test_zero_input_gives_zero_phase(self):
-        kernel = build_rdfc_kernel(1.0, (4, 4))
+        kernel = build_rdfc_kernel((4, 4))
         zero = jnp.zeros((4, 4), dtype=jnp.float64)
         phase = phase_mapper_rdfc(zero, zero, kernel)
         assert_allclose(
@@ -272,10 +273,10 @@ class TestPhaseMapperRDFC:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(voxel_size, u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
 
         # Direct phase
-        phase_direct = np.asarray(phase_mapper_rdfc(u, v, kernel)).ravel()
+        phase_direct = np.asarray(voxel_size**2 * phase_mapper_rdfc(u, v, kernel)).ravel()
 
         H, W = u.shape
         n = 2 * H * W  # number of magnetization DOF
@@ -288,7 +289,7 @@ class TestPhaseMapperRDFC:
             u_basis = np.zeros((H, W), dtype=np.float64)
             u_basis.ravel()[i] = 1.0
             col = np.asarray(
-                phase_mapper_rdfc(
+                voxel_size**2 * phase_mapper_rdfc(
                     jnp.array(u_basis), jnp.zeros((H, W)), kernel,
                 )
             ).ravel()
@@ -299,7 +300,7 @@ class TestPhaseMapperRDFC:
             v_basis = np.zeros((H, W), dtype=np.float64)
             v_basis.ravel()[i] = 1.0
             col = np.asarray(
-                phase_mapper_rdfc(
+                voxel_size**2 * phase_mapper_rdfc(
                     jnp.zeros((H, W)), jnp.array(v_basis), kernel,
                 )
             ).ravel()
@@ -322,7 +323,7 @@ class TestPhaseMapperRDFC:
 
         u_shape = (4, 4)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(voxel_size, u_shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u_shape, b0_tesla=1.0)
 
         H, W = u_shape
         n = 2 * H * W
@@ -333,7 +334,7 @@ class TestPhaseMapperRDFC:
             u_basis = np.zeros((H, W), dtype=np.float64)
             u_basis.ravel()[i] = 1.0
             col = np.asarray(
-                phase_mapper_rdfc(
+                voxel_size**2 * phase_mapper_rdfc(
                     jnp.array(u_basis), jnp.zeros((H, W)), kernel,
                 )
             ).ravel()
@@ -343,7 +344,7 @@ class TestPhaseMapperRDFC:
             v_basis = np.zeros((H, W), dtype=np.float64)
             v_basis.ravel()[i] = 1.0
             col = np.asarray(
-                phase_mapper_rdfc(
+                voxel_size**2 * phase_mapper_rdfc(
                     jnp.zeros((H, W)), jnp.array(v_basis), kernel,
                 )
             ).ravel()
@@ -352,6 +353,29 @@ class TestPhaseMapperRDFC:
         assert_allclose(
             jac, jac_ref, atol=1e-7,
             err_msg="Jacobian does not match pyramid reference",
+        )
+
+    def test_jac_matches_upstream_npy_fixture(self, phasemapper_ref):
+        """Computed Jacobian should match upstream pyramid jac.npy directly."""
+        jac_ref = np.load(os.path.join(PYRAMID_PHASEMAPPER_DIR, "jac.npy"))
+        voxel_size = float(phasemapper_ref["voxel_size"])
+        H, W = 4, 4
+        n = 2 * H * W
+
+        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+
+        def phase_from_mag_vec(mag_vec):
+            u_vec = mag_vec[: H * W].reshape(H, W)
+            v_vec = mag_vec[H * W :].reshape(H, W)
+            return (voxel_size**2 * phase_mapper_rdfc(u_vec, v_vec, kernel)).reshape(-1)
+
+        jac = np.asarray(jax.jacfwd(phase_from_mag_vec)(jnp.zeros((n,), dtype=jnp.float64)))
+
+        assert_allclose(
+            jac,
+            jac_ref,
+            atol=1e-7,
+            err_msg="RDFC Jacobian does not match upstream test_phasemapper/jac.npy",
         )
 
 
@@ -417,6 +441,33 @@ class TestProject3D:
         assert_allclose(np.asarray(result[..., 0]), 4.0, atol=1e-12)
         assert_allclose(np.asarray(result[..., 1]), 4.0, atol=1e-12)
 
+    @pytest.mark.parametrize(
+        "axis,jac_name",
+        [("z", "jac_z.npy"), ("y", "jac_y.npy"), ("x", "jac_x.npy")],
+    )
+    def test_projector_jac_matches_upstream_npy_fixture(self, axis, jac_name):
+        """project_3d Jacobian should match upstream pyramid Jacobians."""
+        jac_ref = np.load(os.path.join(PYRAMID_PROJECTOR_DIR, jac_name))
+
+        # Pyramid ordering is (comp, Z, Y, X), flattened C-order.
+        Z, Y, X = 6, 5, 4
+        n = 3 * Z * Y * X
+
+        def project_from_vec(vec_flat):
+            mag_comp_first = vec_flat.reshape(3, Z, Y, X)
+            mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
+            proj = project_3d(mag_ours, axis=axis)
+            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+
+        jac = np.asarray(jax.jacfwd(project_from_vec)(jnp.zeros((n,), dtype=jnp.float64)))
+
+        assert_allclose(
+            jac,
+            jac_ref,
+            atol=1e-7,
+            err_msg=f"Projector Jacobian mismatch for axis={axis} against {jac_name}",
+        )
+
 
 # ===================================================================
 # 4. Forward models  (cf. pyramid test_forwardmodel.py)
@@ -431,9 +482,9 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(voxel_size, u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
 
-        phase_mapper = phase_mapper_rdfc(u, v, kernel)
+        phase_mapper = voxel_size**2 * phase_mapper_rdfc(u, v, kernel)
 
         mag = jnp.stack([u, v], axis=-1)
         ramp = jnp.zeros(3, dtype=jnp.float64)
@@ -450,7 +501,7 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(voxel_size, u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
 
         mag = jnp.stack([u, v], axis=-1)
         ramp_zero = jnp.zeros(3, dtype=jnp.float64)
@@ -708,7 +759,7 @@ class TestSolvers:
             init_mag=init_mag,
             mask=mask,
             voxel_size_nm=sp["voxel_size"],
-            solver=NewtonCGConfig(num_steps=30, cg_tol=1e-5),
+            solver=NewtonCGConfig(cg_maxiter=200, cg_tol=1e-8),
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=kernel,
         )
@@ -716,6 +767,7 @@ class TestSolvers:
         assert isinstance(result, SolverResult)
         assert result.magnetization.shape == sp["gt_mag"].shape
         assert result.ramp_coeffs.shape == (3,)
+        assert result.loss_history.shape == (1,)
 
         # Final loss should be significantly less than initial
         final_loss = float(mbir_loss_2d(
@@ -868,7 +920,7 @@ class TestReconstruct2D:
             voxel_size_nm=sp["voxel_size"],
             mask=jnp.array(sp["mask"]),
             solver="adam",  # this should be overridden
-            solver_config=NewtonCGConfig(num_steps=10),
+            solver_config=NewtonCGConfig(cg_maxiter=200),
         )
         assert isinstance(result, SolverResult)
 
@@ -1024,8 +1076,8 @@ class TestLCurveSweep:
 class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
-        assert cfg.num_steps == 50
-        assert cfg.cg_tol == 1e-5
+        assert cfg.cg_maxiter == 10000
+        assert cfg.cg_tol == 1e-8
 
     def test_adam_defaults(self):
         cfg = AdamConfig()
@@ -1041,7 +1093,7 @@ class TestSolverConfigs:
     def test_configs_are_frozen(self):
         cfg = NewtonCGConfig()
         with pytest.raises(Exception):
-            cfg.num_steps = 100
+            cfg.cg_maxiter = 100
 
 
 # ===================================================================
@@ -1054,7 +1106,7 @@ class TestElementaryPhase:
         """disc kernel should be zero at (0, 0)."""
         n = jnp.array([[0.0]])
         m = jnp.array([[0.0]])
-        val = _rdfc_elementary_phase("disc", n, m, 1.0)
+        val = _rdfc_elementary_phase("disc", n, m)
         assert_allclose(np.asarray(val).item(), 0.0, atol=1e-15)
 
     def test_disc_antisymmetric(self):
@@ -1062,19 +1114,19 @@ class TestElementaryPhase:
         n = jnp.array([[1.0]])
         m_pos = jnp.array([[2.0]])
         m_neg = jnp.array([[-2.0]])
-        val_pos = np.asarray(_rdfc_elementary_phase("disc", n, m_pos, 1.0)).item()
-        val_neg = np.asarray(_rdfc_elementary_phase("disc", n, m_neg, 1.0)).item()
+        val_pos = np.asarray(_rdfc_elementary_phase("disc", n, m_pos)).item()
+        val_neg = np.asarray(_rdfc_elementary_phase("disc", n, m_neg)).item()
         assert_allclose(val_pos, -val_neg, atol=1e-15)
 
     def test_slab_runs(self):
         n = jnp.array([[1.0, 2.0], [3.0, 4.0]])
         m = jnp.array([[1.0, 2.0], [3.0, 4.0]])
-        val = _rdfc_elementary_phase("slab", n, m, 1.0)
+        val = _rdfc_elementary_phase("slab", n, m)
         assert val.shape == (2, 2)
 
     def test_invalid_geometry_raises(self):
         with pytest.raises(ValueError, match="Unknown geometry"):
-            _rdfc_elementary_phase("cube", jnp.array([[0.0]]), jnp.array([[0.0]]), 1.0)
+            _rdfc_elementary_phase("cube", jnp.array([[0.0]]), jnp.array([[0.0]]))
 
 
 # ===================================================================
