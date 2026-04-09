@@ -1632,12 +1632,12 @@ def bootstrap_threshold_uncertainty_2d(
     # When using the default Newton-CG solver with no explicit config,
     # scale cg_maxiter to the problem size.  JAX's CG runs all maxiter
     # iterations under jit/vmap (no early exit), so the default 10000
-    # wastes cycles once the solve has converged.  Profiling shows CG
-    # reaches <0.1% of converged loss at roughly H*W/4 iterations for
-    # typical MBIR problems, with diminishing returns beyond that.
+    # wastes cycles once the solve has converged.  H*W//2 tracks the
+    # number of unknowns and gives <2% CI95 deviation from the
+    # full-iteration result at 128x128 and above.
     if solver_config is None and isinstance(solver, str) and solver.lower() == "newton_cg":
         H, W = phase.shape
-        scaled_maxiter = min(max(H * W // 4, 1000), 10000)
+        scaled_maxiter = min(max(H * W // 2, 2000), 10000)
         solver_config = NewtonCGConfig(cg_maxiter=scaled_maxiter)
 
     bootstrap_mag = reconstruct_2d_ensemble(

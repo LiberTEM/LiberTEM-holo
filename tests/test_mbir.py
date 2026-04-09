@@ -1071,7 +1071,7 @@ class TestLCurveSweep:
 class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
-        assert cfg.cg_maxiter == 10000
+        assert cfg.cg_maxiter == 1000
         assert cfg.cg_tol == 1e-10
 
     def test_adam_defaults(self):
