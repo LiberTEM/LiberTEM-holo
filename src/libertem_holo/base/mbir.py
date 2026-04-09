@@ -1,3 +1,10 @@
+"""Model-based iterative reconstruction (MBIR) for 2D projected magnetization."""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import NamedTuple, Union
+
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
@@ -7,15 +14,72 @@ import numpy as np
 PHI_0_T_NM2 = 2067.83  # flux quantum in T*nm^2
 
 
-def exchange_loss_fn(mag, reg_mask):
-    """
-    2D exchange: neighbor-difference energy inside reg_mask_2d with neighbor-count scaling.
-    Expects magnetization as (2, H, W) and reg_mask_2d as (H, W).
+class SolverResult(NamedTuple):
+    """Result returned by :func:`solve_mbir_2d`."""
+    magnetization: jnp.ndarray
+    ramp_coeffs: jnp.ndarray
+    loss_history: jnp.ndarray
+
+
+@dataclasses.dataclass(frozen=True)
+class NewtonCGConfig:
+    """Configuration for the Newton-CG solver."""
+    num_steps: int = 50
+    cg_tol: float = 1e-5
+
+
+@dataclasses.dataclass(frozen=True)
+class AdamConfig:
+    """Configuration for the Adam solver."""
+    num_steps: int = 2000
+    learning_rate: float = 1e-2
+    patience: int = 50
+    min_delta: float = 1e-6
+
+
+@dataclasses.dataclass(frozen=True)
+class LBFGSConfig:
+    """Configuration for the L-BFGS solver."""
+    num_steps: int = 500
+    patience: int = 50
+    min_delta: float = 1e-6
+
+
+SolverConfig = Union[NewtonCGConfig, AdamConfig, LBFGSConfig]
+
+_SOLVER_DEFAULTS = {
+    "newton_cg": NewtonCGConfig,
+    "adam": AdamConfig,
+    "lbfgs": LBFGSConfig,
+}
+
+
+def exchange_loss_fn(
+    mag: jax.Array,
+    reg_mask: jax.Array,
+) -> jax.Array:
+    """Compute 2D exchange energy via neighbor-difference inside a mask.
+
+    Regularizes the two in-plane dimensions (y, x) matching the
+    projection geometry, using neighbor-count scaling.
+
+    Parameters
+    ----------
+    mag
+        Magnetization array of shape ``(N, M, 2)``.
+    reg_mask
+        Boolean or binary mask of shape ``(N, M)`` defining the
+        regularization region.
+
+    Returns
+    -------
+    jax.Array
+        Scalar exchange loss (L2 norm squared of finite differences).
     """
     reg_mask = jnp.asarray(reg_mask)
-    if reg_mask.shape != mag.shape[1:]:
+    if reg_mask.shape != mag.shape[:2]:
         raise ValueError(
-            f"reg_mask must have shape {mag.shape[1:]}; got {reg_mask.shape}."
+            f"reg_mask must have shape {mag.shape[:2]}; got {reg_mask.shape}."
         )
 
     # Note: Unlike the 3D 'FirstOrderRegularisator', this function only
@@ -40,15 +104,15 @@ def exchange_loss_fn(mag, reg_mask):
     denom = jnp.where(neighbor_count > 0, neighbor_count, jnp.ones_like(neighbor_count))
 
     # Shifted fields
-    mag_up = jnp.pad(mag[:, :-1, :], ((0, 0), (1, 0), (0, 0)), constant_values=0)
-    mag_down = jnp.pad(mag[:, 1:, :], ((0, 0), (0, 1), (0, 0)), constant_values=0)
-    mag_left = jnp.pad(mag[:, :, :-1], ((0, 0), (0, 0), (1, 0)), constant_values=0)
-    mag_right = jnp.pad(mag[:, :, 1:], ((0, 0), (0, 0), (0, 1)), constant_values=0)
+    mag_up = jnp.pad(mag[:-1, :, :], ((1, 0), (0, 0), (0, 0)), constant_values=0)
+    mag_down = jnp.pad(mag[1:, :, :], ((0, 1), (0, 0), (0, 0)), constant_values=0)
+    mag_left = jnp.pad(mag[:, :-1, :], ((0, 0), (1, 0), (0, 0)), constant_values=0)
+    mag_right = jnp.pad(mag[:, 1:, :], ((0, 0), (0, 1), (0, 0)), constant_values=0)
 
     # Y-direction difference (central if both neighbors exist, else forward/backward)
-    both_y = has_up & has_down
-    only_down = has_down & ~has_up
-    only_up = has_up & ~has_down
+    both_y = (has_up & has_down)[..., None]
+    only_down = (has_down & ~has_up)[..., None]
+    only_up = (has_up & ~has_down)[..., None]
     diff_y = jnp.where(
         both_y, mag_down - mag_up,
         jnp.where(only_down, mag_down - mag,
@@ -56,17 +120,17 @@ def exchange_loss_fn(mag, reg_mask):
     )
 
     # X-direction difference (central if both neighbors exist, else forward/backward)
-    both_x = has_left & has_right
-    only_right = has_right & ~has_left
-    only_left = has_left & ~has_right
+    both_x = (has_left & has_right)[..., None]
+    only_right = (has_right & ~has_left)[..., None]
+    only_left = (has_left & ~has_right)[..., None]
     diff_x = jnp.where(
         both_x, mag_right - mag_left,
         jnp.where(only_right, mag_right - mag,
                   jnp.where(only_left, mag - mag_left, 0))
     )
 
-    diff_y = diff_y * mask[None, ...] / denom[None, ...]
-    diff_x = diff_x * mask[None, ...] / denom[None, ...]
+    diff_y = diff_y * mask[..., None] / denom[..., None]
+    diff_x = diff_x * mask[..., None] / denom[..., None]
 
     # L2 Norm (p=2) squared
     loss = jnp.sum(diff_y * diff_y) + jnp.sum(diff_x * diff_x)
@@ -74,8 +138,32 @@ def exchange_loss_fn(mag, reg_mask):
     return loss
 
 
-def get_freq_grid(height, width, voxel_size_nm):
-    """Frequency grids for FFT-based phase propagation."""
+def get_freq_grid(
+    height: int,
+    width: int,
+    voxel_size_nm: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Build frequency grids for FFT-based phase propagation.
+
+    Parameters
+    ----------
+    height
+        Number of pixels along the y-axis.
+    width
+        Number of pixels along the x-axis.
+    voxel_size_nm
+        Pixel size in nanometres, used as the FFT sampling interval.
+
+    Returns
+    -------
+    f_y : jax.Array
+        2D array of y-frequency values.
+    f_x : jax.Array
+        2D array of x-frequency values (real-FFT half-spectrum).
+    denom : jax.Array
+        ``f_x**2 + f_y**2`` with the zero-frequency bin set to 1
+        to avoid division by zero.
+    """
     fy = jnp.fft.fftfreq(height, d=voxel_size_nm)
     fx = jnp.fft.rfftfreq(width, d=voxel_size_nm)
     f_y, f_x = jnp.meshgrid(fy, fx, indexing="ij")
@@ -84,8 +172,30 @@ def get_freq_grid(height, width, voxel_size_nm):
     return f_y, f_x, denom
 
 
-def _rdfc_elementary_phase(geometry, n, m, voxel_size_nm):
-    """Elementary kernel phase for the RDFC mapper."""
+def _rdfc_elementary_phase(
+    geometry: str,
+    n: jax.Array,
+    m: jax.Array,
+    voxel_size_nm: float,
+) -> jax.Array:
+    """Compute the elementary kernel phase for the RDFC mapper.
+
+    Parameters
+    ----------
+    geometry
+        Voxel geometry, either ``'disc'`` or ``'slab'``.
+    n
+        Row coordinate array.
+    m
+        Column coordinate array.
+    voxel_size_nm
+        Pixel size in nanometres.
+
+    Returns
+    -------
+    jax.Array
+        Elementary phase kernel evaluated on the coordinate grid.
+    """
     if geometry == "disc":
         in_or_out = jnp.logical_not(jnp.logical_and(n == 0, m == 0))
         return m / (n**2 + m**2 + 1e-30) * in_or_out
@@ -106,17 +216,39 @@ def _rdfc_elementary_phase(geometry, n, m, voxel_size_nm):
 
 
 def build_rdfc_kernel(
-    voxel_size_nm,
-    dim_uv,
-    b0_tesla=1.0,
-    geometry="disc",
-    prw_vec=None,
-    dtype=jnp.float64,
-):
-    """
-    JAX translation of pyramid.Kernel for PhaseMapperRDFC.
+    voxel_size_nm: float,
+    dim_uv: tuple[int, int],
+    b0_tesla: float = 1.0,
+    geometry: Literal["disc", "slab"] = "disc",
+    prw_vec: jax.Array | None = None,
+    dtype: Any = jnp.float64,
+) -> dict[str, Any]:
+    """Build an RDFC phase-mapping kernel in Fourier space.
 
-    Returns a dict with FFT'd kernel components and slicing metadata.
+    JAX translation of ``pyramid.Kernel`` for ``PhaseMapperRDFC``.
+
+    Parameters
+    ----------
+    voxel_size_nm
+        Pixel size in nanometres.
+    dim_uv
+        ``(height, width)`` of the magnetization field.
+    b0_tesla
+        External magnetic field strength in Tesla, default 1.0.
+    geometry
+        Voxel geometry used for the elementary phase kernel.
+    prw_vec
+        Optional projected reference wave vector ``(v, u)``.
+        When provided, the kernel accounts for the reference
+        wave tilt.
+    dtype
+        JAX dtype for the kernel arrays, default ``jnp.float64``.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionary with keys ``'u_fft'``, ``'v_fft'`` (FFT'd kernel
+        components), ``'dim_uv'``, and ``'dim_pad'``.
     """
     height, width = dim_uv
     dim_kern = (2 * height - 1, 2 * width - 1)
@@ -156,10 +288,29 @@ def build_rdfc_kernel(
     }
 
 
-def phase_mapper_rdfc(u_field, v_field, rdfc_kernel):
-    """
-    JAX implementation of PhaseMapperRDFC using a precomputed kernel.
+def phase_mapper_rdfc(
+    u_field: jax.Array,
+    v_field: jax.Array,
+    rdfc_kernel: dict[str, Any],
+) -> jax.Array:
+    """Map (u, v) magnetization components to a phase image via RDFC.
 
+    Uses a precomputed Fourier-space kernel from
+    :func:`build_rdfc_kernel`.
+
+    Parameters
+    ----------
+    u_field
+        In-plane magnetization component along x, shape ``(H, W)``.
+    v_field
+        In-plane magnetization component along y, shape ``(H, W)``.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+
+    Returns
+    -------
+    jax.Array
+        Magnetic phase-shift image of shape ``(H, W)``.
     """
     height, width = u_field.shape
     dim_pad = (2 * height, 2 * width)
@@ -180,10 +331,29 @@ def phase_mapper_rdfc(u_field, v_field, rdfc_kernel):
     )
 
 
-def apply_ramp(ramp_coeffs, height, width, voxel_size_nm):
-    """
-    2D polynomial background ramp.
-    ramp_coeffs: [offset, slope_y, slope_x] (order 1).
+def apply_ramp(
+    ramp_coeffs: jax.Array,
+    height: int,
+    width: int,
+    voxel_size_nm: float,
+) -> jax.Array:
+    """Generate a first-order 2D polynomial background ramp.
+
+    Parameters
+    ----------
+    ramp_coeffs
+        Array of ``[offset, slope_y, slope_x]``.
+    height
+        Number of pixels along the y-axis.
+    width
+        Number of pixels along the x-axis.
+    voxel_size_nm
+        Pixel size in nanometres.
+
+    Returns
+    -------
+    jax.Array
+        Ramp image of shape ``(height, width)``.
     """
     y, x = jnp.meshgrid(jnp.arange(height), jnp.arange(width), indexing="ij")
     ramp = ramp_coeffs[0]
@@ -194,19 +364,37 @@ def apply_ramp(ramp_coeffs, height, width, voxel_size_nm):
 
 
 def forward_model_single_rdfc_2d(
-    magnetization,
-    ramp_coeffs,
-    rdfc_kernel,
-    voxel_size_nm,
-):
-    """
-    RDFC forward model for a single 2D projected magnetization: (u, v) -> phase + ramp.
-    Expects magnetization as (2, H, W).
-    """
-    height, width = magnetization.shape[1:]
+    magnetization: jax.Array,
+    ramp_coeffs: jax.Array,
+    rdfc_kernel: dict[str, Any],
+    voxel_size_nm: float,
+) -> jax.Array:
+    """RDFC forward model mapping projected magnetization to phase.
 
-    u_field = magnetization[0]
-    v_field = magnetization[1]
+    Computes the magnetic phase shift from a 2D projected
+    magnetization field and adds a polynomial background ramp.
+
+    Parameters
+    ----------
+    magnetization
+        In-plane magnetization of shape ``(N, M, 2)`` where the
+        last axis holds the (u, v) components.
+    ramp_coeffs
+        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+    voxel_size_nm
+        Pixel size in nanometres.
+
+    Returns
+    -------
+    jax.Array
+        Predicted phase image of shape ``(N, M)``.
+    """
+    height, width = magnetization.shape[:2]
+
+    u_field = magnetization[..., 0]
+    v_field = magnetization[..., 1]
 
     phase = phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
     ramp = apply_ramp(ramp_coeffs, height, width, voxel_size_nm)
@@ -215,15 +403,46 @@ def forward_model_single_rdfc_2d(
 
 
 def mbir_loss_2d(
-    params,
-    mag_mask,
-    reg_mask,
-    phase,
-    rdfc_kernel,
-    voxel_size_nm,
-    reg_config,
-):
-    """Loss = data fidelity + regularization (2D projected magnetization)."""
+    params: tuple[jax.Array, jax.Array],
+    mag_mask: jax.Array,
+    reg_mask: jax.Array,
+    phase: jax.Array,
+    rdfc_kernel: dict[str, Any],
+    voxel_size_nm: float,
+    reg_config: dict[str, Any],
+) -> jax.Array:
+    """Compute the MBIR loss for 2D projected magnetization.
+
+    The total loss is the sum of a least-squares data-fidelity term
+    and optional exchange-energy regularization.
+
+    Parameters
+    ----------
+    params
+        Tuple of ``(magnetization, ramp_coeffs)`` where
+        *magnetization* has shape ``(N, M, 2)`` and *ramp_coeffs*
+        has shape ``(3,)``.
+    mag_mask
+        Binary mask applied to the magnetization before the forward
+        model, shape ``(N, M, 2)``.
+    reg_mask
+        Regularization mask of shape ``(N, M)`` passed to
+        :func:`exchange_loss_fn`.
+    phase
+        Observed phase image of shape ``(H, W)``.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+    voxel_size_nm
+        Pixel size in nanometres.
+    reg_config
+        Regularization configuration dictionary.  Recognised key:
+        ``'lambda_exchange'`` (float, default 0.0).
+
+    Returns
+    -------
+    jax.Array
+        Scalar loss value.
+    """
     magnetization, ramp_coeffs = params
     phase = jnp.asarray(phase)
 
@@ -248,21 +467,56 @@ def mbir_loss_2d(
     return loss
 
 
-def run_newton_cg_solver_2d(
-    phase,
-    init_mag,
-    mag_mask,
-    reg_mask,
-    voxel_size_nm,
-    reg_config=None,
-    num_steps=50,
-    rdfc_kernel=None,
-    cg_tol=1e-5,
-    init_ramp_coeffs=None,
-):
-    """
-    Newton-CG optimizer: Minimizes mbir_loss_2d w.r.t (mag, ramp).
-    Uses JAX's conjugate gradient solver (scipy.sparse.linalg.cg equivalent).
+def _run_newton_cg_solver_2d(
+    phase: jax.Array,
+    init_mag: jax.Array,
+    mag_mask: jax.Array,
+    reg_mask: jax.Array,
+    voxel_size_nm: float,
+    reg_config: dict[str, Any] | None = None,
+    num_steps: int = 50,
+    rdfc_kernel: dict[str, Any] | None = None,
+    cg_tol: float = 1e-5,
+    init_ramp_coeffs: jax.Array | None = None,
+) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+    """Minimize :func:`mbir_loss_2d` using a Newton-CG step.
+
+    Computes a single Newton update by solving ``H @ delta = -g``
+    with JAX's conjugate-gradient solver, where *H* is the Hessian
+    and *g* the gradient of the loss.
+
+    Parameters
+    ----------
+    phase
+        Observed phase image of shape ``(H, W)``.
+    init_mag
+        Initial magnetization of shape ``(N, M, 2)``.
+    mag_mask
+        Binary mask applied to the magnetization, shape
+        ``(N, M, 2)``.
+    reg_mask
+        Regularization mask of shape ``(N, M)``.
+    voxel_size_nm
+        Pixel size in nanometres.
+    reg_config
+        Regularization configuration dictionary (see
+        :func:`mbir_loss_2d`), default ``{}``.
+    num_steps
+        Maximum number of CG iterations, default 50.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+    cg_tol
+        Tolerance for the CG solver, default 1e-5.
+    init_ramp_coeffs
+        Initial ramp coefficients of shape ``(3,)``.  Defaults to
+        zeros.
+
+    Returns
+    -------
+    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
+        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
+    loss_history : jax.Array
+        Array of length 1 containing the final loss value.
     """
     if init_ramp_coeffs is None:
         init_ramp_coeffs = jnp.zeros((3,), dtype=init_mag.dtype)
@@ -303,24 +557,65 @@ def run_newton_cg_solver_2d(
     return (final_mag, final_ramp), jnp.array([final_loss])
 
 
-def run_adam_solver_2d(
-    phase,
-    init_mag,
-    mag_mask,
-    reg_mask,
-    voxel_size_nm,
-    reg_config=None,
-    num_steps=2000,
-    learning_rate=1e-2,
-    rdfc_kernel=None,
-    init_ramp_coeffs=None,
-    patience=50,
-    min_delta=1e-6,
-):
-    """
-    Adam optimizer: Minimizes mbir_loss_2d w.r.t (mag, ramp).
-    Expects magnetization as (2, H, W).
-    Includes early stopping if loss improvement is smaller than min_delta for patience steps.
+def _run_adam_solver_2d(
+    phase: jax.Array,
+    init_mag: jax.Array,
+    mag_mask: jax.Array,
+    reg_mask: jax.Array,
+    voxel_size_nm: float,
+    reg_config: dict[str, Any] | None = None,
+    num_steps: int = 2000,
+    learning_rate: float = 1e-2,
+    rdfc_kernel: dict[str, Any] | None = None,
+    init_ramp_coeffs: jax.Array | None = None,
+    patience: int = 50,
+    min_delta: float = 1e-6,
+) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+    """Minimize :func:`mbir_loss_2d` using the Adam optimizer.
+
+    Includes early stopping: optimisation halts when the loss has
+    not improved by more than *min_delta* for *patience* consecutive
+    steps.
+
+    Parameters
+    ----------
+    phase
+        Observed phase image of shape ``(N, M)``.
+    init_mag
+        Initial magnetization of shape ``(N, M, 2)``.
+    mag_mask
+        Binary mask applied to the magnetization, shape
+        ``(N, M, 2)``.
+    reg_mask
+        Regularization mask of shape ``(N, M)``.
+    voxel_size_nm
+        Pixel size in nanometres.
+    reg_config
+        Regularization configuration dictionary (see
+        :func:`mbir_loss_2d`), default ``{}``.
+    num_steps
+        Maximum number of optimisation steps, default 2000.
+    learning_rate
+        Adam learning rate, default 1e-2.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+    init_ramp_coeffs
+        Initial ramp coefficients of shape ``(3,)``.  Defaults to
+        zeros.
+    patience
+        Number of steps without sufficient improvement before
+        stopping, default 50.
+    min_delta
+        Minimum loss decrease to qualify as an improvement,
+        default 1e-6.
+
+    Returns
+    -------
+    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
+        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
+    loss_history : jax.Array
+        Per-step loss values (truncated at the step where early
+        stopping triggered, if applicable).
     """
     if init_ramp_coeffs is None:
         init_ramp_coeffs = jnp.zeros((3,), dtype=init_mag.dtype)
@@ -401,19 +696,63 @@ def run_adam_solver_2d(
 
 
 @jax.jit(static_argnames=("num_steps", "patience", "min_delta"))
-def run_lbfgs_solver_2d(
-    phase,
-    init_mag,
-    mag_mask,
-    reg_mask,
-    voxel_size_nm,
-    reg_config=None,
-    num_steps=500,
-    rdfc_kernel=None,
-    init_ramp_coeffs=None,
-    patience=50,
-    min_delta=1e-6,
-):
+def _run_lbfgs_solver_2d(
+    phase: jax.Array,
+    init_mag: jax.Array,
+    mag_mask: jax.Array,
+    reg_mask: jax.Array,
+    voxel_size_nm: float,
+    reg_config: dict[str, Any] | None = None,
+    num_steps: int = 500,
+    rdfc_kernel: dict[str, Any] | None = None,
+    init_ramp_coeffs: jax.Array | None = None,
+    patience: int = 50,
+    min_delta: float = 1e-6,
+) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+    """Minimize :func:`mbir_loss_2d` using L-BFGS with zoom line-search.
+
+    Uses the optax L-BFGS implementation with early stopping.
+    This function is JIT-compiled; *num_steps*, *patience*, and
+    *min_delta* are static arguments.
+
+    Parameters
+    ----------
+    phase
+        Observed phase image of shape ``(N, M)``.
+    init_mag
+        Initial magnetization of shape ``(N, M, 2)``.
+    mag_mask
+        Binary mask applied to the magnetization, shape
+        ``(N, M, 2)``.
+    reg_mask
+        Regularization mask of shape ``(N, M)``.
+    voxel_size_nm
+        Pixel size in nanometres.
+    reg_config
+        Regularization configuration dictionary (see
+        :func:`mbir_loss_2d`), default ``{}``.
+    num_steps
+        Maximum number of optimisation steps, default 500.
+    rdfc_kernel
+        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+    init_ramp_coeffs
+        Initial ramp coefficients of shape ``(3,)``.  Defaults to
+        zeros.
+    patience
+        Number of steps without sufficient improvement before
+        stopping, default 50.
+    min_delta
+        Minimum loss decrease to qualify as an improvement,
+        default 1e-6.
+
+    Returns
+    -------
+    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
+        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
+    loss_history : jax.Array
+        Per-step loss values (zero-filled after early stopping,
+        if applicable).
+    """
     if init_ramp_coeffs is None:
         init_ramp_coeffs = jnp.zeros((3,), dtype=init_mag.dtype)
     if reg_config is None:
@@ -495,3 +834,107 @@ def run_lbfgs_solver_2d(
     )
 
     return final_params, final_history
+
+
+def solve_mbir_2d(
+    phase,
+    init_mag,
+    mag_mask,
+    reg_mask,
+    voxel_size_nm,
+    solver="newton_cg",
+    reg_config=None,
+    rdfc_kernel=None,
+    init_ramp_coeffs=None,
+):
+    """
+    Unified MBIR solver for 2D projected magnetization reconstruction.
+
+    Parameters
+    ----------
+    phase : array_like
+        Measured phase image.
+    init_mag : array_like
+        Initial magnetization estimate, shape ``(N, M, 2)``.
+    mag_mask : array_like
+        Binary mask applied to the magnetization.
+    reg_mask : array_like
+        Binary mask for the regularization region.
+    voxel_size_nm : float
+        Voxel size in nanometres.
+    solver : str or SolverConfig, optional
+        Which solver to use.  Pass a string (``"newton_cg"``, ``"adam"``,
+        ``"lbfgs"``) for default parameters, or a config object
+        (:class:`NewtonCGConfig`, :class:`AdamConfig`, :class:`LBFGSConfig`)
+        for full control.  Default is ``"newton_cg"``.
+    reg_config : dict, optional
+        Regularization configuration (e.g. ``{"lambda_exchange": 1.0}``).
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+    init_ramp_coeffs : array_like, optional
+        Initial ramp coefficients ``[offset, slope_y, slope_x]``.
+
+    Returns
+    -------
+    SolverResult
+        Named tuple with fields ``magnetization``, ``ramp_coeffs``, and
+        ``loss_history``.
+
+        .. note::
+
+           For iterative solvers (Adam, L-BFGS) the ``loss_history`` array
+           may contain trailing zeros if the solver stopped early.
+    """
+    if isinstance(solver, str):
+        solver_name = solver.lower()
+        if solver_name not in _SOLVER_DEFAULTS:
+            raise ValueError(
+                f"Unknown solver {solver!r}. "
+                f"Choose from {list(_SOLVER_DEFAULTS)}"
+            )
+        config = _SOLVER_DEFAULTS[solver_name]()
+    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+        config = solver
+    else:
+        raise TypeError(
+            f"solver must be a string or a SolverConfig instance, got {type(solver)}"
+        )
+
+    shared = dict(
+        phase=phase,
+        init_mag=init_mag,
+        mag_mask=mag_mask,
+        reg_mask=reg_mask,
+        voxel_size_nm=voxel_size_nm,
+        reg_config=reg_config,
+        rdfc_kernel=rdfc_kernel,
+        init_ramp_coeffs=init_ramp_coeffs,
+    )
+
+    if isinstance(config, NewtonCGConfig):
+        (mag, ramp), loss_history = _run_newton_cg_solver_2d(
+            **shared,
+            num_steps=config.num_steps,
+            cg_tol=config.cg_tol,
+        )
+    elif isinstance(config, AdamConfig):
+        (mag, ramp), loss_history = _run_adam_solver_2d(
+            **shared,
+            num_steps=config.num_steps,
+            learning_rate=config.learning_rate,
+            patience=config.patience,
+            min_delta=config.min_delta,
+        )
+    elif isinstance(config, LBFGSConfig):
+        (mag, ramp), loss_history = _run_lbfgs_solver_2d(
+            **shared,
+            num_steps=config.num_steps,
+            patience=config.patience,
+            min_delta=config.min_delta,
+        )
+
+    return SolverResult(
+        magnetization=mag,
+        ramp_coeffs=ramp,
+        loss_history=loss_history,
+    )
