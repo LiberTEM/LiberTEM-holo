@@ -33,7 +33,6 @@ class LCurveResult(NamedTuple):
 
 class BootstrapThresholdResult(NamedTuple):
     """Result returned by :func:`bootstrap_threshold_uncertainty_2d`."""
-    threshold: float
     threshold_low: float
     threshold_high: float
     threshold_draws: np.ndarray
@@ -59,7 +58,7 @@ class NewtonCGConfig:
     cg_tol : float
         CG convergence tolerance (relative residual norm).
     """
-    cg_maxiter: int = 10000
+    cg_maxiter: int = 1000
     cg_tol: float = 1e-10
 
 
@@ -1540,7 +1539,6 @@ def decompose_loss(
 def bootstrap_threshold_uncertainty_2d(
     phase,
     mip_phase,
-    threshold,
     voxel_size_nm,
     b0_tesla=1.0,
     lam=1e-3,
@@ -1568,8 +1566,6 @@ def bootstrap_threshold_uncertainty_2d(
         Observed phase image of shape ``(H, W)``.
     mip_phase
         MIP phase image used for thresholding, shape ``(H, W)``.
-    threshold
-        Central threshold value around which the bootstrap draws are sampled.
     voxel_size_nm
         Pixel size in nanometres.
     b0_tesla : float, optional
@@ -1582,11 +1578,9 @@ def bootstrap_threshold_uncertainty_2d(
     n_boot : int, optional
         Number of threshold draws, default 50.
     threshold_low : float, optional
-        Lower bound for the threshold draws.  Defaults to
-        ``threshold - 0.25``.
+        Lower bound for the threshold draws.
     threshold_high : float, optional
-        Upper bound for the threshold draws.  Defaults to
-        ``threshold + 0.25``.
+        Upper bound for the threshold draws.
     rng_seed : int, optional
         Seed for the pseudo-random number generator, default 0.
     geometry : str, optional
@@ -1608,32 +1602,43 @@ def bootstrap_threshold_uncertainty_2d(
     """
     phase = jnp.asarray(phase)
     mip_phase = jnp.asarray(mip_phase)
-    if phase.shape != mip_phase.shape:
-        raise ValueError(
-            f"phase and mip_phase must have the same shape; got {phase.shape} and {mip_phase.shape}."
-        )
 
+    mip_abs = jnp.abs(mip_phase)
     if threshold_low is None:
-        threshold_low = float(threshold) - 0.25
+        threshold_low = float(jnp.percentile(mip_abs, 5.0))
     if threshold_high is None:
-        threshold_high = float(threshold) + 0.25
+        threshold_high = float(jnp.percentile(mip_abs, 95.0))
     if threshold_high <= threshold_low:
         raise ValueError(
-            f"threshold_high must be greater than threshold_low; got {threshold_low} and {threshold_high}."
+            "threshold_high must be greater than threshold_low; "
+            f"got {threshold_low=} and {threshold_high=}"
         )
 
     rng = np.random.default_rng(rng_seed)
     threshold_draws = rng.uniform(low=threshold_low, high=threshold_high, size=n_boot)
+    threshold_draws_jax = jnp.asarray(threshold_draws, dtype=mip_abs.dtype)
 
-    mip_abs = np.abs(np.asarray(mip_phase))
-    reference_mask = (mip_abs > threshold).astype(np.float64)
-    bootstrap_masks = (
-        mip_abs[None, ...] > threshold_draws[:, None, None]
-    ).astype(np.float64)
+    bootstrap_masks = mip_abs[None, ...] > threshold_draws_jax[:, None, None]
 
-    for draw_index in range(n_boot):
-        if bootstrap_masks[draw_index].sum() == 0:
-            bootstrap_masks[draw_index] = reference_mask
+    # Pre-build the RDFC kernel once for all bootstrap draws.
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            phase.shape,
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+
+    # When using the default Newton-CG solver with no explicit config,
+    # scale cg_maxiter to the problem size.  JAX's CG runs all maxiter
+    # iterations under jit/vmap (no early exit), so the default 10000
+    # wastes cycles once the solve has converged.  Profiling shows CG
+    # reaches <0.1% of converged loss at roughly H*W/4 iterations for
+    # typical MBIR problems, with diminishing returns beyond that.
+    if solver_config is None and isinstance(solver, str) and solver.lower() == "newton_cg":
+        H, W = phase.shape
+        scaled_maxiter = min(max(H * W // 4, 1000), 10000)
+        solver_config = NewtonCGConfig(cg_maxiter=scaled_maxiter)
 
     bootstrap_mag = reconstruct_2d_ensemble(
         phase=phase,
@@ -1651,28 +1656,28 @@ def bootstrap_threshold_uncertainty_2d(
 
     bootstrap_mag = jnp.asarray(bootstrap_mag)
     mean_magnetization = jnp.mean(bootstrap_mag, axis=0)
-    mean_norm = np.linalg.norm(np.asarray(mean_magnetization), axis=-1)
+    mean_norm = jnp.linalg.norm(mean_magnetization, axis=-1)
 
-    norm_samples = np.linalg.norm(np.asarray(bootstrap_mag), axis=-1)
-    norm_low = np.percentile(norm_samples, 2.5, axis=0)
-    norm_high = np.percentile(norm_samples, 97.5, axis=0)
+    norm_samples = jnp.linalg.norm(bootstrap_mag, axis=-1)
+    norm_low, norm_high = jnp.percentile(
+        norm_samples, jnp.array([2.5, 97.5]), axis=0
+    )
     norm_ci95 = norm_high - norm_low
     relative_ci95 = norm_ci95 / (mean_norm + 1e-12)
-    mask_frequency = bootstrap_masks.mean(axis=0)
+    mask_frequency = jnp.mean(bootstrap_masks, axis=0)
 
     return BootstrapThresholdResult(
-        threshold=threshold,
         threshold_low=threshold_low,
         threshold_high=threshold_high,
         threshold_draws=threshold_draws,
         magnetizations=bootstrap_mag,
         mean_magnetization=mean_magnetization,
-        mean_norm=mean_norm,
-        norm_low=norm_low,
-        norm_high=norm_high,
-        norm_ci95=norm_ci95,
-        relative_ci95=relative_ci95,
-        mask_frequency=mask_frequency,
+        mean_norm=np.asarray(mean_norm),
+        norm_low=np.asarray(norm_low),
+        norm_high=np.asarray(norm_high),
+        norm_ci95=np.asarray(norm_ci95),
+        relative_ci95=np.asarray(relative_ci95),
+        mask_frequency=np.asarray(mask_frequency),
     )
 
 

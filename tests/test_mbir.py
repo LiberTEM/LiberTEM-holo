@@ -47,14 +47,9 @@ from libertem_holo.base.mbir import (  # noqa: E402
 )
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data")
-PYRAMID_DIR = os.path.join(
-    os.path.dirname(__file__),
-    os.pardir,
-    "empyre-pyramid-master-tests",
-    "tests",
-)
-PYRAMID_PHASEMAPPER_DIR = os.path.join(PYRAMID_DIR, "test_phasemapper")
-PYRAMID_PROJECTOR_DIR = os.path.join(PYRAMID_DIR, "test_projector")
+UPSTREAM_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data", "upstream")
+PYRAMID_PHASEMAPPER_DIR = os.path.join(UPSTREAM_DIR, "phasemapper")
+PYRAMID_PROJECTOR_DIR = os.path.join(UPSTREAM_DIR, "projector")
 
 
 # ---------------------------------------------------------------------------
@@ -1077,7 +1072,7 @@ class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
         assert cfg.cg_maxiter == 10000
-        assert cfg.cg_tol == 1e-8
+        assert cfg.cg_tol == 1e-10
 
     def test_adam_defaults(self):
         cfg = AdamConfig()
@@ -1156,3 +1151,520 @@ class TestResultTypes:
         )
         assert r.corner_index == 1
         assert len(r.lambdas) == 3
+
+
+# ===================================================================
+# 14. Upstream fixture parity — direct tests against empyre/pyramid
+#     HDF5 and .npy files (not intermediate .npz extracts)
+# ===================================================================
+
+# Helpers to load HDF5 array data from pyramid fixtures
+try:
+    import h5py as _h5py
+
+    def _load_hdf5_field(path):
+        """Load the main data array from a pyramid HDF5 file."""
+        with _h5py.File(path, "r") as h:
+            return h["Experiments/__unnamed__/data"][:]
+
+    def _load_hdf5_scale(path, axis_idx=2):
+        """Load the voxel-size scale from a pyramid HDF5 axis attribute."""
+        with _h5py.File(path, "r") as h:
+            return float(
+                h[f"Experiments/__unnamed__/axis-{axis_idx}"].attrs["scale"]
+            )
+
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+
+_skip_no_h5py = pytest.mark.skipif(not HAS_H5PY, reason="h5py not installed")
+
+PYRAMID_KERNEL_DIR = os.path.join(UPSTREAM_DIR, "kernel")
+PYRAMID_FORWARDMODEL_DIR = os.path.join(UPSTREAM_DIR, "forwardmodel")
+
+
+class TestUpstreamKernelNpy:
+    """Verify build_rdfc_kernel directly against upstream kernel .npy files."""
+
+    def test_u_fft_matches_upstream_npy(self):
+        ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_u_fft.npy"))
+        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        assert_allclose(
+            np.asarray(kernel["u_fft"]), ref, atol=1e-7,
+            err_msg="u_fft does not match upstream test_kernel/ref_u_fft.npy",
+        )
+
+    def test_v_fft_matches_upstream_npy(self):
+        ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_v_fft.npy"))
+        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        assert_allclose(
+            np.asarray(kernel["v_fft"]), ref, atol=1e-7,
+            err_msg="v_fft does not match upstream test_kernel/ref_v_fft.npy",
+        )
+
+    def test_raw_u_matches_upstream_npy(self):
+        ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_u.npy"))
+        u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
+        v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
+        uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
+        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        u_kernel = coeff * _rdfc_elementary_phase("disc", uu, vv)
+        assert_allclose(
+            np.asarray(u_kernel), ref, atol=1e-7,
+            err_msg="Raw u kernel does not match upstream test_kernel/ref_u.npy",
+        )
+
+    def test_raw_v_matches_upstream_npy(self):
+        ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_v.npy"))
+        u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
+        v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
+        uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
+        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        v_kernel = -coeff * _rdfc_elementary_phase("disc", vv, uu)
+        assert_allclose(
+            np.asarray(v_kernel), ref, atol=1e-7,
+            err_msg="Raw v kernel does not match upstream test_kernel/ref_v.npy",
+        )
+
+
+class TestUpstreamPhaseMapperHDF5:
+    """End-to-end test: load mag_proj and phasemap from HDF5 and verify."""
+
+    @_skip_no_h5py
+    def test_phasemap_from_hdf5_mag_proj(self):
+        """Load magnetisation from mag_proj.hdf5, compute phase, compare to phasemap.hdf5."""
+        mag_field = _load_hdf5_field(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "mag_proj.hdf5")
+        )  # (3, 1, 4, 4)
+        phase_ref = _load_hdf5_field(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "phasemap.hdf5")
+        )  # (4, 4)
+        voxel_size = _load_hdf5_scale(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "mag_proj.hdf5")
+        )
+
+        u_field = jnp.array(mag_field[0, 0], dtype=jnp.float64)
+        v_field = jnp.array(mag_field[1, 0], dtype=jnp.float64)
+        kernel = build_rdfc_kernel(u_field.shape, b0_tesla=1.0, geometry="disc")
+        phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
+
+        assert_allclose(
+            np.asarray(phase), phase_ref, atol=1e-7,
+            err_msg="Phase from HDF5 mag_proj does not match phasemap.hdf5",
+        )
+
+    @_skip_no_h5py
+    def test_forward_model_2d_from_hdf5(self):
+        """forward_model_2d with HDF5 inputs should match phasemap.hdf5."""
+        mag_field = _load_hdf5_field(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "mag_proj.hdf5")
+        )
+        phase_ref = _load_hdf5_field(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "phasemap.hdf5")
+        )
+        voxel_size = _load_hdf5_scale(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "mag_proj.hdf5")
+        )
+
+        u = jnp.array(mag_field[0, 0], dtype=jnp.float64)
+        v = jnp.array(mag_field[1, 0], dtype=jnp.float64)
+        mag = jnp.stack([u, v], axis=-1)
+        phase = forward_model_2d(mag, voxel_size, b0_tesla=1.0, geometry="disc")
+
+        assert_allclose(
+            np.asarray(phase), phase_ref, atol=1e-7,
+            err_msg="forward_model_2d does not match phasemap.hdf5",
+        )
+
+    @_skip_no_h5py
+    def test_jac_transpose_matches_upstream(self):
+        """Transposed Jacobian should equal upstream jac.npy.T (RDFC jac_T_dot test)."""
+        jac_ref = np.load(os.path.join(PYRAMID_PHASEMAPPER_DIR, "jac.npy"))
+        voxel_size = _load_hdf5_scale(
+            os.path.join(PYRAMID_PHASEMAPPER_DIR, "mag_proj.hdf5")
+        )
+        H, W = 4, 4
+        n = 2 * H * W
+        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+
+        def phase_from_mag_vec(mag_vec):
+            u = mag_vec[:H * W].reshape(H, W)
+            v = mag_vec[H * W:].reshape(H, W)
+            return (voxel_size**2 * phase_mapper_rdfc(u, v, kernel)).reshape(-1)
+
+        jac = np.asarray(
+            jax.jacfwd(phase_from_mag_vec)(jnp.zeros(n, dtype=jnp.float64))
+        )
+        # Transpose parity (mirrors pyramid's test_PhaseMapperRDFC_jac_T_dot)
+        assert_allclose(
+            jac.T, jac_ref.T, atol=1e-7,
+            err_msg="Transposed Jacobian does not match upstream jac.npy.T",
+        )
+
+
+class TestUpstreamProjectorHDF5:
+    """Load ref_magdata.hdf5, project, compare against ref_mag_proj_*.hdf5."""
+
+    @_skip_no_h5py
+    @pytest.mark.parametrize("axis", ["z", "y", "x"])
+    def test_projection_matches_hdf5(self, axis):
+        magdata = _load_hdf5_field(
+            os.path.join(PYRAMID_PROJECTOR_DIR, "ref_magdata.hdf5")
+        )  # (3, 6, 5, 4)
+        proj_ref = _load_hdf5_field(
+            os.path.join(PYRAMID_PROJECTOR_DIR, f"ref_mag_proj_{axis}.hdf5")
+        )  # (3, 1, V, U)
+
+        mag_3d = jnp.array(
+            np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64
+        )
+        result = project_3d(mag_3d, axis=axis)
+        result_np = np.asarray(result)
+
+        # proj_ref layout: (comp, 1, V, U) where comp 0=u, 1=v
+        assert_allclose(
+            result_np[..., 0], proj_ref[0, 0], atol=1e-5,
+            err_msg=f"u-component projection mismatch for axis={axis} vs HDF5",
+        )
+        assert_allclose(
+            result_np[..., 1], proj_ref[1, 0], atol=1e-5,
+            err_msg=f"v-component projection mismatch for axis={axis} vs HDF5",
+        )
+
+    @pytest.mark.parametrize(
+        "axis,jac_name",
+        [("z", "jac_z.npy"), ("y", "jac_y.npy"), ("x", "jac_x.npy")],
+    )
+    def test_projector_jac_T_matches_upstream(self, axis, jac_name):
+        """Transposed projector Jacobian should match jac_*.npy.T."""
+        jac_ref = np.load(os.path.join(PYRAMID_PROJECTOR_DIR, jac_name))
+        Z, Y, X = 6, 5, 4
+        n = 3 * Z * Y * X
+
+        def project_from_vec(vec_flat):
+            mag_comp_first = vec_flat.reshape(3, Z, Y, X)
+            mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
+            proj = project_3d(mag_ours, axis=axis)
+            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+
+        jac = np.asarray(
+            jax.jacfwd(project_from_vec)(jnp.zeros(n, dtype=jnp.float64))
+        )
+        assert_allclose(
+            jac.T, jac_ref.T, atol=1e-7,
+            err_msg=f"Transposed projector Jacobian mismatch for axis={axis}",
+        )
+
+
+class TestUpstreamForwardModelChain:
+    """Full 3D forward-model chain: mask → project → phasemap.
+
+    Pyramid's ForwardModel composes SimpleProjector(z) + PhaseMapperRDFC
+    on masked 3D magnetization. We replicate this chain and compare
+    the Jacobian against upstream test_forwardmodel/jac.npy.
+
+    Setup (matching pyramid test_forwardmodel.py):
+      a = 10, dim = (4,5,6), mask[1:-1,1:-1,1:-1] = True
+      n = 3 * mask.sum() = 72   (masked magnetization DOF)
+      m = 2 * 30 = 60           (two appended views, each 5×6=30 pixels)
+      Top 30 rows == bottom 30 rows (same projector+phasemapper twice)
+    """
+
+    @_skip_no_h5py
+    def test_forward_chain_jac_matches_upstream(self):
+        """Single-view Jacobian of (mask→project_z→phase_mapper) vs jac.npy[:30,:]."""
+        jac_ref_full = np.load(os.path.join(PYRAMID_FORWARDMODEL_DIR, "jac.npy"))
+        # Both views are identical; use only the first 30 rows
+        jac_ref = jac_ref_full[:30, :]  # (30, 72)
+
+        Z, Y, X = 4, 5, 6
+        mask_3d = np.zeros((Z, Y, X), dtype=bool)
+        mask_3d[1:-1, 1:-1, 1:-1] = True
+        n_masked = int(mask_3d.sum())  # 24
+        assert n_masked == 24
+        n = 3 * n_masked  # 72
+
+        voxel_size = 10.0
+        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+
+        # Indices of masked voxels for scatter
+        mask_flat = mask_3d.ravel()
+        masked_indices = np.where(mask_flat)[0]
+
+        def forward_chain(mag_vec_masked):
+            """Replicate pyramid's ForwardModel.__call__ for a single view.
+
+            mag_vec_masked has shape (72,) = (3 * 24):
+              first 24 = mx at masked voxels
+              next 24  = my at masked voxels
+              last 24  = mz at masked voxels
+            """
+            mx_masked = mag_vec_masked[:n_masked]
+            my_masked = mag_vec_masked[n_masked : 2 * n_masked]
+            mz_masked = mag_vec_masked[2 * n_masked :]
+
+            # Scatter into full 3D volumes
+            total = Z * Y * X
+            mx_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mx_masked)
+            my_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(my_masked)
+            mz_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mz_masked)
+
+            mx_3d = mx_full.reshape(Z, Y, X)
+            my_3d = my_full.reshape(Z, Y, X)
+            mz_3d = mz_full.reshape(Z, Y, X)
+
+            mag_3d = jnp.stack([mx_3d, my_3d, mz_3d], axis=-1)  # (Z,Y,X,3)
+
+            # Project along z (SimpleProjector default)
+            proj = project_3d(mag_3d, axis="z")  # (Y, X, 2)
+            u_proj = proj[..., 0]
+            v_proj = proj[..., 1]
+
+            # Phase mapper
+            phase = voxel_size**2 * phase_mapper_rdfc(u_proj, v_proj, kernel)
+            return phase.reshape(-1)
+
+        jac = np.asarray(
+            jax.jacfwd(forward_chain)(jnp.zeros(n, dtype=jnp.float64))
+        )
+        assert jac.shape == (30, 72)
+
+        assert_allclose(
+            jac, jac_ref, atol=1e-7,
+            err_msg=(
+                "Full chain Jacobian (mask→project_z→phase_mapper) "
+                "does not match upstream test_forwardmodel/jac.npy"
+            ),
+        )
+
+    @_skip_no_h5py
+    def test_forward_chain_call_matches_phasemap_ref(self):
+        """ForwardModel(ones_vector) should reproduce the reference phasemap."""
+        phase_ref = _load_hdf5_field(
+            os.path.join(PYRAMID_FORWARDMODEL_DIR, "phasemap_ref.hdf5")
+        )  # (5, 6)
+
+        Z, Y, X = 4, 5, 6
+        mask_3d = np.zeros((Z, Y, X), dtype=bool)
+        mask_3d[1:-1, 1:-1, 1:-1] = True
+        n_masked = int(mask_3d.sum())
+
+        voxel_size = 10.0
+        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+        masked_indices = np.where(mask_3d.ravel())[0]
+
+        # ones vector (like costfunction test: self.cost(np.ones(self.cost.n)) ≈ 0)
+        mag_vec = jnp.ones(3 * n_masked, dtype=jnp.float64)
+
+        mx_masked = mag_vec[:n_masked]
+        my_masked = mag_vec[n_masked : 2 * n_masked]
+        mz_masked = mag_vec[2 * n_masked :]
+
+        total = Z * Y * X
+        mx_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mx_masked)
+        my_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(my_masked)
+        mz_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mz_masked)
+
+        mag_3d = jnp.stack(
+            [mx_full.reshape(Z, Y, X), my_full.reshape(Z, Y, X), mz_full.reshape(Z, Y, X)],
+            axis=-1,
+        )
+
+        proj = project_3d(mag_3d, axis="z")
+        phase = voxel_size**2 * phase_mapper_rdfc(proj[..., 0], proj[..., 1], kernel)
+
+        assert_allclose(
+            np.asarray(phase), phase_ref, atol=1e-7,
+            err_msg="Forward chain on ones vector does not match phasemap_ref.hdf5",
+        )
+
+
+# ===================================================================
+# 15. Analytic phase formulas  (cf. pyramid analytic.py / test_analytic.py)
+#
+#     Pure-numpy reimplementations of the four analytic phase functions
+#     from pyramid.analytic, verified against the upstream .npy reference
+#     files.  These serve as ground-truth phase images for validating
+#     the numerical forward model (RDFC) on simple geometries.
+# ===================================================================
+
+PYRAMID_ANALYTIC_DIR = os.path.join(UPSTREAM_DIR, "analytic")
+
+# Magnetic flux quantum in T·nm² (same constant as pyramid.analytic.PHI_0)
+_PHI_0_ANALYTIC = 2067.83
+
+
+def _analytic_phase_slab(dim, a, phi, center, width, b_0=1.0):
+    """Analytic magnetic phase for a homogeneously magnetized slab."""
+    z_dim, y_dim, x_dim = dim
+    y0, x0 = a * center[1], a * center[2]
+    Lz, Ly, Lx = a * width[0], a * width[1], a * width[2]
+    coeff = -b_0 / (4 * _PHI_0_ANALYTIC)
+
+    def _F_0(x, y):
+        A = np.log(x**2 + y**2 + 1e-30)
+        B = np.arctan(x / (y + 1e-30))
+        return x * A - 2 * x + 2 * y * B
+
+    x = np.linspace(a / 2, x_dim * a - a / 2, num=x_dim)
+    y = np.linspace(a / 2, y_dim * a - a / 2, num=y_dim)
+    xx, yy = np.meshgrid(x, y)
+
+    phase = coeff * Lz * (
+        -np.cos(phi) * (
+            _F_0(xx - x0 - Lx / 2, yy - y0 - Ly / 2)
+            - _F_0(xx - x0 + Lx / 2, yy - y0 - Ly / 2)
+            - _F_0(xx - x0 - Lx / 2, yy - y0 + Ly / 2)
+            + _F_0(xx - x0 + Lx / 2, yy - y0 + Ly / 2)
+        )
+        + np.sin(phi) * (
+            _F_0(yy - y0 - Ly / 2, xx - x0 - Lx / 2)
+            - _F_0(yy - y0 + Ly / 2, xx - x0 - Lx / 2)
+            - _F_0(yy - y0 - Ly / 2, xx - x0 + Lx / 2)
+            + _F_0(yy - y0 + Ly / 2, xx - x0 + Lx / 2)
+        )
+    )
+    return phase
+
+
+def _analytic_phase_disc(dim, a, phi, center, radius, height, b_0=1.0):
+    """Analytic magnetic phase for a homogeneously magnetized disc."""
+    z_dim, y_dim, x_dim = dim
+    y0, x0 = a * center[1], a * center[2]
+    Lz = a * height
+    R = a * radius
+    coeff = np.pi * b_0 / (2 * _PHI_0_ANALYTIC)
+
+    x = np.linspace(a / 2, x_dim * a - a / 2, num=x_dim)
+    y = np.linspace(a / 2, y_dim * a - a / 2, num=y_dim)
+    xx, yy = np.meshgrid(x, y)
+
+    r = np.hypot(xx - x0, yy - y0)
+    result = coeff * Lz * ((yy - y0) * np.cos(phi) - (xx - x0) * np.sin(phi))
+    result *= np.where(r <= R, 1, (R / (r + 1e-30)) ** 2)
+    return result
+
+
+def _analytic_phase_sphere(dim, a, phi, center, radius, b_0=1.0):
+    """Analytic magnetic phase for a homogeneously magnetized sphere."""
+    z_dim, y_dim, x_dim = dim
+    y0, x0 = a * center[1], a * center[2]
+    R = a * radius
+    coeff = 2.0 / 3.0 * np.pi * b_0 / _PHI_0_ANALYTIC
+
+    x = np.linspace(a / 2, x_dim * a - a / 2, num=x_dim)
+    y = np.linspace(a / 2, y_dim * a - a / 2, num=y_dim)
+    xx, yy = np.meshgrid(x, y)
+
+    r = np.hypot(xx - x0, yy - y0)
+    result = coeff * R**3 / (r + 1e-30) ** 2 * (
+        (yy - y0) * np.cos(phi) - (xx - x0) * np.sin(phi)
+    )
+    result *= 1 - np.clip(1 - (r / R) ** 2, 0, 1) ** (3.0 / 2.0)
+    return result
+
+
+def _analytic_phase_vortex(dim, a, center, radius, height, b_0=1.0):
+    """Analytic magnetic phase for a vortex state disc."""
+    z_dim, y_dim, x_dim = dim
+    y0, x0 = a * center[1], a * center[2]
+    Lz = a * height
+    R = a * radius
+    coeff = -np.pi * b_0 * Lz / _PHI_0_ANALYTIC
+
+    x = np.linspace(a / 2, x_dim * a - a / 2, num=x_dim)
+    y = np.linspace(a / 2, y_dim * a - a / 2, num=y_dim)
+    xx, yy = np.meshgrid(x, y)
+
+    r = np.hypot(xx - x0, yy - y0)
+    return coeff * np.where(r <= R, r - R, 0)
+
+
+class TestAnalyticPhase:
+    """Verify analytic phase formulas against upstream pyramid references.
+
+    Parameters match pyramid's test_analytic.py:
+      dim=(4,4,4), a=10.0, phi=pi/4, center=(2,2,2), radius=1
+    """
+
+    dim = (4, 4, 4)
+    a = 10.0
+    phi = np.pi / 4
+    center = (2, 2, 2)
+    radius = 1
+
+    def test_slab_matches_upstream(self):
+        width = (self.dim[0] / 2, self.dim[1] / 2, self.dim[2] / 2)
+        phase = _analytic_phase_slab(self.dim, self.a, self.phi, self.center, width)
+        ref = np.load(os.path.join(PYRAMID_ANALYTIC_DIR, "ref_phase_slab.npy"))
+        assert_allclose(
+            phase, ref, atol=1e-10,
+            err_msg="Analytic slab phase does not match upstream reference",
+        )
+
+    def test_disc_matches_upstream(self):
+        height = self.dim[2] / 2
+        phase = _analytic_phase_disc(
+            self.dim, self.a, self.phi, self.center, self.radius, height,
+        )
+        ref = np.load(os.path.join(PYRAMID_ANALYTIC_DIR, "ref_phase_disc.npy"))
+        assert_allclose(
+            phase, ref, atol=1e-10,
+            err_msg="Analytic disc phase does not match upstream reference",
+        )
+
+    def test_sphere_matches_upstream(self):
+        phase = _analytic_phase_sphere(
+            self.dim, self.a, self.phi, self.center, self.radius,
+        )
+        ref = np.load(os.path.join(PYRAMID_ANALYTIC_DIR, "ref_phase_sphere.npy"))
+        assert_allclose(
+            phase, ref, atol=1e-10,
+            err_msg="Analytic sphere phase does not match upstream reference",
+        )
+
+    def test_vortex_matches_upstream(self):
+        height = self.dim[2] / 2
+        phase = _analytic_phase_vortex(
+            self.dim, self.a, self.center, self.radius, height,
+        )
+        ref = np.load(os.path.join(PYRAMID_ANALYTIC_DIR, "ref_phase_vort.npy"))
+        assert_allclose(
+            phase, ref, atol=1e-10,
+            err_msg="Analytic vortex phase does not match upstream reference",
+        )
+
+    def test_slab_shape(self):
+        width = (2, 2, 2)
+        phase = _analytic_phase_slab(self.dim, self.a, self.phi, self.center, width)
+        assert phase.shape == (self.dim[1], self.dim[2])
+
+    def test_disc_symmetry(self):
+        """Disc phase should be antisymmetric about the center."""
+        dim = (8, 8, 8)
+        center = (4, 4, 4)
+        phase = _analytic_phase_disc(dim, 1.0, 0.0, center, 2, 4)
+        # phi=0 → cos(0)=1, sin(0)=0 → phase ∝ (y - y0)
+        # Should be antisymmetric in y about center
+        assert_allclose(
+            phase[3, :], -phase[4, :], atol=1e-12,
+            err_msg="Disc phase should be antisymmetric about center in y",
+        )
+
+    def test_vortex_zero_outside(self):
+        """Vortex phase should be exactly zero outside the disc radius."""
+        dim = (16, 16, 16)
+        center = (8, 8, 8)
+        phase = _analytic_phase_vortex(dim, 1.0, center, 3, 4)
+        # Pixels far from center (r > radius) should be zero
+        y0, x0 = center[1], center[2]
+        ys = np.arange(dim[1]) + 0.5
+        xs = np.arange(dim[2]) + 0.5
+        xx, yy = np.meshgrid(xs, ys)
+        r = np.hypot(xx - x0, yy - y0)
+        outside = r > 3
+        assert_allclose(
+            phase[outside], 0.0, atol=1e-15,
+            err_msg="Vortex phase should be zero outside the disc",
+        )
