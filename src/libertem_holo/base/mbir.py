@@ -21,6 +21,16 @@ class SolverResult(NamedTuple):
     loss_history: jnp.ndarray
 
 
+class LCurveResult(NamedTuple):
+    """Result returned by :func:`lcurve_sweep` and :func:`lcurve_sweep_vmap`."""
+    lambdas: np.ndarray
+    data_misfits: np.ndarray
+    reg_norms: np.ndarray
+    magnetizations: jnp.ndarray
+    ramp_coeffs: jnp.ndarray
+    corner_index: int
+
+
 @dataclasses.dataclass(frozen=True)
 class NewtonCGConfig:
     """Configuration for the Newton-CG solver."""
@@ -58,10 +68,73 @@ def exchange_loss_fn(
     mag: jax.Array,
     reg_mask: jax.Array,
 ) -> jax.Array:
-    """Compute 2D exchange energy via neighbor-difference inside a mask.
+    r"""First-order regularization via masked finite differences.
 
-    Regularizes the two in-plane dimensions (y, x) matching the
-    projection geometry, using neighbor-count scaling.
+    Computes the squared L2 norm of the spatial gradient of the
+    magnetization field inside a mask:
+
+    .. math::
+
+        E = \sum_{i,j \in \text{mask}} \left\lVert
+            \frac{\partial \mathbf{m}}{\partial y}\bigg|_{i,j}
+            \right\rVert^2
+          + \left\lVert
+            \frac{\partial \mathbf{m}}{\partial x}\bigg|_{i,j}
+            \right\rVert^2
+
+    where each norm is over both magnetization components (u, v).
+    The result is a scalar smoothness penalty: large when
+    neighboring magnetization values differ, zero when the field
+    is spatially uniform.  It enters the total MBIR loss as
+    ``lambda_exchange * E``.
+
+    Algorithm
+    ---------
+    1. **Neighbor detection**.  For each masked pixel the four
+       cardinal neighbors (up, down, left, right) are checked
+       against the mask.  ``neighbor_count`` records how many
+       valid neighbors each pixel has (0--4).
+
+    2. **Adaptive difference stencil**.  For each spatial axis the
+       best available finite-difference is selected per pixel:
+
+       * Both neighbors present → **central difference**
+         (e.g. ``m[i+1,j] − m[i−1,j]``), accuracy *O(h²)*.
+       * Only one neighbor → **forward or backward difference**
+         (e.g. ``m[i+1,j] − m[i,j]``), accuracy *O(h)*.
+       * No neighbor in that direction → zero contribution.
+
+    3. **Neighbor-count normalization**.  Each difference is divided
+       by the total neighbor count at that pixel.  Interior pixels
+       (4 neighbors) are scaled by 1/4, edge pixels (2 neighbors)
+       by 1/2, corner pixels (1 neighbor) by 1.  This keeps the
+       per-pixel regularization contribution roughly uniform
+       regardless of connectivity.
+
+    4. **Squared L2 summation**.  The final loss is
+       ``sum(diff_y²) + sum(diff_x²)`` over all masked pixels and
+       both magnetization components.
+
+    Differences from Pyramid's ``FirstOrderRegularisator``
+    ------------------------------------------------------
+    * **Dimensionality**: 2D (y, x) only, matching the projected
+      magnetization geometry.  Pyramid regularizes all 3 spatial
+      axes of a 3D volume.
+    * **Stencil**: Adaptive central/one-sided selection at mask
+      boundaries.  Pyramid uses forward differences everywhere via
+      a sparse operator ``D`` built by ``jutil.diff``.
+    * **Normalization**: Division by neighbor count.  Pyramid's
+      sparse ``D`` matrix applies unit-weight forward differences
+      with no per-pixel normalization.
+    * **Implementation**: Pure JAX array operations; all
+      derivatives obtained via autodiff.  Pyramid provides
+      analytic ``jac``, ``hess_dot``, and ``hess_diag`` methods
+      through its ``Regularisator`` class hierarchy.
+    * **Lambda scale**: Because of the neighbor-count
+      normalization and 2D-vs-3D geometry, a ``lambda_exchange``
+      value here is not numerically identical to Pyramid's ``lam``
+      for the same problem, even though both weight the same
+      physical quantity (spatial roughness).
 
     Parameters
     ----------
@@ -1100,6 +1173,157 @@ def forward_model_2d(
     )
 
 
+def reconstruct_2d_ensemble(
+    phase,
+    masks,
+    voxel_size_nm,
+    b0_tesla=1.0,
+    lam=1e-3,
+    solver="newton_cg",
+    reg_masks=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+    solver_config=None,
+):
+    """Batched MBIR reconstruction over an ensemble of bootstrap masks.
+
+    Runs :func:`reconstruct_2d` for each mask in the ensemble using
+    ``jax.vmap`` for efficient parallel execution on GPU.
+
+    Parameters
+    ----------
+    phase : array_like
+        Measured phase image of shape ``(H, W)``.
+    masks : array_like
+        Bootstrap mask ensemble of shape ``(N_boot, H, W)``.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    lam : float, optional
+        Regularization weight (``lambda_exchange``), default 1e-3.
+    solver : str or SolverConfig, optional
+        Solver selection string (``"newton_cg"``, ``"adam"``,
+        ``"lbfgs"``) or a :class:`SolverConfig` instance.
+        Ignored when *solver_config* is provided.
+        Default is ``"newton_cg"``.
+    reg_masks : array_like, optional
+        Separate regularization masks of shape ``(N_boot, H, W)``.
+        Defaults to *masks*.
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel (``"disc"`` or
+        ``"slab"``), default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Built automatically when not provided.
+    solver_config : SolverConfig, optional
+        Explicit solver configuration object.  When provided,
+        the *solver* string argument is ignored.
+
+    Returns
+    -------
+    jax.Array
+        Reconstructed magnetization ensemble of shape
+        ``(N_boot, H, W, 2)``.
+
+    Notes
+    -----
+    For iterative solvers (Adam, L-BFGS) early stopping is
+    effectively disabled under ``vmap``; all bootstrap samples
+    run for the maximum number of steps.
+    """
+    phase = jnp.asarray(phase)
+    masks = jnp.asarray(masks)
+    if reg_masks is None:
+        reg_masks = masks
+    else:
+        reg_masks = jnp.asarray(reg_masks)
+
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            voxel_size_nm,
+            phase.shape,
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+
+    # Resolve solver config once (Python-level dispatch, outside vmap)
+    if solver_config is not None:
+        config = solver_config
+    elif isinstance(solver, str):
+        solver_name = solver.lower()
+        if solver_name not in _SOLVER_DEFAULTS:
+            raise ValueError(
+                f"Unknown solver {solver!r}. "
+                f"Choose from {list(_SOLVER_DEFAULTS)}"
+            )
+        config = _SOLVER_DEFAULTS[solver_name]()
+    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+        config = solver
+    else:
+        raise TypeError(
+            f"solver must be a string or a SolverConfig instance, "
+            f"got {type(solver)}"
+        )
+
+    init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
+    reg_config = {"lambda_exchange": float(lam)}
+
+    # Build a vmappable function for the chosen solver
+    if isinstance(config, NewtonCGConfig):
+        def _solve_single(mask, reg_mask):
+            (mag, _ramp), _loss = _run_newton_cg_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                rdfc_kernel=rdfc_kernel,
+                cg_tol=config.cg_tol,
+                reg_mask=reg_mask,
+            )
+            return mag
+    elif isinstance(config, AdamConfig):
+        def _solve_single(mask, reg_mask):
+            (mag, _ramp), _loss = _run_adam_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                learning_rate=config.learning_rate,
+                rdfc_kernel=rdfc_kernel,
+                patience=config.patience,
+                min_delta=config.min_delta,
+                reg_mask=reg_mask,
+            )
+            return mag
+    elif isinstance(config, LBFGSConfig):
+        def _solve_single(mask, reg_mask):
+            (mag, _ramp), _loss = _run_lbfgs_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                rdfc_kernel=rdfc_kernel,
+                patience=config.patience,
+                min_delta=config.min_delta,
+                reg_mask=reg_mask,
+            )
+            return mag
+
+    solve_batch = jax.jit(jax.vmap(_solve_single, in_axes=(0, 0)))
+    return solve_batch(masks, reg_masks)
+
+
 # ---------------------------------------------------------------------------
 # 3D projection & forward model
 # ---------------------------------------------------------------------------
@@ -1223,4 +1447,439 @@ def forward_model_3d(
         geometry=geometry,
         prw_vec=prw_vec,
         rdfc_kernel=rdfc_kernel,
+    )
+
+
+# ---------------------------------------------------------------------------
+# L-curve analysis
+# ---------------------------------------------------------------------------
+
+
+def decompose_loss(
+    magnetization,
+    ramp_coeffs,
+    phase,
+    mask,
+    reg_mask,
+    rdfc_kernel,
+    voxel_size_nm,
+):
+    """Decompose the MBIR loss into data-fidelity and regularization terms.
+
+    Evaluates the two components of the loss **without** the
+    ``lambda_exchange`` multiplier on the regularization term, so
+    that they can be compared on an L-curve plot.
+
+    Parameters
+    ----------
+    magnetization : array_like
+        Reconstructed magnetization of shape ``(N, M, 2)``.
+    ramp_coeffs : array_like
+        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+    phase : array_like
+        Observed phase image of shape ``(N, M)``.
+    mask : array_like
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization before the forward model.
+    reg_mask : array_like
+        Regularization mask of shape ``(N, M)`` passed to
+        :func:`exchange_loss_fn`.
+    rdfc_kernel : dict
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+
+    Returns
+    -------
+    data_misfit : float
+        ``0.5 * sum((predicted - observed)**2)``
+    exchange_norm : float
+        Unweighted exchange regularization norm (no lambda
+        multiplier).
+    """
+    magnetization = jnp.asarray(magnetization)
+    ramp_coeffs = jnp.asarray(ramp_coeffs)
+    phase = jnp.asarray(phase)
+    mask = jnp.asarray(mask)
+    reg_mask = jnp.asarray(reg_mask)
+
+    masked_mag = jnp.stack([
+        magnetization[..., 0] * mask,
+        magnetization[..., 1] * mask,
+    ], axis=-1)
+
+    predicted = forward_model_single_rdfc_2d(
+        masked_mag, ramp_coeffs, rdfc_kernel, voxel_size_nm,
+    )
+    residuals = predicted - phase
+    data_misfit = float(0.5 * jnp.sum(residuals ** 2))
+    exchange_norm = float(exchange_loss_fn(masked_mag, reg_mask))
+
+    return data_misfit, exchange_norm
+
+
+def kneedle_corner(data_misfits, reg_norms):
+    """Find the L-curve corner using the Kneedle algorithm.
+
+    Projects points in log-log space onto the line connecting the
+    two endpoints and returns the index of the point with the
+    largest perpendicular distance (the "elbow").
+
+    Parameters
+    ----------
+    data_misfits : array_like
+        1D array of data-fidelity values, one per lambda.
+    reg_norms : array_like
+        1D array of regularization norms (unweighted), one per
+        lambda.
+
+    Returns
+    -------
+    corner_index : int
+        Index into the input arrays of the detected corner point.
+        Returns ``-1`` when fewer than 3 points are provided.
+    score : float
+        Maximum normalized perpendicular distance.  Larger values
+        indicate a more pronounced corner.
+    """
+    x = np.log10(np.asarray(reg_norms, dtype=np.float64))
+    y = np.log10(np.asarray(data_misfits, dtype=np.float64))
+
+    if len(x) < 3:
+        return -1, 0.0
+
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+
+    x_range = x.max() - x.min()
+    y_range = y.max() - y.min()
+    if x_range == 0 or y_range == 0:
+        return -1, 0.0
+
+    x_n = (x - x.min()) / (x_range + 1e-30)
+    y_n = (y - y.min()) / (y_range + 1e-30)
+
+    # Perpendicular distance from the line joining first and last point
+    x1, y1 = x_n[0], y_n[0]
+    x2, y2 = x_n[-1], y_n[-1]
+    line_len = np.sqrt((y2 - y1) ** 2 + (x2 - x1) ** 2) + 1e-30
+    d = np.abs(
+        (y2 - y1) * x_n - (x2 - x1) * y_n + x2 * y1 - y2 * x1
+    ) / line_len
+
+    best_sorted = int(np.argmax(d))
+    return int(order[best_sorted]), float(d[best_sorted])
+
+
+def lcurve_sweep(
+    phase,
+    mask,
+    voxel_size_nm,
+    lambdas,
+    b0_tesla=1.0,
+    solver="newton_cg",
+    reg_mask=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+    solver_config=None,
+    warm_start=True,
+):
+    """Sequential L-curve sweep over regularization weights.
+
+    Runs :func:`solve_mbir_2d` for each value in *lambdas*,
+    collects the data-fidelity and regularization norms, and
+    detects the L-curve corner via :func:`kneedle_corner`.
+
+    When *warm_start* is ``True`` (default), lambdas are sorted
+    in ascending order and each reconstruction is initialized from
+    the previous result.
+
+    Parameters
+    ----------
+    phase : array_like
+        Measured phase image of shape ``(N, M)``.
+    mask : array_like
+        Binary mask of shape ``(N, M)``.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+    lambdas : array_like
+        1D array of ``lambda_exchange`` values to sweep.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    solver : str or SolverConfig, optional
+        Solver selection string or config object.  Ignored when
+        *solver_config* is provided.  Default ``"newton_cg"``.
+    reg_mask : array_like, optional
+        Regularization mask of shape ``(N, M)``.  Defaults to
+        *mask*.
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel, default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel.  Built automatically when ``None``.
+    solver_config : SolverConfig, optional
+        Explicit solver configuration.
+    warm_start : bool, optional
+        If ``True`` (default), sort lambdas and seed each run
+        from the previous result.
+
+    Returns
+    -------
+    LCurveResult
+        Named tuple with ``lambdas``, ``data_misfits``,
+        ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
+        ``corner_index``.
+    """
+    phase = jnp.asarray(phase)
+    mask = jnp.asarray(mask, dtype=bool)
+    if reg_mask is None:
+        reg_mask = mask
+    else:
+        reg_mask = jnp.asarray(reg_mask)
+
+    lambdas = np.atleast_1d(np.asarray(lambdas, dtype=np.float64))
+    if warm_start:
+        sort_idx = np.argsort(lambdas)
+        lambdas = lambdas[sort_idx]
+
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            voxel_size_nm,
+            phase.shape,
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+
+    actual_solver = solver_config if solver_config is not None else solver
+
+    data_misfits = []
+    reg_norms = []
+    mag_list = []
+    ramp_list = []
+
+    current_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
+
+    for lam in lambdas:
+        reg_config = {"lambda_exchange": float(lam)}
+
+        result = solve_mbir_2d(
+            phase=phase,
+            init_mag=current_mag,
+            mask=mask,
+            voxel_size_nm=voxel_size_nm,
+            solver=actual_solver,
+            reg_config=reg_config,
+            rdfc_kernel=rdfc_kernel,
+            reg_mask=reg_mask,
+        )
+
+        dm, rn = decompose_loss(
+            result.magnetization, result.ramp_coeffs,
+            phase, mask, reg_mask, rdfc_kernel, voxel_size_nm,
+        )
+        data_misfits.append(dm)
+        reg_norms.append(rn)
+        mag_list.append(result.magnetization)
+        ramp_list.append(result.ramp_coeffs)
+
+        if warm_start:
+            current_mag = result.magnetization
+
+    data_misfits = np.array(data_misfits)
+    reg_norms = np.array(reg_norms)
+    corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
+
+    return LCurveResult(
+        lambdas=lambdas,
+        data_misfits=data_misfits,
+        reg_norms=reg_norms,
+        magnetizations=jnp.stack(mag_list),
+        ramp_coeffs=jnp.stack(ramp_list),
+        corner_index=corner_idx,
+    )
+
+
+def lcurve_sweep_vmap(
+    phase,
+    mask,
+    voxel_size_nm,
+    lambdas,
+    b0_tesla=1.0,
+    solver="newton_cg",
+    reg_mask=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+    solver_config=None,
+):
+    """Parallel L-curve sweep using ``jax.vmap`` over lambda values.
+
+    Runs all reconstructions in parallel (no warm-starting).
+    This is faster on GPU when many lambda values are evaluated,
+    but uses more memory than :func:`lcurve_sweep`.
+
+    Parameters
+    ----------
+    phase : array_like
+        Measured phase image of shape ``(N, M)``.
+    mask : array_like
+        Binary mask of shape ``(N, M)``.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+    lambdas : array_like
+        1D array of ``lambda_exchange`` values to sweep.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    solver : str or SolverConfig, optional
+        Solver selection string or config object.  Ignored when
+        *solver_config* is provided.  Default ``"newton_cg"``.
+    reg_mask : array_like, optional
+        Regularization mask of shape ``(N, M)``.  Defaults to
+        *mask*.
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel, default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel.  Built automatically when ``None``.
+    solver_config : SolverConfig, optional
+        Explicit solver configuration.
+
+    Returns
+    -------
+    LCurveResult
+        Named tuple with ``lambdas``, ``data_misfits``,
+        ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
+        ``corner_index``.
+
+    Notes
+    -----
+    For iterative solvers (Adam, L-BFGS) early stopping is
+    effectively disabled under ``vmap``; all lambda values run for
+    the maximum number of steps.
+    """
+    phase = jnp.asarray(phase)
+    mask = jnp.asarray(mask, dtype=bool)
+    if reg_mask is None:
+        reg_mask = mask
+    else:
+        reg_mask = jnp.asarray(reg_mask)
+
+    lambdas_np = np.atleast_1d(np.asarray(lambdas, dtype=np.float64))
+    lambdas_jax = jnp.asarray(lambdas_np)
+
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            voxel_size_nm,
+            phase.shape,
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+
+    # Resolve solver config once (Python-level dispatch, outside vmap)
+    if solver_config is not None:
+        config = solver_config
+    elif isinstance(solver, str):
+        solver_name = solver.lower()
+        if solver_name not in _SOLVER_DEFAULTS:
+            raise ValueError(
+                f"Unknown solver {solver!r}. "
+                f"Choose from {list(_SOLVER_DEFAULTS)}"
+            )
+        config = _SOLVER_DEFAULTS[solver_name]()
+    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+        config = solver
+    else:
+        raise TypeError(
+            f"solver must be a string or a SolverConfig instance, "
+            f"got {type(solver)}"
+        )
+
+    init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
+
+    # Build a vmappable function for the chosen solver
+    if isinstance(config, NewtonCGConfig):
+        def _solve_for_lam(lam):
+            reg_config = {"lambda_exchange": lam}
+            (mag, ramp), _loss = _run_newton_cg_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                rdfc_kernel=rdfc_kernel,
+                cg_tol=config.cg_tol,
+                reg_mask=reg_mask,
+            )
+            return mag, ramp
+    elif isinstance(config, AdamConfig):
+        def _solve_for_lam(lam):
+            reg_config = {"lambda_exchange": lam}
+            (mag, ramp), _loss = _run_adam_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                learning_rate=config.learning_rate,
+                rdfc_kernel=rdfc_kernel,
+                patience=config.patience,
+                min_delta=config.min_delta,
+                reg_mask=reg_mask,
+            )
+            return mag, ramp
+    elif isinstance(config, LBFGSConfig):
+        def _solve_for_lam(lam):
+            reg_config = {"lambda_exchange": lam}
+            (mag, ramp), _loss = _run_lbfgs_solver_2d(
+                phase=phase,
+                init_mag=init_mag,
+                mask=mask,
+                voxel_size_nm=voxel_size_nm,
+                reg_config=reg_config,
+                num_steps=config.num_steps,
+                rdfc_kernel=rdfc_kernel,
+                patience=config.patience,
+                min_delta=config.min_delta,
+                reg_mask=reg_mask,
+            )
+            return mag, ramp
+
+    solve_batch = jax.jit(jax.vmap(_solve_for_lam))
+    all_mag, all_ramp = solve_batch(lambdas_jax)
+
+    # Decompose losses (vmapped)
+    def _decompose_single(mag, ramp):
+        masked_mag = jnp.stack([
+            mag[..., 0] * mask,
+            mag[..., 1] * mask,
+        ], axis=-1)
+        predicted = forward_model_single_rdfc_2d(
+            masked_mag, ramp, rdfc_kernel, voxel_size_nm,
+        )
+        residuals = predicted - phase
+        dm = 0.5 * jnp.sum(residuals ** 2)
+        rn = exchange_loss_fn(masked_mag, reg_mask)
+        return dm, rn
+
+    decompose_batch = jax.jit(jax.vmap(_decompose_single))
+    all_dm, all_rn = decompose_batch(all_mag, all_ramp)
+
+    data_misfits = np.asarray(all_dm)
+    reg_norms = np.asarray(all_rn)
+    corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
+
+    return LCurveResult(
+        lambdas=lambdas_np,
+        data_misfits=data_misfits,
+        reg_norms=reg_norms,
+        magnetizations=all_mag,
+        ramp_coeffs=all_ramp,
+        corner_index=corner_idx,
     )
