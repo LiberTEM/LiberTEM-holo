@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 
 def _hanning_2d(img, xp):
-    return img * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
+    return xp.asarray(img) * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
 
 
 def _upsampled_dft(
@@ -467,6 +467,7 @@ class PhaseImageCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
+        img = self._xp.asarray(img)
         phase = get_phase(img, holoparams, xp=self._xp)
 
         # apply hanning filter:
