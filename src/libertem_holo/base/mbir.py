@@ -404,12 +404,12 @@ def forward_model_single_rdfc_2d(
 
 def mbir_loss_2d(
     params: tuple[jax.Array, jax.Array],
-    mag_mask: jax.Array,
-    reg_mask: jax.Array,
+    mask: jax.Array,
     phase: jax.Array,
     rdfc_kernel: dict[str, Any],
     voxel_size_nm: float,
     reg_config: dict[str, Any],
+    reg_mask: jax.Array | None = None,
 ) -> jax.Array:
     """Compute the MBIR loss for 2D projected magnetization.
 
@@ -422,12 +422,9 @@ def mbir_loss_2d(
         Tuple of ``(magnetization, ramp_coeffs)`` where
         *magnetization* has shape ``(N, M, 2)`` and *ramp_coeffs*
         has shape ``(3,)``.
-    mag_mask
-        Binary mask applied to the magnetization before the forward
-        model, shape ``(N, M, 2)``.
-    reg_mask
-        Regularization mask of shape ``(N, M)`` passed to
-        :func:`exchange_loss_fn`.
+    mask
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization before the forward model.
     phase
         Observed phase image of shape ``(H, W)``.
     rdfc_kernel
@@ -437,16 +434,25 @@ def mbir_loss_2d(
     reg_config
         Regularization configuration dictionary.  Recognised key:
         ``'lambda_exchange'`` (float, default 0.0).
+    reg_mask
+        Optional regularization mask of shape ``(N, M)`` passed to
+        :func:`exchange_loss_fn`.  Defaults to *mask* when not
+        provided.
 
     Returns
     -------
     jax.Array
         Scalar loss value.
     """
+    if reg_mask is None:
+        reg_mask = mask
     magnetization, ramp_coeffs = params
     phase = jnp.asarray(phase)
 
-    magnetization = magnetization * mag_mask
+    magnetization = jnp.stack([
+        magnetization[..., 0] * mask,
+        magnetization[..., 1] * mask,
+    ], axis=-1)
 
     predictions = forward_model_single_rdfc_2d(
         magnetization,
@@ -470,14 +476,14 @@ def mbir_loss_2d(
 def _run_newton_cg_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
-    mag_mask: jax.Array,
-    reg_mask: jax.Array,
+    mask: jax.Array,
     voxel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     num_steps: int = 50,
     rdfc_kernel: dict[str, Any] | None = None,
     cg_tol: float = 1e-5,
     init_ramp_coeffs: jax.Array | None = None,
+    reg_mask: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
     """Minimize :func:`mbir_loss_2d` using a Newton-CG step.
 
@@ -491,11 +497,9 @@ def _run_newton_cg_solver_2d(
         Observed phase image of shape ``(H, W)``.
     init_mag
         Initial magnetization of shape ``(N, M, 2)``.
-    mag_mask
-        Binary mask applied to the magnetization, shape
-        ``(N, M, 2)``.
-    reg_mask
-        Regularization mask of shape ``(N, M)``.
+    mask
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization.
     voxel_size_nm
         Pixel size in nanometres.
     reg_config
@@ -510,6 +514,9 @@ def _run_newton_cg_solver_2d(
     init_ramp_coeffs
         Initial ramp coefficients of shape ``(3,)``.  Defaults to
         zeros.
+    reg_mask
+        Optional regularization mask of shape ``(N, M)``.
+        Defaults to *mask*.
 
     Returns
     -------
@@ -530,12 +537,12 @@ def _run_newton_cg_solver_2d(
         mag, ramp = unravel(x_flat)
         return mbir_loss_2d(
             (mag, ramp),
-            mag_mask,
-            reg_mask,
+            mask,
             phase,
             rdfc_kernel,
             voxel_size_nm,
             reg_config,
+            reg_mask=reg_mask,
         )
 
     loss_grad = jax.grad(objective_flat)
@@ -560,8 +567,7 @@ def _run_newton_cg_solver_2d(
 def _run_adam_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
-    mag_mask: jax.Array,
-    reg_mask: jax.Array,
+    mask: jax.Array,
     voxel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     num_steps: int = 2000,
@@ -570,6 +576,7 @@ def _run_adam_solver_2d(
     init_ramp_coeffs: jax.Array | None = None,
     patience: int = 50,
     min_delta: float = 1e-6,
+    reg_mask: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
     """Minimize :func:`mbir_loss_2d` using the Adam optimizer.
 
@@ -583,11 +590,9 @@ def _run_adam_solver_2d(
         Observed phase image of shape ``(N, M)``.
     init_mag
         Initial magnetization of shape ``(N, M, 2)``.
-    mag_mask
-        Binary mask applied to the magnetization, shape
-        ``(N, M, 2)``.
-    reg_mask
-        Regularization mask of shape ``(N, M)``.
+    mask
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization.
     voxel_size_nm
         Pixel size in nanometres.
     reg_config
@@ -608,6 +613,9 @@ def _run_adam_solver_2d(
     min_delta
         Minimum loss decrease to qualify as an improvement,
         default 1e-6.
+    reg_mask
+        Optional regularization mask of shape ``(N, M)``.
+        Defaults to *mask*.
 
     Returns
     -------
@@ -630,7 +638,8 @@ def _run_adam_solver_2d(
 
     # initial_loss needed for state initialization
     init_loss = mbir_loss_2d(
-        params, mag_mask, reg_mask, phase, rdfc_kernel, voxel_size_nm, reg_config
+        params, mask, phase, rdfc_kernel, voxel_size_nm, reg_config,
+        reg_mask=reg_mask,
     )
 
     # State: (params, opt_state, step_idx, loss_history_arr, best_loss, patience_counter, stop_flag)
@@ -657,12 +666,12 @@ def _run_adam_solver_2d(
 
         loss_val, grads = jax.value_and_grad(mbir_loss_2d)(
             curr_params,
-            mag_mask,
-            reg_mask,
+            mask,
             phase,
             rdfc_kernel,
             voxel_size_nm,
             reg_config,
+            reg_mask=reg_mask,
         )
 
         updates, next_opt = optimizer.update(grads, curr_opt, curr_params)
@@ -699,8 +708,7 @@ def _run_adam_solver_2d(
 def _run_lbfgs_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
-    mag_mask: jax.Array,
-    reg_mask: jax.Array,
+    mask: jax.Array,
     voxel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     num_steps: int = 500,
@@ -708,6 +716,7 @@ def _run_lbfgs_solver_2d(
     init_ramp_coeffs: jax.Array | None = None,
     patience: int = 50,
     min_delta: float = 1e-6,
+    reg_mask: jax.Array | None = None,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
     """Minimize :func:`mbir_loss_2d` using L-BFGS with zoom line-search.
 
@@ -721,11 +730,9 @@ def _run_lbfgs_solver_2d(
         Observed phase image of shape ``(N, M)``.
     init_mag
         Initial magnetization of shape ``(N, M, 2)``.
-    mag_mask
-        Binary mask applied to the magnetization, shape
-        ``(N, M, 2)``.
-    reg_mask
-        Regularization mask of shape ``(N, M)``.
+    mask
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization.
     voxel_size_nm
         Pixel size in nanometres.
     reg_config
@@ -744,6 +751,9 @@ def _run_lbfgs_solver_2d(
     min_delta
         Minimum loss decrease to qualify as an improvement,
         default 1e-6.
+    reg_mask
+        Optional regularization mask of shape ``(N, M)``.
+        Defaults to *mask*.
 
     Returns
     -------
@@ -763,12 +773,12 @@ def _run_lbfgs_solver_2d(
     def value_fn(p):
         return mbir_loss_2d(
             p,
-            mag_mask,
-            reg_mask,
+            mask,
             phase,
             rdfc_kernel,
             voxel_size_nm,
             reg_config,
+            reg_mask=reg_mask,
         )
 
     ls_inst = optax.scale_by_zoom_linesearch(max_linesearch_steps=15)
@@ -839,13 +849,13 @@ def _run_lbfgs_solver_2d(
 def solve_mbir_2d(
     phase,
     init_mag,
-    mag_mask,
-    reg_mask,
+    mask,
     voxel_size_nm,
     solver="newton_cg",
     reg_config=None,
     rdfc_kernel=None,
     init_ramp_coeffs=None,
+    reg_mask=None,
 ):
     """
     Unified MBIR solver for 2D projected magnetization reconstruction.
@@ -856,10 +866,9 @@ def solve_mbir_2d(
         Measured phase image.
     init_mag : array_like
         Initial magnetization estimate, shape ``(N, M, 2)``.
-    mag_mask : array_like
-        Binary mask applied to the magnetization.
-    reg_mask : array_like
-        Binary mask for the regularization region.
+    mask : array_like
+        Binary mask of shape ``(N, M)`` applied to the
+        magnetization.
     voxel_size_nm : float
         Voxel size in nanometres.
     solver : str or SolverConfig, optional
@@ -873,6 +882,8 @@ def solve_mbir_2d(
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
     init_ramp_coeffs : array_like, optional
         Initial ramp coefficients ``[offset, slope_y, slope_x]``.
+    reg_mask : array_like, optional
+        Regularization mask of shape ``(N, M)``.  Defaults to *mask*.
 
     Returns
     -------
@@ -903,12 +914,12 @@ def solve_mbir_2d(
     shared = dict(
         phase=phase,
         init_mag=init_mag,
-        mag_mask=mag_mask,
-        reg_mask=reg_mask,
+        mask=mask,
         voxel_size_nm=voxel_size_nm,
         reg_config=reg_config,
         rdfc_kernel=rdfc_kernel,
         init_ramp_coeffs=init_ramp_coeffs,
+        reg_mask=reg_mask,
     )
 
     if isinstance(config, NewtonCGConfig):
@@ -937,4 +948,153 @@ def solve_mbir_2d(
         magnetization=mag,
         ramp_coeffs=ramp,
         loss_history=loss_history,
+    )
+
+
+def reconstruct_2d(
+    phase,
+    voxel_size_nm,
+    b0_tesla=1.0,
+    mask=None,
+    lam=1e-3,
+    solver="newton_cg",
+    reg_mask=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+    solver_config=None,
+):
+    """Convenience wrapper for 2D MBIR magnetization reconstruction.
+
+    Provides a simple interface similar to pyramid's
+    ``reconstruction_2d_from_phasemap``.  Builds the RDFC kernel,
+    initial magnetization guess, and mask automatically.
+
+    Parameters
+    ----------
+    phase : array_like
+        Measured phase image of shape ``(N, M)``.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    mask : array_like, optional
+        Binary mask of shape ``(N, M)``.  Defaults to all ones.
+    lam : float, optional
+        Regularization weight (``lambda_exchange``), default 1e-3.
+    solver : str or SolverConfig, optional
+        Solver selection string (``"newton_cg"``, ``"adam"``,
+        ``"lbfgs"``) or a :class:`SolverConfig` instance.
+        Ignored when *solver_config* is provided.
+        Default is ``"newton_cg"``.
+    reg_mask : array_like, optional
+        Separate regularization mask of shape ``(N, M)``.
+        Defaults to *mask*.
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel (``"disc"`` or
+        ``"slab"``), default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Built automatically when not provided.
+    solver_config : SolverConfig, optional
+        Explicit solver configuration object.  When provided,
+        the *solver* string argument is ignored.
+
+    Returns
+    -------
+    SolverResult
+        Named tuple with fields ``magnetization``, ``ramp_coeffs``,
+        and ``loss_history``.
+    """
+    phase = jnp.asarray(phase)
+    if mask is None:
+        mask = jnp.ones(phase.shape, dtype=bool)
+    else:
+        mask = jnp.asarray(mask, dtype=bool)
+
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            voxel_size_nm,
+            phase.shape,
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+
+    init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
+    reg_config = {"lambda_exchange": float(lam)}
+
+    if solver_config is not None:
+        solver = solver_config
+
+    return solve_mbir_2d(
+        phase=phase,
+        init_mag=init_mag,
+        mask=mask,
+        voxel_size_nm=voxel_size_nm,
+        solver=solver,
+        reg_config=reg_config,
+        rdfc_kernel=rdfc_kernel,
+        reg_mask=reg_mask,
+    )
+
+
+def forward_model_2d(
+    magnetization,
+    voxel_size_nm,
+    b0_tesla=1.0,
+    ramp_coeffs=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+):
+    """Convenience forward model for 2D projected magnetization.
+
+    Computes the magnetic phase shift from a magnetization field,
+    automatically building the RDFC kernel when not provided.
+
+    Parameters
+    ----------
+    magnetization : array_like
+        In-plane magnetization of shape ``(N, M, 2)`` where the
+        last axis holds the (u, v) components.
+    voxel_size_nm : float
+        Pixel size in nanometres.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    ramp_coeffs : array_like, optional
+        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+        Defaults to zeros (no ramp).
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel (``"disc"`` or
+        ``"slab"``), default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Built automatically when not provided.
+
+    Returns
+    -------
+    jax.Array
+        Predicted phase image of shape ``(N, M)``.
+    """
+    magnetization = jnp.asarray(magnetization)
+    if rdfc_kernel is None:
+        rdfc_kernel = build_rdfc_kernel(
+            voxel_size_nm,
+            magnetization.shape[:2],
+            b0_tesla=b0_tesla,
+            geometry=geometry,
+            prw_vec=prw_vec,
+        )
+    if ramp_coeffs is None:
+        ramp_coeffs = jnp.zeros(3, dtype=magnetization.dtype)
+    else:
+        ramp_coeffs = jnp.asarray(ramp_coeffs)
+
+    return forward_model_single_rdfc_2d(
+        magnetization, ramp_coeffs, rdfc_kernel, voxel_size_nm,
     )
