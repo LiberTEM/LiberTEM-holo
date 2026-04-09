@@ -1098,3 +1098,129 @@ def forward_model_2d(
     return forward_model_single_rdfc_2d(
         magnetization, ramp_coeffs, rdfc_kernel, voxel_size_nm,
     )
+
+
+# ---------------------------------------------------------------------------
+# 3D projection & forward model
+# ---------------------------------------------------------------------------
+
+# Mapping from projection axis to (sum_axis, coeff_matrix, need_transpose).
+# coeff maps (mx, my, mz) -> (u, v) following pyramid's SimpleProjector.
+_SIMPLE_PROJ = {
+    "z": {
+        "sum_axis": 0,
+        "coeff": [[1, 0, 0], [0, 1, 0]],   # u=mx, v=my
+        "transpose": False,                  # (Y, X) is already (V, U)
+    },
+    "y": {
+        "sum_axis": 1,
+        "coeff": [[1, 0, 0], [0, 0, 1]],   # u=mx, v=mz
+        "transpose": False,                  # (Z, X) is already (V, U)
+    },
+    "x": {
+        "sum_axis": 2,
+        "coeff": [[0, 0, 1], [0, 1, 0]],   # u=mz, v=my
+        "transpose": True,                   # (Z, Y) -> (Y, Z) = (V, U)
+    },
+}
+
+
+def project_3d(
+    magnetization_3d,
+    axis="z",
+):
+    """Project a 3D magnetization field along a major axis.
+
+    Implements the simple-projector case from pyramid: sum along
+    the projection axis and mix (mx, my, mz) into (u, v) components.
+
+    Parameters
+    ----------
+    magnetization_3d : array_like
+        3D magnetization of shape ``(Z, Y, X, 3)`` where the last
+        axis holds ``(mx, my, mz)`` components.
+    axis : {'z', 'y', 'x'}, optional
+        Projection axis, default ``'z'``.
+
+    Returns
+    -------
+    jax.Array
+        Projected 2D magnetization of shape ``(V, U, 2)`` where
+        the last axis holds ``(u, v)`` components suitable for
+        :func:`phase_mapper_rdfc`.
+    """
+    axis = axis.lower()
+    if axis not in _SIMPLE_PROJ:
+        raise ValueError(f"axis must be 'x', 'y', or 'z'; got {axis!r}")
+
+    cfg = _SIMPLE_PROJ[axis]
+    magnetization_3d = jnp.asarray(magnetization_3d)
+
+    # Sum along projection direction: (Z, Y, X, 3) -> (*, *, 3)
+    summed = jnp.sum(magnetization_3d, axis=cfg["sum_axis"])
+
+    # Mix (mx, my, mz) -> (u, v) via coefficient matrix
+    coeff = jnp.array(cfg["coeff"], dtype=summed.dtype)  # (2, 3)
+    projected = jnp.einsum("...c,oc->...o", summed, coeff)  # (*, *, 2)
+
+    if cfg["transpose"]:
+        projected = jnp.transpose(projected, (1, 0, 2))
+
+    return projected
+
+
+def forward_model_3d(
+    magnetization_3d,
+    voxel_size_nm,
+    b0_tesla=1.0,
+    axis="z",
+    ramp_coeffs=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+):
+    """Convenience forward model for a 3D magnetization volume.
+
+    Projects a 3D magnetization field along a major axis using
+    :func:`project_3d` (simple projector), then computes the
+    magnetic phase shift via RDFC.
+
+    Parameters
+    ----------
+    magnetization_3d : array_like
+        3D magnetization of shape ``(Z, Y, X, 3)`` where the last
+        axis holds ``(mx, my, mz)`` components.
+    voxel_size_nm : float
+        Voxel size in nanometres.
+    b0_tesla : float, optional
+        Magnetic induction in Tesla, default 1.0.
+    axis : {'z', 'y', 'x'}, optional
+        Projection axis, default ``'z'``.
+    ramp_coeffs : array_like, optional
+        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+        Defaults to zeros (no ramp).
+    geometry : str, optional
+        Voxel geometry for the RDFC kernel (``"disc"`` or
+        ``"slab"``), default ``"disc"``.
+    prw_vec : array_like, optional
+        Projected reference wave vector ``(v, u)``.
+    rdfc_kernel : dict, optional
+        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Built automatically when not provided.
+
+    Returns
+    -------
+    jax.Array
+        Predicted phase image of shape ``(V, U)``.
+    """
+    projected = project_3d(magnetization_3d, axis=axis)
+
+    return forward_model_2d(
+        projected,
+        voxel_size_nm,
+        b0_tesla=b0_tesla,
+        ramp_coeffs=ramp_coeffs,
+        geometry=geometry,
+        prw_vec=prw_vec,
+        rdfc_kernel=rdfc_kernel,
+    )
