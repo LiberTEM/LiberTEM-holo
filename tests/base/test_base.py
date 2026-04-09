@@ -133,3 +133,13 @@ def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
     averaged, phase_offsets, stack = phase_offset_correction(
         xp.asarray(w_holo[:2]), return_stack=True, xp=xp,
     )
+
+
+@pytest.mark.need_cupy
+def test_cupy_is_available():
+    """
+    Ensure that the GPU test suite fails if cupy is not available
+    """
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        raise RuntimeError("must have working CUPY for GPU tests!")
