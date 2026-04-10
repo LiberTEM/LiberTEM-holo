@@ -1940,3 +1940,326 @@ class TestMBIRAnalyticRoundTrip:
                 "analytic slab phase"
             ),
         )
+
+    @pytest.mark.parametrize("b0", [0.5, 0.6, 1.5, 2.0])
+    def test_mbir_recovers_magnetization_nonunity_b0(self, b0):
+        """MBIR recovery must be correct for non-unity b0 values.
+
+        A wrong b0 scaling in either the kernel or the forward model
+        would show up as a systematic factor in the recovered
+        magnetization.  This test is parametrized over several b0
+        values to catch any hidden ``b0 == 1`` special-casing.
+        """
+        dim = (4, 16, 16)
+        a = 10.0
+        phi = np.pi / 3
+        center = (2, 8, 8)
+        width = (4, 8, 8)
+
+        z_dim, y_dim, x_dim = dim
+        y_lo = int(center[1] - width[1] / 2)
+        y_hi = int(center[1] + width[1] / 2)
+        x_lo = int(center[2] - width[2] / 2)
+        x_hi = int(center[2] + width[2] / 2)
+
+        mask_2d = np.zeros((y_dim, x_dim), dtype=bool)
+        mask_2d[y_lo:y_hi, x_lo:x_hi] = True
+
+        depth = width[0]
+        gt_proj_mag = np.zeros((y_dim, x_dim, 2), dtype=np.float64)
+        gt_proj_mag[..., 0] = mask_2d * depth * np.cos(phi)
+        gt_proj_mag[..., 1] = mask_2d * depth * np.sin(phi)
+
+        kernel = build_rdfc_kernel(
+            (y_dim, x_dim), b0_tesla=b0, geometry="slab",
+        )
+
+        # Use analytic phase (independent code path) at this b0
+        analytic_phase = _analytic_phase_slab(
+            dim, a, phi, center, width, b_0=b0,
+        )
+
+        result = reconstruct_2d(
+            phase=jnp.array(analytic_phase),
+            voxel_size_nm=a,
+            b0_tesla=b0,
+            mask=jnp.array(mask_2d),
+            lam=1e-10,
+            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
+            geometry="slab",
+            rdfc_kernel=kernel,
+        )
+
+        rec = np.asarray(result.magnetization)
+        expected_mu = depth * np.cos(phi)
+        expected_mv = depth * np.sin(phi)
+
+        rec_u_mean = rec[mask_2d, 0].mean()
+        rec_v_mean = rec[mask_2d, 1].mean()
+        rec_norm_mean = np.sqrt(rec[mask_2d, 0] ** 2 + rec[mask_2d, 1] ** 2).mean()
+
+        assert_allclose(
+            rec_u_mean, expected_mu, rtol=0.05,
+            err_msg=(
+                f"b0={b0}: Mean recovered Mu = {rec_u_mean:.6f}, "
+                f"expected {expected_mu:.6f}"
+            ),
+        )
+        assert_allclose(
+            rec_v_mean, expected_mv, rtol=0.05,
+            err_msg=(
+                f"b0={b0}: Mean recovered Mv = {rec_v_mean:.6f}, "
+                f"expected {expected_mv:.6f}"
+            ),
+        )
+        assert_allclose(
+            rec_norm_mean, float(depth), rtol=0.05,
+            err_msg=(
+                f"b0={b0}: Mean recovered |M| = {rec_norm_mean:.6f}, "
+                f"expected {float(depth):.6f}"
+            ),
+        )
+
+
+# ===================================================================
+# 17. Synthetic round-trip at notebook parameters (a=0.58, b0=0.6)
+#
+#     Isolates internal consistency of the forward model + reconstruction
+#     pipeline at the exact parameters used in the holography notebook.
+#     If these tests pass, any discrepancy with pyramid is due to a
+#     convention difference, not a bug in the code.
+# ===================================================================
+
+
+class TestMBIRRoundTripNotebookParams:
+    """Synthetic round-trip at notebook parameters: a=0.58 nm, b0=0.6 T.
+
+    Uses disc geometry (matching the notebook workflow) and generates
+    phase via forward_model_2d, then reconstructs.  If the code has a
+    scaling bug that cancels at a=10/b0=1 but not at a=0.58/b0=0.6,
+    these tests will catch it.
+    """
+
+    @pytest.fixture(scope="class")
+    def notebook_problem(self):
+        """16x16 disc-geometry problem at a=0.58, b0=0.6."""
+        H, W = 16, 16
+        a = 0.58        # voxel size in nm (from notebook)
+        b0 = 0.6        # Tesla (from notebook)
+        phi = np.pi / 4
+        gt_norm = 30.0   # known ground-truth |M|
+
+        mask = np.zeros((H, W), dtype=bool)
+        mask[4:12, 4:12] = True
+
+        gt_mag = np.zeros((H, W, 2), dtype=np.float64)
+        gt_mag[..., 0] = mask * gt_norm * np.cos(phi)
+        gt_mag[..., 1] = mask * gt_norm * np.sin(phi)
+
+        kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
+
+        # Generate phase from the forward model
+        fwd_phase = np.asarray(forward_model_2d(
+            jnp.array(gt_mag), a,
+            b0_tesla=b0, geometry="disc", rdfc_kernel=kernel,
+        ))
+
+        return {
+            "H": H, "W": W, "a": a, "b0": b0, "phi": phi,
+            "gt_norm": gt_norm, "mask": mask, "gt_mag": gt_mag,
+            "kernel": kernel, "fwd_phase": fwd_phase,
+        }
+
+    def test_round_trip_recovers_magnetization(self, notebook_problem):
+        """MBIR should perfectly invert its own forward model at a=0.58, b0=0.6."""
+        p = notebook_problem
+        result = reconstruct_2d(
+            phase=jnp.array(p["fwd_phase"]),
+            voxel_size_nm=p["a"],
+            b0_tesla=p["b0"],
+            mask=jnp.array(p["mask"]),
+            lam=1e-10,
+            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
+            geometry="disc",
+            rdfc_kernel=p["kernel"],
+        )
+
+        rec = np.asarray(result.magnetization)
+        gt = p["gt_mag"]
+        mask = p["mask"]
+
+        rec_u_mean = rec[mask, 0].mean()
+        rec_v_mean = rec[mask, 1].mean()
+        gt_u_mean = gt[mask, 0].mean()
+        gt_v_mean = gt[mask, 1].mean()
+        rec_norm_mean = np.sqrt(rec[mask, 0] ** 2 + rec[mask, 1] ** 2).mean()
+
+        assert_allclose(
+            rec_u_mean, gt_u_mean, rtol=1e-3,
+            err_msg=(
+                f"Mean Mu: recovered {rec_u_mean:.6f}, expected {gt_u_mean:.6f}"
+            ),
+        )
+        assert_allclose(
+            rec_v_mean, gt_v_mean, rtol=1e-3,
+            err_msg=(
+                f"Mean Mv: recovered {rec_v_mean:.6f}, expected {gt_v_mean:.6f}"
+            ),
+        )
+        assert_allclose(
+            rec_norm_mean, p["gt_norm"], rtol=1e-3,
+            err_msg=(
+                f"Mean |M|: recovered {rec_norm_mean:.6f}, "
+                f"expected {p['gt_norm']:.6f}"
+            ),
+        )
+
+    def test_round_trip_direction_preserved(self, notebook_problem):
+        """Recovered magnetization angle should match ground truth."""
+        p = notebook_problem
+        result = reconstruct_2d(
+            phase=jnp.array(p["fwd_phase"]),
+            voxel_size_nm=p["a"],
+            b0_tesla=p["b0"],
+            mask=jnp.array(p["mask"]),
+            lam=1e-10,
+            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
+            geometry="disc",
+            rdfc_kernel=p["kernel"],
+        )
+
+        rec = np.asarray(result.magnetization)
+        mask = p["mask"]
+        rec_angle = np.arctan2(rec[mask, 1].mean(), rec[mask, 0].mean())
+
+        assert abs(rec_angle - p["phi"]) < 0.01, (
+            f"Recovered angle {rec_angle:.4f} rad, expected {p['phi']:.4f} rad"
+        )
+
+    def test_round_trip_pixel_wise(self, notebook_problem):
+        """Pixel-wise magnetization inside mask should match ground truth."""
+        p = notebook_problem
+        result = reconstruct_2d(
+            phase=jnp.array(p["fwd_phase"]),
+            voxel_size_nm=p["a"],
+            b0_tesla=p["b0"],
+            mask=jnp.array(p["mask"]),
+            lam=1e-10,
+            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
+            geometry="disc",
+            rdfc_kernel=p["kernel"],
+        )
+
+        rec = np.asarray(result.magnetization)
+        mask = p["mask"]
+
+        assert_allclose(
+            rec[mask], p["gt_mag"][mask], rtol=0.01,
+            err_msg="Pixel-wise magnetization deviates >1% from ground truth",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 18. Cross-validation against pyramid (requires ``pyramid`` package)
+# ---------------------------------------------------------------------------
+pyramid = pytest.importorskip("pyramid")
+
+
+class TestPyramidCrossValidation:
+    """Compare forward model and reconstruction with pyramid (live)."""
+
+    A = 0.58          # nm
+    B0 = 0.6          # T
+    NY, NX = 64, 64
+    M_AMP = 30.0
+    LAM = 1e-3
+
+    @pytest.fixture()
+    def disc_problem(self):
+        """Synthetic disc with known |M|, phase from both codes."""
+        from pyramid.fielddata import VectorData
+        from pyramid.kernel import Kernel
+        from pyramid.phasemapper import PhaseMapperRDFC
+
+        yy, xx = np.mgrid[: self.NY, : self.NX]
+        r = np.sqrt((xx - self.NX // 2) ** 2 + (yy - self.NY // 2) ** 2)
+        mask = (r < 15).astype(float)
+        Mx = np.where(mask > 0.5, self.M_AMP, 0.0)
+        My = np.zeros_like(Mx)
+
+        # pyramid forward model
+        kern_pyr = Kernel(self.A, (self.NY, self.NX), b_0=self.B0, geometry="disc")
+        mapper_pyr = PhaseMapperRDFC(kern_pyr)
+        field = np.zeros((3, 1, self.NY, self.NX))
+        field[0, 0] = Mx
+        field[1, 0] = My
+        phase_pyr = mapper_pyr(VectorData(self.A, field)).phase
+
+        # libertem_holo forward model
+        kern_lt = build_rdfc_kernel(
+            (self.NY, self.NX), b0_tesla=self.B0, geometry="disc",
+        )
+        mag_lt = jnp.stack([jnp.array(Mx), jnp.array(My)], axis=-1)
+        phase_lt = np.asarray(
+            forward_model_single_rdfc_2d(mag_lt, jnp.zeros(3), kern_lt, self.A)
+        )
+
+        return {
+            "mask": mask,
+            "Mx": Mx,
+            "phase_pyr": phase_pyr,
+            "phase_lt": phase_lt,
+            "kern_lt": kern_lt,
+        }
+
+    def test_forward_models_match(self, disc_problem):
+        """Pyramid and libertem_holo forward models give identical phase."""
+        assert_allclose(
+            disc_problem["phase_lt"],
+            disc_problem["phase_pyr"],
+            atol=1e-12,
+            err_msg="Forward model phases differ between pyramid and libertem_holo",
+        )
+
+    def test_reconstruction_matches_pyramid(self, disc_problem):
+        """Both codes recover the same |M| from the same phase."""
+        from pyramid.phasemap import PhaseMap
+        from pyramid.utils.convenience import reconstruction_2d_from_phasemap
+
+        p = disc_problem
+        phase = p["phase_pyr"]
+        mask = p["mask"]
+
+        # libertem_holo reconstruction
+        result_lt = reconstruct_2d(
+            phase=jnp.array(phase),
+            voxel_size_nm=self.A,
+            b0_tesla=self.B0,
+            mask=jnp.array(mask),
+            lam=self.LAM,
+            solver="newton_cg",
+            rdfc_kernel=p["kern_lt"],
+        )
+        mag_lt = np.asarray(result_lt.magnetization)
+        abs_lt = np.sqrt(mag_lt[..., 0] ** 2 + mag_lt[..., 1] ** 2)
+
+        # pyramid reconstruction
+        pm = PhaseMap(a=self.A, phase=phase, mask=mask.astype(bool))
+        md_rec, _ = reconstruction_2d_from_phasemap(
+            pm, b_0=self.B0, lam=self.LAM, max_iter=100, verbose=False,
+        )
+        abs_pyr = np.sqrt(md_rec.field[0, 0] ** 2 + md_rec.field[1, 0] ** 2)
+
+        inside = mask > 0.5
+        assert_allclose(
+            abs_lt[inside].mean(),
+            abs_pyr[inside].mean(),
+            rtol=1e-3,
+            err_msg="|M| mean inside mask differs between codes",
+        )
+        assert_allclose(
+            abs_lt[inside].mean(),
+            self.M_AMP,
+            rtol=1e-3,
+            err_msg="Recovered |M| does not match ground truth",
+        )

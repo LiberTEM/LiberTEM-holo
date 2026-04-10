@@ -1637,7 +1637,7 @@ def bootstrap_threshold_uncertainty_2d(
     # full-iteration result at 128x128 and above.
     if solver_config is None and isinstance(solver, str) and solver.lower() == "newton_cg":
         H, W = phase.shape
-        scaled_maxiter = min(max(H * W // 2, 2000), 10000)
+        scaled_maxiter = min(max(H * W // 2, 1000), 10000)
         solver_config = NewtonCGConfig(cg_maxiter=scaled_maxiter)
 
     bootstrap_mag = reconstruct_2d_ensemble(
