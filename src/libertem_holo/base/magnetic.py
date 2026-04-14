@@ -9,10 +9,36 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.constants import hbar, mu_0, e
+from scipy.ndimage import gaussian_filter
 
 # --- Physical constants (SI) ---
 PHI_0 = 2.067833848e-15  # Magnetic flux quantum (T·m²)
 MU_B = 9.274009e-24       # Bohr magneton (A·m²)
+
+
+def magnetic_contours(
+        phase: np.ndarray,
+        smooth: int = 4,
+        contours: int = 8,
+) -> np.ndarray:
+    """Smooth with gaussian filter and apply enhanced cosine contours to phase image.
+
+    Parameters
+    ----------
+    phase : np.ndarray
+        2D array of phase values in radians.
+    smooth : int, optional
+        Standard deviation for Gaussian smoothing (default: 4).
+    contours : int, optional
+        Number of contour levels to apply (default: 8).
+
+    Returns
+    -------
+    np.ndarray
+        2D array of contour values.
+
+    """
+    return np.cos(gaussian_filter(phase, sigma=smooth) * contours)
 
 
 def plot_radius_ranges(
