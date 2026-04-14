@@ -165,18 +165,24 @@ def fit_magnetic_moment(
     m_y = _quadratic(0, *fit_y[0])
 
     if plot:
-        plt.figure()
-        plt.scatter(result['radii'], result['m_components'][:, 0],
-                    label='m_x data')
-        plt.scatter(result['radii'], result['m_components'][:, 1],
-                    label='m_y data')
-        plt.plot(result['radii'], _quadratic(result['radii'], *fit_x[0]),
-                 'r--', label='m_x fit')
-        plt.plot(result['radii'], _quadratic(result['radii'], *fit_y[0]),
-                 'b--', label='m_y fit')
-        plt.xlabel('Radius (m)')
-        plt.ylabel('Magnetic Moment Component (Am²)')
-        plt.title('Quadratic Fit of Magnetic Moment Components')
+        fig, ax = plt.subplots(ncols=2, figsize=(12, 5))
+        ax[0].scatter(
+            result['radii']*1e9, result['m_components'][:, 0], label='m_x data'
+            )
+        ax[1].scatter(
+            result['radii']*1e9, result['m_components'][:, 1], label='m_y data'
+            )
+        ax[0].plot(
+            result['radii']*1e9, _quadratic(result['radii'], *fit_x[0]),
+            'r--', label='m_x fit'
+            )
+        ax[1].plot(
+            result['radii']*1e9, _quadratic(result['radii'], *fit_y[0]),
+            'b--', label='m_y fit'
+            )
+        plt.xlabel('Radius (nm)')
+        plt.ylabel('Magnetic moment (Am²)')
+        plt.title('Quadratic fit of magnetic moment components')
         plt.legend()
         plt.show()
 
