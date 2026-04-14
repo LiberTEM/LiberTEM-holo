@@ -51,11 +51,11 @@ stages:
         displayName: 'install tox'
 
       - ${{ if eq(parameters.recreate_tox, true) }}:
-        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -r -- examples/*.ipynb -v
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -r -- notebooks/*.ipynb -v
           displayName: 'Run nbval tests $(Agent.OS) (recreating)'
 
       - ${{ if eq(parameters.recreate_tox, false) }}:
-        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- examples/*.ipynb -v
+        - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- notebooks/*.ipynb -v
           displayName: 'Run nbval tests $(Agent.OS)'
 
       - bash: ./scripts/codecov.sh -f ./coverage.xml
@@ -105,6 +105,32 @@ stages:
         displayName: 'run LiberTEM-holo tests'
 
       - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && ./scripts/codecov.sh -f ./coverage.xml
+        displayName: 'Submit coverage to codecov.io'
+        ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
+          env:
+            CODECOV_TOKEN: $(CODECOV_TOKEN)
+
+    - job: gpu_cupy_tests
+      pool: GPUTests
+      variables:
+        TESTDATA_BASE_PATH: '/data/'
+        TOXENV: py313-cupy
+      steps:
+      - task: UsePythonVersion@0
+        displayName: 'Use Python 3.13'
+        inputs:
+          versionSpec: '3.13'
+
+      - bash: python3 -m venv $(Agent.TempDirectory)/venv
+        displayName: 'create venv'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/pip install -U tox tox-uv uv
+        displayName: 'install tox'
+
+      - bash: $(Agent.TempDirectory)/venv/bin/tox -r
+        displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
+
+      - bash: ./scripts/codecov.sh -f ./coverage.xml
         displayName: 'Submit coverage to codecov.io'
         ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
           env:

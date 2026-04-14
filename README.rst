@@ -64,11 +64,27 @@ collected from a magnetic TEM lamella used for the example is available
 
 Installation
 ------------
+
+If you are using conda, for example via `miniforge <https://conda-forge.org/download/>`_,
+installation into a new environment can be done as follows:
+
 .. code-block:: shell
 
   $ conda create -n holo python=3.12
   $ conda activate holo
   $ pip install libertem-holo
+
+For GPU support, install the :code:`gpu` extra, and cupy. For example
+
+.. code-block:: shell
+
+  $ conda create -n holo python=3.12
+  $ conda activate holo
+  $ pip install libertem-holo[gpu] cupy-cuda13x 'cuda-toolkit[all]<14'
+
+Make sure to pick a CUDA version that works with your GPU and its drivers.
+For more details, please check the
+`CuPy installation guide <https://docs.cupy.dev/en/latest/install.html>`_.
 
 Input File formats
 ------------------

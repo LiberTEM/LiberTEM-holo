@@ -21,7 +21,7 @@ Miniconda3-latest-Linux-x86_64.sh
 MANIFEST
 .vscode
 pip-wheel-metadata
-data
+./data
 *Thumbs.db
 *.DS_Store
 *.idea
@@ -29,3 +29,4 @@ data
 .benchmarks
 src/libertem_holo/_baked_revision.py
 *.dm4
+junit.xml
