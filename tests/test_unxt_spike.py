@@ -100,7 +100,7 @@ class TestCG:
         np.testing.assert_allclose(A @ x, b, atol=1e-8)
 
     def test_cg_quantity(self):
-        """CG with Quantity vectors — may need bridge point."""
+        """CG with Quantity vectors — fails due to custom_linear_solve materialisation."""
         A = raw_jnp.array([[4.0, 1.0], [1.0, 3.0]])
         b = u.Quantity(raw_jnp.array([1.0, 2.0]), "rad")
         try:
@@ -117,7 +117,7 @@ class TestCG:
             pytest.skip(f"CG needs bridge point: {e}")
 
     def test_cg_bridge_point(self):
-        """CG bridge-point pattern: strip units → CG → re-annotate."""
+        """CG bridge-point pattern: strip units -> CG -> re-annotate."""
         A = raw_jnp.array([[4.0, 1.0], [1.0, 3.0]])
         b = u.Quantity(raw_jnp.array([1.0, 2.0]), "rad")
         b_unit = b.unit
@@ -128,6 +128,43 @@ class TestCG:
         # Re-annotate with units
         x = u.Quantity(x_raw, b_unit)
         np.testing.assert_allclose(A @ x.value, b.value, atol=1e-8)
+
+    def test_cg_ravel_pytree_pattern(self):
+        """Newton-CG pattern: ravel_pytree strips Quantity, CG runs on raw, unravel restores.
+
+        This is the actual pattern used in _run_newton_cg_solver_2d.
+        ravel_pytree flattens Quantity -> raw array for the CG internals,
+        then unravel restores the Quantity wrapper afterwards.
+        NO explicit bridge point needed.
+        """
+        from jax.flatten_util import ravel_pytree
+
+        target = raw_jnp.array([1.0, 2.0, 3.0])
+        mag = u.Quantity(raw_jnp.zeros(3), "")
+        ramp = u.Quantity(raw_jnp.zeros(2), "rad")
+        x0_tree = (mag, ramp)
+        x0_flat, unravel = ravel_pytree(x0_tree)
+
+        # x0_flat is a raw JAX array (units stripped)
+        assert not hasattr(x0_flat, "unit")
+
+        def objective(x_flat):
+            m, r = unravel(x_flat)
+            # unravel returns Quantity, extract .value for loss
+            m_val = m.value if hasattr(m, "value") else m
+            return 0.5 * raw_jnp.sum((m_val - target) ** 2)
+
+        g = jax.grad(objective)(x0_flat)
+        hvp = lambda v: jax.grad(lambda x: raw_jnp.sum(jax.grad(objective)(x) * v))(x0_flat)
+
+        delta, _ = jax.scipy.sparse.linalg.cg(hvp, -g, tol=1e-12, maxiter=100)
+        final_mag, final_ramp = unravel(x0_flat + delta)
+
+        # Quantity types are restored!
+        assert hasattr(final_mag, "unit")
+        assert hasattr(final_ramp, "unit")
+        assert str(final_ramp.unit) == "rad"
+        np.testing.assert_allclose(final_mag.value, target, atol=1e-8)
 
 
 # ---------------------------------------------------------------------------
