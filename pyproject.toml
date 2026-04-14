@@ -28,6 +28,11 @@ dependencies = [
     "sparseconverter",
     "scikit-image",
     "empyre",  # used in example notebook(s)
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "optax>=0.2",
+    "unxt>=1.11",
+    "quaxed>=0.10",
 ]
 keywords = ["electron microscopy", "holography", "off-axis holography"]
 classifiers = [

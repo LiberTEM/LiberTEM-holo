@@ -40,12 +40,70 @@ import dataclasses
 from typing import Any, NamedTuple, Union
 
 import jax
-import jax.numpy as jnp
+import quaxed.numpy as jnp
+import quaxed
 from jax.flatten_util import ravel_pytree
 import optax
 import numpy as np
+import unxt as u
 
-PHI_0_T_NM2 = 2067.83  # flux quantum in T·nm²
+# quaxed.numpy.fft lacks rfft2/irfft2; shim them via rfftn/irfftn
+if not hasattr(jnp.fft, "rfft2"):
+    jnp.fft.rfft2 = lambda x, s=None, axes=(-2, -1): jnp.fft.rfftn(x, s=s, axes=axes)
+    jnp.fft.irfft2 = lambda x, s=None, axes=(-2, -1): jnp.fft.irfftn(x, s=s, axes=axes)
+
+PHI_0 = u.Quantity(2067.83, "T nm2")  # magnetic flux quantum h/(2e)
+PHI_0_T_NM2 = 2067.83  # backward-compatible plain-float alias
+
+
+# ---------------------------------------------------------------------------
+# RampCoeffs — typed container for background ramp parameters
+# ---------------------------------------------------------------------------
+
+class RampCoeffs(NamedTuple):
+    """Background phase-ramp coefficients with explicit units.
+
+    Attributes
+    ----------
+    offset : Quantity["angle"]
+        Constant phase offset in radians.
+    slope_y : Quantity["angle / length"]
+        Phase gradient along the y-axis in rad/nm.
+    slope_x : Quantity["angle / length"]
+        Phase gradient along the x-axis in rad/nm.
+    """
+
+    offset: u.Quantity
+    slope_y: u.Quantity
+    slope_x: u.Quantity
+
+    @classmethod
+    def zeros(cls, dtype=jnp.float64):
+        """Create a zero-valued RampCoeffs."""
+        return cls(
+            offset=u.Quantity(jnp.zeros((), dtype=dtype), "rad"),
+            slope_y=u.Quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
+            slope_x=u.Quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Unit conversion helpers
+# ---------------------------------------------------------------------------
+
+def _to_nm(q: u.Quantity) -> u.Quantity:
+    """Convert a length Quantity to nanometres."""
+    return u.uconvert("nm", q)
+
+
+def _to_tesla(q: u.Quantity) -> u.Quantity:
+    """Convert a magnetic flux density Quantity to Tesla."""
+    return u.uconvert("T", q)
+
+
+def _to_rad(q: u.Quantity) -> u.Quantity:
+    """Convert an angle Quantity to radians."""
+    return u.uconvert("rad", q)
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +111,14 @@ PHI_0_T_NM2 = 2067.83  # flux quantum in T·nm²
 # ---------------------------------------------------------------------------
 
 def _validate_positive(value, name):
-    """Raise ValueError if *value* is not positive."""
-    v = float(value) if np.ndim(value) == 0 else np.min(value)
+    """Raise ValueError if *value* is not positive.
+
+    Handles both plain scalars and ``unxt.Quantity`` instances.
+    """
+    if isinstance(value, u.Quantity):
+        v = float(value.value) if np.ndim(value.value) == 0 else float(np.min(np.asarray(value.value)))
+    else:
+        v = float(value) if np.ndim(value) == 0 else np.min(value)
     if v <= 0:
         raise ValueError(f"{name} must be positive, got {value}")
 
