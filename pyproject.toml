@@ -28,6 +28,7 @@ dependencies = [
     "sparseconverter",
     "scikit-image",
     "empyre",  # used in example notebook(s)
+    "unxt",  # physical quantity support (units backend)
 ]
 keywords = ["electron microscopy", "holography", "off-axis holography"]
 classifiers = [
