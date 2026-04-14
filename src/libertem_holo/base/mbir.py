@@ -1,4 +1,38 @@
-"""Model-based iterative reconstruction (MBIR) for 2D projected magnetization."""
+"""Model-based iterative reconstruction (MBIR) for 2D projected magnetization.
+
+Unit conventions
+----------------
+All functions in this module follow these naming and unit rules:
+
+* ``pixel_size_nm`` — pixel side length in **nanometres** (nm).
+* ``b0_tesla`` — saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla** (T).
+* ``thickness`` — sample thickness along the beam direction in **nanometres** (nm).
+  Converted internally to voxels via ``thickness / pixel_size_nm``.
+* ``phase`` — measured holographic phase in **radians** (rad).
+* ``ramp_coeffs`` — background phase-ramp parameters
+  ``[offset, slope_y, slope_x]`` with units **[rad, rad/nm, rad/nm]**.
+  The slopes are multiplied by pixel coordinates scaled by ``pixel_size_nm``.
+* ``PHI_0_T_NM2`` — magnetic flux quantum :math:`h/(2e)` expressed in
+  :math:`\\text{T} \\cdot \\text{nm}^2`.
+
+How *b0_tesla* affects the output magnetization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The RDFC kernel is proportional to ``b0_tesla / (2 * PHI_0_T_NM2)``, so
+``b0_tesla`` is **absorbed** into the kernel.  The solver therefore returns a
+normalised magnetization :math:`M^*` such that
+
+.. math::
+
+   M^* \\approx M_{\\text{true}} \\times
+   \\frac{B_{0,\\text{true}}}{B_{0,\\text{used}}}
+
+When ``b0_tesla`` equals the true saturation induction, :math:`M^*` is the
+dimensionless, normalised magnetization (range roughly [-1, 1]).
+
+When ``b0_tesla = 1.0``, the raw output has units of **Tesla** and equals the
+physical projected magnetic induction :math:`\\mu_0 M_{\\text{phys}}`.  This
+is often the most convenient choice when the true :math:`M_s` is unknown.
+"""
 
 from __future__ import annotations
 
@@ -11,18 +45,70 @@ from jax.flatten_util import ravel_pytree
 import optax
 import numpy as np
 
-PHI_0_T_NM2 = 2067.83  # flux quantum in T*nm^2
+PHI_0_T_NM2 = 2067.83  # flux quantum in T·nm²
+
+
+# ---------------------------------------------------------------------------
+# Runtime validation helpers
+# ---------------------------------------------------------------------------
+
+def _validate_positive(value, name):
+    """Raise ValueError if *value* is not positive."""
+    v = float(value) if np.ndim(value) == 0 else np.min(value)
+    if v <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
 
 
 class SolverResult(NamedTuple):
-    """Result returned by :func:`solve_mbir_2d`."""
+    """Result returned by :func:`solve_mbir_2d`.
+
+    Attributes
+    ----------
+    magnetization : jnp.ndarray
+        Reconstructed in-plane magnetization of shape ``(N, M, 2)``.
+        When *thickness* is ``None`` (the default), this is the
+        **projected** (thickness-integrated) magnetization.  When
+        *thickness* is provided (in nm), the result is divided by
+        the thickness in voxels so that it represents the per-voxel
+        value.
+
+        The physical meaning of the values depends on *b0_tesla*:
+        with ``b0_tesla`` equal to the true :math:`\\mu_0 M_s` the
+        values are dimensionless (normalised by :math:`M_s`); with
+        ``b0_tesla = 1.0`` the values have units of **Tesla**.
+        See the module docstring for details.
+    ramp_coeffs : jnp.ndarray
+        Background ramp coefficients ``[offset, slope_y, slope_x]``
+        in units of **[rad, rad/nm, rad/nm]**.
+    loss_history : jnp.ndarray
+        Per-step loss values.
+    """
     magnetization: jnp.ndarray
     ramp_coeffs: jnp.ndarray
     loss_history: jnp.ndarray
 
 
 class LCurveResult(NamedTuple):
-    """Result returned by :func:`lcurve_sweep` and :func:`lcurve_sweep_vmap`."""
+    """Result returned by :func:`lcurve_sweep` and :func:`lcurve_sweep_vmap`.
+
+    Attributes
+    ----------
+    lambdas : np.ndarray
+        Regularization weights used in the sweep.
+    data_misfits : np.ndarray
+        Data-fidelity term for each lambda.
+    reg_norms : np.ndarray
+        Regularization norm for each lambda.
+    magnetizations : jnp.ndarray
+        Reconstructed magnetizations, shape ``(n_lambdas, N, M, 2)``.
+        When *thickness* is provided, these are per-voxel values.
+        See :class:`SolverResult` for how *b0_tesla* affects units.
+    ramp_coeffs : jnp.ndarray
+        Background ramp coefficients per lambda, in units of
+        **[rad, rad/nm, rad/nm]**.
+    corner_index : int
+        Index of the detected L-curve corner.
+    """
     lambdas: np.ndarray
     data_misfits: np.ndarray
     reg_norms: np.ndarray
@@ -33,6 +119,7 @@ class LCurveResult(NamedTuple):
 
 class BootstrapThresholdResult(NamedTuple):
     """Result returned by :func:`bootstrap_threshold_uncertainty_2d`."""
+    threshold: float
     threshold_low: float
     threshold_high: float
     threshold_draws: np.ndarray
@@ -58,8 +145,8 @@ class NewtonCGConfig:
     cg_tol : float
         CG convergence tolerance (relative residual norm).
     """
-    cg_maxiter: int = 1000
-    cg_tol: float = 1e-10
+    cg_maxiter: int = 10000
+    cg_tol: float = 1e-16
 
 
 @dataclasses.dataclass(frozen=True)
@@ -235,10 +322,50 @@ def exchange_loss_fn(
     return loss
 
 
+def forward_diff_norm(
+    mag: jax.Array,
+    mask: jax.Array,
+) -> jax.Array:
+    r"""Forward-difference regularization norm matching Pyramid's convention.
+
+    Computes ``\|D x\|^2`` using forward differences, with no
+    per-pixel neighbor-count normalization.  This matches the
+    ``FirstOrderRegularisator`` from Pyramid (which uses
+    ``WeightedL2Square(D)`` with a sparse forward-diff operator),
+    but is implemented in pure JAX for autodiff compatibility.
+
+    Use this when comparing L-curve values with Pyramid's
+    ``LCurve`` output, since :func:`exchange_loss_fn` applies
+    adaptive central/one-sided differences with neighbor-count
+    normalization that produce numerically different values.
+
+    Parameters
+    ----------
+    mag
+        Magnetization array of shape ``(N, M, 2)``.
+    mask
+        Binary mask of shape ``(N, M)`` defining the active region.
+
+    Returns
+    -------
+    jax.Array
+        Scalar ``\|Dx\|^2`` (sum of squared forward differences
+        over y and x, both magnetization components).
+    """
+    mask = jnp.asarray(mask, dtype=bool)
+    # Y-direction: forward difference (i+1) - (i), valid where both are masked
+    valid_y = mask[:-1, :] & mask[1:, :]
+    dy = (mag[1:, :, :] - mag[:-1, :, :]) * valid_y[..., None]
+    # X-direction: forward difference (j+1) - (j), valid where both are masked
+    valid_x = mask[:, :-1] & mask[:, 1:]
+    dx = (mag[:, 1:, :] - mag[:, :-1, :]) * valid_x[..., None]
+    return jnp.sum(dy ** 2) + jnp.sum(dx ** 2)
+
+
 def get_freq_grid(
     height: int,
     width: int,
-    voxel_size_nm: float,
+    pixel_size_nm: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Build frequency grids for FFT-based phase propagation.
 
@@ -248,7 +375,7 @@ def get_freq_grid(
         Number of pixels along the y-axis.
     width
         Number of pixels along the x-axis.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres, used as the FFT sampling interval.
 
     Returns
@@ -261,8 +388,8 @@ def get_freq_grid(
         ``f_x**2 + f_y**2`` with the zero-frequency bin set to 1
         to avoid division by zero.
     """
-    fy = jnp.fft.fftfreq(height, d=voxel_size_nm)
-    fx = jnp.fft.rfftfreq(width, d=voxel_size_nm)
+    fy = jnp.fft.fftfreq(height, d=pixel_size_nm)
+    fx = jnp.fft.rfftfreq(width, d=pixel_size_nm)
     f_y, f_x = jnp.meshgrid(fy, fx, indexing="ij")
     denom = f_x**2 + f_y**2
     denom = jnp.where(denom == 0, 1.0, denom)
@@ -316,29 +443,31 @@ def build_rdfc_kernel(
     prw_vec: jax.Array | None = None,
     dtype: type = jnp.float64,
 ) -> dict[str, Any]:
-    """Build an RDFC kernel in Fourier space using pixel coordinates.
+    """Build an RDFC phase-mapping kernel in Fourier space (JIT-compiled).
 
-    The kernel is built on index-space coordinates ``(n, m)`` and therefore
-    does not include the physical pixel-size factor ``voxel_size_nm**2``.
-    Physical scaling is applied in :func:`forward_model_single_rdfc_2d`.
+    The kernel coefficient is ``b0_tesla / (2 * PHI_0_T_NM2)`` with
+    units of :math:`1/\\text{nm}^2`.  When multiplied by voxel-area
+    sums in the elementary-phase functions and by ``pixel_size_nm``
+    in the forward model, the final phase has units of **radians**.
 
     Parameters
     ----------
-    dim_uv
-        ``(height, width)`` of the magnetization field.
-    b0_tesla
-        External magnetic induction in Tesla.
-    geometry
-        Elementary geometry, ``"disc"`` or ``"slab"``.
-    prw_vec
-        Optional projected reference wave vector ``(v, u)``.
-    dtype
-        JAX dtype used for kernel arrays.
+    dim_uv : tuple[int, int]
+        Image dimensions ``(height, width)``.
+    b0_tesla : float, optional
+        Saturation induction in **Tesla**, default 1.0.
+    geometry : str, optional
+        ``"disc"`` or ``"slab"``, default ``"disc"``.
+    prw_vec : jax.Array or None, optional
+        Projected reference wave vector ``(v, u)``.
+    dtype : type, optional
+        JAX float dtype, default ``jnp.float64``.
 
     Returns
     -------
-    dict[str, Any]
-        Dictionary containing FFT'd kernel components and geometry metadata.
+    dict
+        Dictionary with keys ``"u_fft"``, ``"v_fft"``, ``"dim_uv"``,
+        and ``"dim_pad"``.
     """
     height, width = dim_uv
     dim_kern = (2 * height - 1, 2 * width - 1)
@@ -398,12 +527,7 @@ def phase_mapper_rdfc(
     Returns
     -------
     jax.Array
-        Pixel-coordinate phase image of shape ``(H, W)``.
-
-    Notes
-    -----
-    This mapper intentionally omits the physical ``voxel_size_nm**2`` factor.
-    Use :func:`forward_model_single_rdfc_2d` to obtain physically scaled phase.
+        Magnetic phase-shift image of shape ``(H, W)``.
     """
     height, width = u_field.shape
     dim_pad = (2 * height, 2 * width)
@@ -428,31 +552,32 @@ def apply_ramp(
     ramp_coeffs: jax.Array,
     height: int,
     width: int,
-    voxel_size_nm: float,
+    pixel_size_nm: float,
 ) -> jax.Array:
     """Generate a first-order 2D polynomial background ramp.
 
     Parameters
     ----------
     ramp_coeffs
-        Array of ``[offset, slope_y, slope_x]``.
+        Array of ``[offset, slope_y, slope_x]`` in units of
+        **[rad, rad/nm, rad/nm]**.
     height
         Number of pixels along the y-axis.
     width
         Number of pixels along the x-axis.
-    voxel_size_nm
-        Pixel size in nanometres.
+    pixel_size_nm
+        Pixel size in **nanometres** (nm).
 
     Returns
     -------
     jax.Array
-        Ramp image of shape ``(height, width)``.
+        Ramp image of shape ``(height, width)`` in **radians**.
     """
     y, x = jnp.meshgrid(jnp.arange(height), jnp.arange(width), indexing="ij")
     ramp = ramp_coeffs[0]
     if ramp_coeffs.shape[0] > 1:
-        ramp = ramp + ramp_coeffs[1] * (y * voxel_size_nm)
-        ramp = ramp + ramp_coeffs[2] * (x * voxel_size_nm)
+        ramp = ramp + ramp_coeffs[1] * (y * pixel_size_nm)
+        ramp = ramp + ramp_coeffs[2] * (x * pixel_size_nm)
     return ramp
 
 
@@ -460,16 +585,12 @@ def forward_model_single_rdfc_2d(
     magnetization: jax.Array,
     ramp_coeffs: jax.Array,
     rdfc_kernel: dict[str, Any],
-    voxel_size_nm: float,
+    pixel_size_nm: float,
 ) -> jax.Array:
     """RDFC forward model mapping projected magnetization to phase.
 
     Computes the magnetic phase shift from a 2D projected
     magnetization field and adds a polynomial background ramp.
-
-    The Fourier mapper returns phase in pixel-coordinate units.
-    This function applies the physical pixel-size scaling
-    ``voxel_size_nm**2`` before adding the ramp.
 
     Parameters
     ----------
@@ -480,7 +601,7 @@ def forward_model_single_rdfc_2d(
         Background ramp coefficients ``[offset, slope_y, slope_x]``.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres.
 
     Returns
@@ -493,10 +614,9 @@ def forward_model_single_rdfc_2d(
     u_field = magnetization[..., 0]
     v_field = magnetization[..., 1]
 
-    # Convert mapper output from pixel-coordinate units to physical phase units.
-    phase_px = phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
-    phase = voxel_size_nm**2 * phase_px
-    ramp = apply_ramp(ramp_coeffs, height, width, voxel_size_nm)
+    # Kernel is defined in pixel coordinates; convert to physical phase scale.
+    phase = pixel_size_nm**2 * phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
+    ramp = apply_ramp(ramp_coeffs, height, width, pixel_size_nm)
 
     return phase + ramp
 
@@ -506,7 +626,7 @@ def mbir_loss_2d(
     mask: jax.Array,
     phase: jax.Array,
     rdfc_kernel: dict[str, Any],
-    voxel_size_nm: float,
+    pixel_size_nm: float,
     reg_config: dict[str, Any],
     reg_mask: jax.Array | None = None,
 ) -> jax.Array:
@@ -528,7 +648,7 @@ def mbir_loss_2d(
         Observed phase image of shape ``(H, W)``.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres.
     reg_config
         Regularization configuration dictionary.  Recognised key:
@@ -557,7 +677,7 @@ def mbir_loss_2d(
         magnetization,
         ramp_coeffs,
         rdfc_kernel,
-        voxel_size_nm,
+        pixel_size_nm,
     )
 
     residuals = predictions - phase
@@ -576,7 +696,7 @@ def _run_newton_cg_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
     mask: jax.Array,
-    voxel_size_nm: float,
+    pixel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     rdfc_kernel: dict[str, Any] | None = None,
     cg_tol: float = 1e-8,
@@ -600,7 +720,7 @@ def _run_newton_cg_solver_2d(
     mask
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres.
     reg_config
         Regularization configuration dictionary (see
@@ -641,7 +761,7 @@ def _run_newton_cg_solver_2d(
             mask,
             phase,
             rdfc_kernel,
-            voxel_size_nm,
+            pixel_size_nm,
             reg_config,
             reg_mask=reg_mask,
         )
@@ -668,7 +788,7 @@ def _run_adam_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
     mask: jax.Array,
-    voxel_size_nm: float,
+    pixel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     num_steps: int = 2000,
     learning_rate: float = 1e-2,
@@ -693,7 +813,7 @@ def _run_adam_solver_2d(
     mask
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres.
     reg_config
         Regularization configuration dictionary (see
@@ -738,7 +858,7 @@ def _run_adam_solver_2d(
 
     # initial_loss needed for state initialization
     init_loss = mbir_loss_2d(
-        params, mask, phase, rdfc_kernel, voxel_size_nm, reg_config,
+        params, mask, phase, rdfc_kernel, pixel_size_nm, reg_config,
         reg_mask=reg_mask,
     )
 
@@ -769,7 +889,7 @@ def _run_adam_solver_2d(
             mask,
             phase,
             rdfc_kernel,
-            voxel_size_nm,
+            pixel_size_nm,
             reg_config,
             reg_mask=reg_mask,
         )
@@ -809,7 +929,7 @@ def _run_lbfgs_solver_2d(
     phase: jax.Array,
     init_mag: jax.Array,
     mask: jax.Array,
-    voxel_size_nm: float,
+    pixel_size_nm: float,
     reg_config: dict[str, Any] | None = None,
     num_steps: int = 500,
     rdfc_kernel: dict[str, Any] | None = None,
@@ -833,7 +953,7 @@ def _run_lbfgs_solver_2d(
     mask
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    voxel_size_nm
+    pixel_size_nm
         Pixel size in nanometres.
     reg_config
         Regularization configuration dictionary (see
@@ -876,7 +996,7 @@ def _run_lbfgs_solver_2d(
             mask,
             phase,
             rdfc_kernel,
-            voxel_size_nm,
+            pixel_size_nm,
             reg_config,
             reg_mask=reg_mask,
         )
@@ -950,7 +1070,7 @@ def solve_mbir_2d(
     phase,
     init_mag,
     mask,
-    voxel_size_nm,
+    pixel_size_nm,
     solver="newton_cg",
     reg_config=None,
     rdfc_kernel=None,
@@ -963,14 +1083,14 @@ def solve_mbir_2d(
     Parameters
     ----------
     phase : array_like
-        Measured phase image.
+        Measured phase image in **radians**.
     init_mag : array_like
         Initial magnetization estimate, shape ``(N, M, 2)``.
     mask : array_like
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    voxel_size_nm : float
-        Voxel size in nanometres.
+    pixel_size_nm : float
+        Voxel size in **nanometres** (nm).
     solver : str or SolverConfig, optional
         Which solver to use.  Pass a string (``"newton_cg"``, ``"adam"``,
         ``"lbfgs"``) for default parameters, or a config object
@@ -981,7 +1101,8 @@ def solve_mbir_2d(
     rdfc_kernel : dict, optional
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
     init_ramp_coeffs : array_like, optional
-        Initial ramp coefficients ``[offset, slope_y, slope_x]``.
+        Initial ramp coefficients ``[offset, slope_y, slope_x]``
+        in units of **[rad, rad/nm, rad/nm]**.
     reg_mask : array_like, optional
         Regularization mask of shape ``(N, M)``.  Defaults to *mask*.
 
@@ -1015,7 +1136,7 @@ def solve_mbir_2d(
         phase=phase,
         init_mag=init_mag,
         mask=mask,
-        voxel_size_nm=voxel_size_nm,
+        pixel_size_nm=pixel_size_nm,
         reg_config=reg_config,
         rdfc_kernel=rdfc_kernel,
         init_ramp_coeffs=init_ramp_coeffs,
@@ -1053,9 +1174,10 @@ def solve_mbir_2d(
 
 def reconstruct_2d(
     phase,
-    voxel_size_nm,
-    b0_tesla=1.0,
-    mask=None,
+    pixel_size_nm,
+    b0_tesla,
+    thickness,
+    mask,
     lam=1e-3,
     solver="newton_cg",
     reg_mask=None,
@@ -1073,11 +1195,21 @@ def reconstruct_2d(
     Parameters
     ----------
     phase : array_like
-        Measured phase image of shape ``(N, M)``.
-    voxel_size_nm : float
-        Pixel size in nanometres.
-    b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+        Measured phase image of shape ``(N, M)`` in **radians**.
+    pixel_size_nm : float
+        Pixel size in **nanometres** (nm).  Must be positive.
+    b0_tesla : float
+        Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
+        Determines the scale of the returned magnetization — see
+        *Notes* below.
+    thickness : float or array_like
+        Sample thickness in **nanometres** (nm) along the beam
+        direction.  Converted to voxels internally via
+        ``thickness / pixel_size_nm``.  The returned magnetization
+        is divided by the thickness in voxels so that it represents
+        the per-voxel value rather than the projected
+        (thickness-integrated) value.  May be a scalar or a 2-D
+        map of shape ``(N, M)``.
     mask : array_like, optional
         Binary mask of shape ``(N, M)``.  Defaults to all ones.
     lam : float, optional
@@ -1106,8 +1238,20 @@ def reconstruct_2d(
     -------
     SolverResult
         Named tuple with fields ``magnetization``, ``ramp_coeffs``,
-        and ``loss_history``.
+        and ``loss_history``.  See :class:`SolverResult` for how
+        *b0_tesla* affects the magnetization units.
+
+    Notes
+    -----
+    The RDFC kernel is proportional to ``b0_tesla``, so the solver
+    absorbs it into the reconstructed magnetization.  With ``b0_tesla``
+    equal to the true saturation induction the output is a
+    dimensionless, normalised :math:`M / M_s`.  With ``b0_tesla = 1.0``
+    the output has units of **Tesla**.
     """
+    _validate_positive(pixel_size_nm, "pixel_size_nm")
+    _validate_positive(thickness, "thickness")
+
     phase = jnp.asarray(phase)
     if mask is None:
         mask = jnp.ones(phase.shape, dtype=bool)
@@ -1128,47 +1272,61 @@ def reconstruct_2d(
     if solver_config is not None:
         solver = solver_config
 
-    return solve_mbir_2d(
+    result = solve_mbir_2d(
         phase=phase,
         init_mag=init_mag,
         mask=mask,
-        voxel_size_nm=voxel_size_nm,
+        pixel_size_nm=pixel_size_nm,
         solver=solver,
         reg_config=reg_config,
         rdfc_kernel=rdfc_kernel,
         reg_mask=reg_mask,
     )
+    thickness = jnp.asarray(thickness, dtype=jnp.float64)
+    thickness_vox = thickness / pixel_size_nm
+    if thickness_vox.ndim >= 2:
+        thickness_vox = thickness_vox[..., jnp.newaxis]
+
+    mag = result.magnetization / thickness_vox
+
+    return SolverResult(
+        magnetization=mag,
+        ramp_coeffs=result.ramp_coeffs,
+        loss_history=result.loss_history,
+    )
 
 
 def forward_model_2d(
     magnetization,
-    voxel_size_nm,
+    pixel_size_nm,
     b0_tesla=1.0,
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
+    thickness=None,
 ):
     """Convenience forward model for 2D projected magnetization.
 
     Computes the magnetic phase shift from a magnetization field,
     automatically building the RDFC kernel when not provided.
 
-    Internally this uses a pixel-coordinate RDFC kernel and applies
-    ``voxel_size_nm**2`` scaling in
-    :func:`forward_model_single_rdfc_2d`.
-
     Parameters
     ----------
     magnetization : array_like
         In-plane magnetization of shape ``(N, M, 2)`` where the
-        last axis holds the (u, v) components.
-    voxel_size_nm : float
-        Pixel size in nanometres.
+        last axis holds the (u, v) components.  If *thickness*
+        is provided, the magnetization is assumed to be per-voxel
+        and is multiplied by *thickness* before forward modeling.
+    pixel_size_nm : float
+        Pixel size in **nanometres** (nm).  Must be positive.
     b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+        Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**,
+        default 1.0.  Must match the value used during
+        reconstruction for consistent round-tripping.
     ramp_coeffs : array_like, optional
-        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+        Background ramp coefficients ``[offset, slope_y, slope_x]``
+        in units of **[rad, rad/nm, rad/nm]**.
         Defaults to zeros (no ramp).
     geometry : str, optional
         Voxel geometry for the RDFC kernel (``"disc"`` or
@@ -1178,13 +1336,26 @@ def forward_model_2d(
     rdfc_kernel : dict, optional
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
         Built automatically when not provided.
+    thickness : float, optional
+        Sample thickness in **nanometres** (nm) along the beam
+        direction.  When provided, the magnetization is multiplied
+        by the thickness in voxels (``thickness / pixel_size_nm``)
+        before computing the phase (converting per-voxel to
+        projected magnetization).  Default ``None`` assumes the
+        input is already projected.
 
     Returns
     -------
     jax.Array
-        Predicted phase image of shape ``(N, M)``.
+        Predicted phase image of shape ``(N, M)`` in **radians**.
     """
+    _validate_positive(pixel_size_nm, "pixel_size_nm")
+    if thickness is not None:
+        _validate_positive(thickness, "thickness")
+
     magnetization = jnp.asarray(magnetization)
+    if thickness is not None:
+        magnetization = magnetization * (thickness / pixel_size_nm)
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             magnetization.shape[:2],
@@ -1198,14 +1369,14 @@ def forward_model_2d(
         ramp_coeffs = jnp.asarray(ramp_coeffs)
 
     return forward_model_single_rdfc_2d(
-        magnetization, ramp_coeffs, rdfc_kernel, voxel_size_nm,
+        magnetization, ramp_coeffs, rdfc_kernel, pixel_size_nm,
     )
 
 
 def reconstruct_2d_ensemble(
     phase,
     masks,
-    voxel_size_nm,
+    pixel_size_nm,
     b0_tesla=1.0,
     lam=1e-3,
     solver="newton_cg",
@@ -1223,13 +1394,14 @@ def reconstruct_2d_ensemble(
     Parameters
     ----------
     phase : array_like
-        Measured phase image of shape ``(H, W)``.
+        Measured phase image of shape ``(H, W)`` in **radians**.
     masks : array_like
         Bootstrap mask ensemble of shape ``(N_boot, H, W)``.
-    voxel_size_nm : float
-        Pixel size in nanometres.
+    pixel_size_nm : float
+        Pixel size in **nanometres** (nm).  Must be positive.
     b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+        Saturation induction in **Tesla**, default 1.0.
+        See :class:`SolverResult` for how this affects units.
     lam : float, optional
         Regularization weight (``lambda_exchange``), default 1e-3.
     solver : str or SolverConfig, optional
@@ -1264,6 +1436,8 @@ def reconstruct_2d_ensemble(
     effectively disabled under ``vmap``; all bootstrap samples
     run for the maximum number of steps.
     """
+    _validate_positive(pixel_size_nm, "pixel_size_nm")
+
     phase = jnp.asarray(phase)
     masks = jnp.asarray(masks)
     if reg_masks is None:
@@ -1308,7 +1482,7 @@ def reconstruct_2d_ensemble(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 rdfc_kernel=rdfc_kernel,
                 cg_tol=config.cg_tol,
@@ -1322,7 +1496,7 @@ def reconstruct_2d_ensemble(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 num_steps=config.num_steps,
                 learning_rate=config.learning_rate,
@@ -1338,7 +1512,7 @@ def reconstruct_2d_ensemble(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 num_steps=config.num_steps,
                 rdfc_kernel=rdfc_kernel,
@@ -1419,7 +1593,7 @@ def project_3d(
 
 def forward_model_3d(
     magnetization_3d,
-    voxel_size_nm,
+    pixel_size_nm,
     b0_tesla=1.0,
     axis="z",
     ramp_coeffs=None,
@@ -1438,7 +1612,7 @@ def forward_model_3d(
     magnetization_3d : array_like
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
-    voxel_size_nm : float
+    pixel_size_nm : float
         Voxel size in nanometres.
     b0_tesla : float, optional
         Magnetic induction in Tesla, default 1.0.
@@ -1465,7 +1639,7 @@ def forward_model_3d(
 
     return forward_model_2d(
         projected,
-        voxel_size_nm,
+        pixel_size_nm,
         b0_tesla=b0_tesla,
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
@@ -1481,7 +1655,9 @@ def decompose_loss(
     mask,
     reg_mask,
     rdfc_kernel,
-    voxel_size_nm,
+    pixel_size_nm,
+    *,
+    pyramid_compat=False,
 ):
     """Decompose the MBIR loss into data-fidelity and regularization terms.
 
@@ -1505,16 +1681,27 @@ def decompose_loss(
         :func:`exchange_loss_fn`.
     rdfc_kernel : dict
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-    voxel_size_nm : float
+    pixel_size_nm : float
         Pixel size in nanometres.
+    pyramid_compat : bool, optional
+        If *True*, compute the regularization norm using
+        :func:`forward_diff_norm` (simple forward differences, no
+        per-pixel normalization), which matches Pyramid's
+        ``FirstOrderRegularisator`` convention.  Default *False*
+        uses :func:`exchange_loss_fn` (adaptive stencil with
+        neighbor-count normalization).
 
     Returns
     -------
     data_misfit : float
-        ``0.5 * sum((predicted - observed)**2)``
+        ``sum((predicted - observed)**2)`` — the squared-residual
+        norm, matching Pyramid's ``chisq_m`` convention (no 1/2
+        factor).
     exchange_norm : float
         Unweighted exchange regularization norm (no lambda
-        multiplier).
+        multiplier).  When *pyramid_compat=True* this is
+        ``||Dx||²`` (forward differences); otherwise it uses the
+        adaptive stencil from :func:`exchange_loss_fn`.
     """
     magnetization = jnp.asarray(magnetization)
     ramp_coeffs = jnp.asarray(ramp_coeffs)
@@ -1528,18 +1715,22 @@ def decompose_loss(
     ], axis=-1)
 
     predicted = forward_model_single_rdfc_2d(
-        masked_mag, ramp_coeffs, rdfc_kernel, voxel_size_nm,
+        masked_mag, ramp_coeffs, rdfc_kernel, pixel_size_nm,
     )
     residuals = predicted - phase
-    data_misfit = float(0.5 * jnp.sum(residuals ** 2))
-    exchange_norm = float(exchange_loss_fn(masked_mag, reg_mask))
+    data_misfit = float(jnp.sum(residuals ** 2))
+    if pyramid_compat:
+        exchange_norm = float(forward_diff_norm(masked_mag, reg_mask))
+    else:
+        exchange_norm = float(exchange_loss_fn(masked_mag, reg_mask))
 
     return data_misfit, exchange_norm
 
 def bootstrap_threshold_uncertainty_2d(
     phase,
     mip_phase,
-    voxel_size_nm,
+    threshold,
+    pixel_size_nm,
     b0_tesla=1.0,
     lam=1e-3,
     solver="newton_cg",
@@ -1566,7 +1757,9 @@ def bootstrap_threshold_uncertainty_2d(
         Observed phase image of shape ``(H, W)``.
     mip_phase
         MIP phase image used for thresholding, shape ``(H, W)``.
-    voxel_size_nm
+    threshold
+        Central threshold value around which the bootstrap draws are sampled.
+    pixel_size_nm
         Pixel size in nanometres.
     b0_tesla : float, optional
         Magnetic induction in Tesla, default 1.0.
@@ -1578,9 +1771,11 @@ def bootstrap_threshold_uncertainty_2d(
     n_boot : int, optional
         Number of threshold draws, default 50.
     threshold_low : float, optional
-        Lower bound for the threshold draws.
+        Lower bound for the threshold draws.  Defaults to
+        ``threshold - 0.25``.
     threshold_high : float, optional
-        Upper bound for the threshold draws.
+        Upper bound for the threshold draws.  Defaults to
+        ``threshold + 0.25``.
     rng_seed : int, optional
         Seed for the pseudo-random number generator, default 0.
     geometry : str, optional
@@ -1602,48 +1797,37 @@ def bootstrap_threshold_uncertainty_2d(
     """
     phase = jnp.asarray(phase)
     mip_phase = jnp.asarray(mip_phase)
+    if phase.shape != mip_phase.shape:
+        raise ValueError(
+            f"phase and mip_phase must have the same shape; got {phase.shape} and {mip_phase.shape}."
+        )
 
-    mip_abs = jnp.abs(mip_phase)
     if threshold_low is None:
-        threshold_low = float(jnp.percentile(mip_abs, 5.0))
+        threshold_low = float(threshold) - 0.25
     if threshold_high is None:
-        threshold_high = float(jnp.percentile(mip_abs, 95.0))
+        threshold_high = float(threshold) + 0.25
     if threshold_high <= threshold_low:
         raise ValueError(
-            "threshold_high must be greater than threshold_low; "
-            f"got {threshold_low=} and {threshold_high=}"
+            f"threshold_high must be greater than threshold_low; got {threshold_low} and {threshold_high}."
         )
 
     rng = np.random.default_rng(rng_seed)
     threshold_draws = rng.uniform(low=threshold_low, high=threshold_high, size=n_boot)
-    threshold_draws_jax = jnp.asarray(threshold_draws, dtype=mip_abs.dtype)
 
-    bootstrap_masks = mip_abs[None, ...] > threshold_draws_jax[:, None, None]
+    mip_abs = np.abs(np.asarray(mip_phase))
+    reference_mask = (mip_abs > threshold).astype(np.float64)
+    bootstrap_masks = (
+        mip_abs[None, ...] > threshold_draws[:, None, None]
+    ).astype(np.float64)
 
-    # Pre-build the RDFC kernel once for all bootstrap draws.
-    if rdfc_kernel is None:
-        rdfc_kernel = build_rdfc_kernel(
-            phase.shape,
-            b0_tesla=b0_tesla,
-            geometry=geometry,
-            prw_vec=prw_vec,
-        )
-
-    # When using the default Newton-CG solver with no explicit config,
-    # scale cg_maxiter to the problem size.  JAX's CG runs all maxiter
-    # iterations under jit/vmap (no early exit), so the default 10000
-    # wastes cycles once the solve has converged.  H*W//2 tracks the
-    # number of unknowns and gives <2% CI95 deviation from the
-    # full-iteration result at 128x128 and above.
-    if solver_config is None and isinstance(solver, str) and solver.lower() == "newton_cg":
-        H, W = phase.shape
-        scaled_maxiter = min(max(H * W // 2, 1000), 10000)
-        solver_config = NewtonCGConfig(cg_maxiter=scaled_maxiter)
+    for draw_index in range(n_boot):
+        if bootstrap_masks[draw_index].sum() == 0:
+            bootstrap_masks[draw_index] = reference_mask
 
     bootstrap_mag = reconstruct_2d_ensemble(
         phase=phase,
         masks=bootstrap_masks,
-        voxel_size_nm=voxel_size_nm,
+        pixel_size_nm=pixel_size_nm,
         b0_tesla=b0_tesla,
         lam=lam,
         solver=solver,
@@ -1656,28 +1840,28 @@ def bootstrap_threshold_uncertainty_2d(
 
     bootstrap_mag = jnp.asarray(bootstrap_mag)
     mean_magnetization = jnp.mean(bootstrap_mag, axis=0)
-    mean_norm = jnp.linalg.norm(mean_magnetization, axis=-1)
+    mean_norm = np.linalg.norm(np.asarray(mean_magnetization), axis=-1)
 
-    norm_samples = jnp.linalg.norm(bootstrap_mag, axis=-1)
-    norm_low, norm_high = jnp.percentile(
-        norm_samples, jnp.array([2.5, 97.5]), axis=0
-    )
+    norm_samples = np.linalg.norm(np.asarray(bootstrap_mag), axis=-1)
+    norm_low = np.percentile(norm_samples, 2.5, axis=0)
+    norm_high = np.percentile(norm_samples, 97.5, axis=0)
     norm_ci95 = norm_high - norm_low
     relative_ci95 = norm_ci95 / (mean_norm + 1e-12)
-    mask_frequency = jnp.mean(bootstrap_masks, axis=0)
+    mask_frequency = bootstrap_masks.mean(axis=0)
 
     return BootstrapThresholdResult(
+        threshold=threshold,
         threshold_low=threshold_low,
         threshold_high=threshold_high,
         threshold_draws=threshold_draws,
         magnetizations=bootstrap_mag,
         mean_magnetization=mean_magnetization,
-        mean_norm=np.asarray(mean_norm),
-        norm_low=np.asarray(norm_low),
-        norm_high=np.asarray(norm_high),
-        norm_ci95=np.asarray(norm_ci95),
-        relative_ci95=np.asarray(relative_ci95),
-        mask_frequency=np.asarray(mask_frequency),
+        mean_norm=mean_norm,
+        norm_low=norm_low,
+        norm_high=norm_high,
+        norm_ci95=norm_ci95,
+        relative_ci95=relative_ci95,
+        mask_frequency=mask_frequency,
     )
 
 
@@ -1833,16 +2017,17 @@ def kneedle_corner(data_misfits, reg_norms):
 def lcurve_sweep(
     phase,
     mask,
-    voxel_size_nm,
+    pixel_size_nm,
     lambdas,
-    b0_tesla=1.0,
+    b0_tesla,
+    thickness,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    warm_start=True,
+    pyramid_compat=False,
 ):
     """Sequential L-curve sweep over regularization weights.
 
@@ -1850,22 +2035,24 @@ def lcurve_sweep(
     collects the data-fidelity and regularization norms, and
     detects the L-curve corner via :func:`kneedle_corner`.
 
-    When *warm_start* is ``True`` (default), lambdas are sorted
-    in ascending order and each reconstruction is initialized from
-    the previous result.
-
     Parameters
     ----------
     phase : array_like
-        Measured phase image of shape ``(N, M)``.
+        Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
-    voxel_size_nm : float
-        Pixel size in nanometres.
+    pixel_size_nm : float
+        Pixel size in **nanometres** (nm).  Must be positive.
     lambdas : array_like
         1D array of ``lambda_exchange`` values to sweep.
-    b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+    b0_tesla : float
+        Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
+        See :class:`SolverResult` for how this affects units.
+    thickness : float or array_like
+        Sample thickness in **nanometres** (nm).  The returned
+        magnetizations are divided by the thickness in voxels
+        (``thickness / pixel_size_nm``) to give per-voxel values.
+        May be a scalar or a 2-D map of shape ``(N, M)``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.
@@ -1880,9 +2067,11 @@ def lcurve_sweep(
         Pre-built RDFC kernel.  Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration.
-    warm_start : bool, optional
-        If ``True`` (default), sort lambdas and seed each run
-        from the previous result.
+    pyramid_compat : bool, optional
+        If *True*, compute the regularization norm using
+        :func:`forward_diff_norm` (simple forward differences)
+        instead of :func:`exchange_loss_fn`, to match Pyramid's
+        ``FirstOrderRegularisator`` convention.  Default *False*.
 
     Returns
     -------
@@ -1891,6 +2080,9 @@ def lcurve_sweep(
         ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
         ``corner_index``.
     """
+    _validate_positive(pixel_size_nm, "pixel_size_nm")
+    _validate_positive(thickness, "thickness")
+
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
     if reg_mask is None:
@@ -1899,9 +2091,6 @@ def lcurve_sweep(
         reg_mask = jnp.asarray(reg_mask)
 
     lambdas = np.atleast_1d(np.asarray(lambdas, dtype=np.float64))
-    if warm_start:
-        sort_idx = np.argsort(lambdas)
-        lambdas = lambdas[sort_idx]
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
@@ -1918,16 +2107,16 @@ def lcurve_sweep(
     mag_list = []
     ramp_list = []
 
-    current_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
+    init_mag = jnp.zeros((*phase.shape, 2), dtype=jnp.float64)
 
     for lam in lambdas:
         reg_config = {"lambda_exchange": float(lam)}
 
         result = solve_mbir_2d(
             phase=phase,
-            init_mag=current_mag,
+            init_mag=init_mag,
             mask=mask,
-            voxel_size_nm=voxel_size_nm,
+            pixel_size_nm=pixel_size_nm,
             solver=actual_solver,
             reg_config=reg_config,
             rdfc_kernel=rdfc_kernel,
@@ -1936,25 +2125,30 @@ def lcurve_sweep(
 
         dm, rn = decompose_loss(
             result.magnetization, result.ramp_coeffs,
-            phase, mask, reg_mask, rdfc_kernel, voxel_size_nm,
+            phase, mask, reg_mask, rdfc_kernel, pixel_size_nm,
+            pyramid_compat=pyramid_compat,
         )
         data_misfits.append(dm)
         reg_norms.append(rn)
         mag_list.append(result.magnetization)
         ramp_list.append(result.ramp_coeffs)
 
-        if warm_start:
-            current_mag = result.magnetization
-
     data_misfits = np.array(data_misfits)
     reg_norms = np.array(reg_norms)
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
+
+    all_mag = jnp.stack(mag_list)
+    thickness = jnp.asarray(thickness, dtype=jnp.float64)
+    thickness_vox = thickness / pixel_size_nm
+    if thickness_vox.ndim >= 2:
+        thickness_vox = thickness_vox[..., jnp.newaxis]
+    all_mag = all_mag / thickness_vox
 
     return LCurveResult(
         lambdas=lambdas,
         data_misfits=data_misfits,
         reg_norms=reg_norms,
-        magnetizations=jnp.stack(mag_list),
+        magnetizations=all_mag,
         ramp_coeffs=jnp.stack(ramp_list),
         corner_index=corner_idx,
     )
@@ -1963,15 +2157,17 @@ def lcurve_sweep(
 def lcurve_sweep_vmap(
     phase,
     mask,
-    voxel_size_nm,
+    pixel_size_nm,
     lambdas,
-    b0_tesla=1.0,
+    b0_tesla,
+    thickness,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
+    pyramid_compat=False,
 ):
     """Parallel L-curve sweep using ``jax.vmap`` over lambda values.
 
@@ -1982,15 +2178,21 @@ def lcurve_sweep_vmap(
     Parameters
     ----------
     phase : array_like
-        Measured phase image of shape ``(N, M)``.
+        Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
-    voxel_size_nm : float
-        Pixel size in nanometres.
+    pixel_size_nm : float
+        Pixel size in **nanometres** (nm).  Must be positive.
     lambdas : array_like
         1D array of ``lambda_exchange`` values to sweep.
-    b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+    b0_tesla : float
+        Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
+        See :class:`SolverResult` for how this affects units.
+    thickness : float or array_like
+        Sample thickness in **nanometres** (nm).  The returned
+        magnetizations are divided by the thickness in voxels
+        (``thickness / pixel_size_nm``) to give per-voxel values.
+        May be a scalar or a 2-D map of shape ``(N, M)``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.
@@ -2005,6 +2207,11 @@ def lcurve_sweep_vmap(
         Pre-built RDFC kernel.  Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration.
+    pyramid_compat : bool, optional
+        If *True*, compute the regularization norm using
+        :func:`forward_diff_norm` (simple forward differences)
+        instead of :func:`exchange_loss_fn`, to match Pyramid's
+        ``FirstOrderRegularisator`` convention.  Default *False*.
 
     Returns
     -------
@@ -2019,6 +2226,9 @@ def lcurve_sweep_vmap(
     effectively disabled under ``vmap``; all lambda values run for
     the maximum number of steps.
     """
+    _validate_positive(pixel_size_nm, "pixel_size_nm")
+    _validate_positive(thickness, "thickness")
+
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
     if reg_mask is None:
@@ -2065,7 +2275,7 @@ def lcurve_sweep_vmap(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 rdfc_kernel=rdfc_kernel,
                 cg_tol=config.cg_tol,
@@ -2080,7 +2290,7 @@ def lcurve_sweep_vmap(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 num_steps=config.num_steps,
                 learning_rate=config.learning_rate,
@@ -2097,7 +2307,7 @@ def lcurve_sweep_vmap(
                 phase=phase,
                 init_mag=init_mag,
                 mask=mask,
-                voxel_size_nm=voxel_size_nm,
+                pixel_size_nm=pixel_size_nm,
                 reg_config=reg_config,
                 num_steps=config.num_steps,
                 rdfc_kernel=rdfc_kernel,
@@ -2111,17 +2321,19 @@ def lcurve_sweep_vmap(
     all_mag, all_ramp = solve_batch(lambdas_jax)
 
     # Decompose losses (vmapped)
+    _norm_fn = forward_diff_norm if pyramid_compat else exchange_loss_fn
+
     def _decompose_single(mag, ramp):
         masked_mag = jnp.stack([
             mag[..., 0] * mask,
             mag[..., 1] * mask,
         ], axis=-1)
         predicted = forward_model_single_rdfc_2d(
-            masked_mag, ramp, rdfc_kernel, voxel_size_nm,
+            masked_mag, ramp, rdfc_kernel, pixel_size_nm,
         )
         residuals = predicted - phase
-        dm = 0.5 * jnp.sum(residuals ** 2)
-        rn = exchange_loss_fn(masked_mag, reg_mask)
+        dm = jnp.sum(residuals ** 2)
+        rn = _norm_fn(masked_mag, reg_mask)
         return dm, rn
 
     decompose_batch = jax.jit(jax.vmap(_decompose_single))
@@ -2131,6 +2343,12 @@ def lcurve_sweep_vmap(
     reg_norms = np.asarray(all_rn)
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
+    thickness = jnp.asarray(thickness, dtype=jnp.float64)
+    thickness_vox = thickness / pixel_size_nm
+    if thickness_vox.ndim >= 2:
+        thickness_vox = thickness_vox[..., jnp.newaxis]
+    all_mag = all_mag / thickness_vox
+
     return LCurveResult(
         lambdas=lambdas_np,
         data_misfits=data_misfits,
@@ -2139,3 +2357,76 @@ def lcurve_sweep_vmap(
         ramp_coeffs=all_ramp,
         corner_index=corner_idx,
     )
+
+
+def plot_lcurve(
+    lcurve_result,
+    pyramid_style=False,
+    ax=None,
+    cmap="nipy_spectral",
+    colorbar=True,
+    **kwargs,
+):
+    """
+    Plot an L-curve from an LCurveResult, with optional Pyramid-style axes.
+
+    Parameters
+    ----------
+    lcurve_result : LCurveResult
+        Result from lcurve_sweep or lcurve_sweep_vmap.
+    pyramid_style : bool, optional
+        If True, plot y = reg_norm / lambda vs x = data_misfit (Pyramid style).
+        If False (default), plot y = data_misfit vs x = reg_norm (standard style).
+    ax : matplotlib.axes.Axes, optional
+        Axis to plot on. If None, a new figure is created.
+    cmap : str, optional
+        Colormap for lambda values.
+    colorbar : bool, optional
+        Whether to show a colorbar. Default True.
+    **kwargs :
+        Additional arguments passed to scatter/plot.
+
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+        The axis with the plot.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    lambdas = np.asarray(lcurve_result.lambdas)
+    reg_norms = np.asarray(lcurve_result.reg_norms)
+    data_misfits = np.asarray(lcurve_result.data_misfits)
+
+    if pyramid_style:
+        x = data_misfits
+        y = reg_norms
+        xlabel = r"$\Vert\mathbf{F}(\mathbf{x})-\mathbf{y}\Vert^2$"
+        ylabel = r"$\Vert\mathbf{D}\mathbf{x}\Vert^2$"
+    else:
+        x = reg_norms
+        y = data_misfits
+        xlabel = "Regularisation norm (exchange)"
+        ylabel = "Data misfit"
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 5))
+    sc = ax.scatter(x, y, c=lambdas, cmap=cmap, norm=LogNorm(), s=80, zorder=2, **kwargs)
+    ax.plot(x, y, "k-", lw=1.5, zorder=1)
+    if hasattr(lcurve_result, "corner_index") and lcurve_result.corner_index >= 0:
+        ax.plot(
+            x[lcurve_result.corner_index],
+            y[lcurve_result.corner_index],
+            "r*", ms=18, zorder=3,
+            label=f"corner λ={lambdas[lcurve_result.corner_index]:.2e}",
+        )
+        ax.legend(frameon=False, fontsize=11)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(xlabel, fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=16)
+    ax.set_title("MBIR L-curve" + (" (Pyramid style)" if pyramid_style else ""))
+    ax.grid(alpha=0.25)
+    if colorbar:
+        plt.colorbar(sc, ax=ax, label=r"$\lambda$")
+    return ax
