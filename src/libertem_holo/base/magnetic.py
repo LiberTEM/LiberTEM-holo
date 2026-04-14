@@ -136,13 +136,18 @@ def radial_integration(
     }
 
 
-def fit_magnetic_moment(result: dict) -> tuple:
+def fit_magnetic_moment(
+        result: dict,
+        plot: bool = False
+) -> tuple:
     """Fit the radial integration results to extract the magnetic moment.
 
     Parameters
     ----------
     result : dict
         Output of `radial_integration`.
+    plot : bool, optional
+        If True, display a plot of the fit. Default is False.
 
     Returns
     -------
@@ -150,14 +155,30 @@ def fit_magnetic_moment(result: dict) -> tuple:
         Fitted magnetic moment components (m_x, m_y) in A·m².
 
     """
-    def _quadratic(x: np.ndarray, a: float, b: float) -> np.ndarray:
-        return a * x**2 + b
+    def _quadratic(x: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+        return a * x**2 + b * x + c
 
     fit_x = curve_fit(_quadratic, result['radii'], result['m_components'][:, 0])
     fit_y = curve_fit(_quadratic, result['radii'], result['m_components'][:, 1])
 
     m_x = _quadratic(0, *fit_x[0])
     m_y = _quadratic(0, *fit_y[0])
+
+    if plot:
+        plt.figure()
+        plt.scatter(result['radii'], result['m_components'][:, 0],
+                    label='m_x data')
+        plt.scatter(result['radii'], result['m_components'][:, 1],
+                    label='m_y data')
+        plt.plot(result['radii'], _quadratic(result['radii'], *fit_x[0]),
+                 'r--', label='m_x fit')
+        plt.plot(result['radii'], _quadratic(result['radii'], *fit_y[0]),
+                 'b--', label='m_y fit')
+        plt.xlabel('Radius (m)')
+        plt.ylabel('Magnetic Moment Component (Am²)')
+        plt.title('Quadratic Fit of Magnetic Moment Components')
+        plt.legend()
+        plt.show()
 
     return m_x, m_y
 
@@ -223,6 +244,50 @@ def phase_uniform_rod(
         )
     )
     return phase_map
+
+
+def phase_uniform_sphere(
+    dim: tuple,
+    R: float,
+    b_0: float,
+    phi: float = np.pi/2,
+    theta: float = np.pi/2,
+    a: float = 1e-9,
+) -> np.ndarray:
+    """Calculate the 2D phase map for a uniformly magnetized sphere in SI units.
+
+    Parameters
+    ----------
+    dim : tuple (int, int)
+        Dimensions of the field of view in pixels (y_dim, x_dim).
+    R : float
+        Radius of the sphere in meters.
+    b_0 : float
+        Magnetic induction in tesla (T).
+    phi : float, optional
+        Azimuthal angle of magnetization in radians (default: π/2).
+    theta : float, optional
+        Polar angle of magnetization in radians (default: π/2).
+    a : float, optional
+        Pixel size in meters (default: 1e-9 m).
+
+    Returns
+    -------
+    numpy.ndarray
+        2D array of phase values in radians.
+
+    """
+    y_dim, x_dim = dim
+    x = (np.arange(x_dim) - (x_dim - 1) / 2) * a
+    y = (np.arange(y_dim) - (y_dim - 1) / 2) * a
+    xx, yy = np.meshgrid(x, y)
+    b_perp = b_0 * np.sin(theta)
+    coeff = -(2.0 / 3.0) * np.pi * b_perp / PHI_0
+    r_squared = np.maximum(xx**2 + yy**2, 1e-30)
+    angular = yy * np.cos(phi) - xx * np.sin(phi)
+    radial = 1 - np.clip(1 - r_squared / (R**2 + 1e-30), 0, 1) ** (3 / 2)
+    phase_map = coeff * R**3 * angular / r_squared * radial
+    return np.nan_to_num(phase_map)
 
 
 def profile_uniform_sphere(
