@@ -44,10 +44,8 @@ def _default_params():
 def test_physical_constants_units():
     assert str(ELEMENTARY_CHARGE.unit) == "C"
     assert str(HBAR.unit) == "J s"
-    # Flux quantum is T m² (unit string may vary in component order)
-    flux_unit_str = str(FLUX_QUANTUM.unit)
-    assert "T" in flux_unit_str
-    assert "m" in flux_unit_str
+    # Flux quantum is expressed in Weber (Wb = T·m²)
+    assert str(FLUX_QUANTUM.unit) == "Wb"
 
 
 def test_physical_constants_values():

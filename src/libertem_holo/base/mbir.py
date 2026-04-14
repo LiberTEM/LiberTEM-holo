@@ -45,7 +45,7 @@ ELEMENTARY_CHARGE: unxt.Quantity = unxt.Quantity(1.602176634e-19, "C")
 HBAR: unxt.Quantity = unxt.Quantity(1.054571817e-34, "J s")
 
 #: Magnetic flux quantum  Φ₀ = h / (2e)
-FLUX_QUANTUM: unxt.Quantity = unxt.Quantity(2.067833848e-15, "T m2")
+FLUX_QUANTUM: unxt.Quantity = unxt.Quantity(2.067833848e-15, "Wb")
 
 
 @dataclass
