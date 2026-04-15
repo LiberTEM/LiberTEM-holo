@@ -893,7 +893,6 @@ class TestReconstruct2D:
             phase=jnp.array(sp["phase"]),
             pixel_size_nm=sp["voxel_size"],
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             mask=jnp.array(sp["mask"]),
             lam=1e-3,
             solver="newton_cg",
@@ -907,7 +906,6 @@ class TestReconstruct2D:
             phase=jnp.array(sp["phase"]),
             pixel_size_nm=sp["voxel_size"],
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             mask=None,
         )
         assert isinstance(result, SolverResult)
@@ -918,7 +916,6 @@ class TestReconstruct2D:
             phase=jnp.array(sp["phase"]),
             pixel_size_nm=sp["voxel_size"],
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             mask=jnp.array(sp["mask"]),
             solver="adam",  # this should be overridden
             solver_config=NewtonCGConfig(cg_maxiter=200),
@@ -1026,7 +1023,6 @@ class TestLCurveSweep:
             pixel_size_nm=sp["voxel_size"],
             lambdas=lambdas,
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             solver="newton_cg",
             rdfc_kernel=sp["kernel"],
         )
@@ -1046,7 +1042,6 @@ class TestLCurveSweep:
             pixel_size_nm=sp["voxel_size"],
             lambdas=lambdas,
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             rdfc_kernel=sp["kernel"],
         )
         # Should be sorted
@@ -1063,7 +1058,6 @@ class TestLCurveSweep:
             pixel_size_nm=sp["voxel_size"],
             lambdas=lambdas,
             b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
             rdfc_kernel=sp["kernel"],
         )
         assert np.all(np.isfinite(result.data_misfits))
@@ -1797,7 +1791,6 @@ class TestMBIRAnalyticRoundTrip:
             phase=jnp.array(s["fwd_phase"]),
             pixel_size_nm=s["a"],
             b0_tesla=s["b_0"],
-            thickness=s["a"],
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1860,7 +1853,6 @@ class TestMBIRAnalyticRoundTrip:
             phase=jnp.array(s["analytic_phase"]),
             pixel_size_nm=s["a"],
             b0_tesla=s["b_0"],
-            thickness=s["a"],
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1994,7 +1986,6 @@ class TestMBIRAnalyticRoundTrip:
             phase=jnp.array(analytic_phase),
             pixel_size_nm=a,
             b0_tesla=b0,
-            thickness=a,
             mask=jnp.array(mask_2d),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2089,7 +2080,6 @@ class TestMBIRRoundTripNotebookParams:
             phase=jnp.array(p["fwd_phase"]),
             pixel_size_nm=p["a"],
             b0_tesla=p["b0"],
-            thickness=p["a"],
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2134,7 +2124,6 @@ class TestMBIRRoundTripNotebookParams:
             phase=jnp.array(p["fwd_phase"]),
             pixel_size_nm=p["a"],
             b0_tesla=p["b0"],
-            thickness=p["a"],
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2157,7 +2146,6 @@ class TestMBIRRoundTripNotebookParams:
             phase=jnp.array(p["fwd_phase"]),
             pixel_size_nm=p["a"],
             b0_tesla=p["b0"],
-            thickness=p["a"],
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2250,7 +2238,6 @@ class TestPyramidCrossValidation:
             phase=jnp.array(phase),
             pixel_size_nm=self.A,
             b0_tesla=self.B0,
-            thickness=self.A,
             mask=jnp.array(mask),
             lam=self.LAM,
             solver="newton_cg",
@@ -2288,8 +2275,8 @@ pyramid = pytest.importorskip("pyramid")
 
 
 class TestProjectedMagnetizationNormalization:
-    """Verify that MBIR recovers the *projected* (thickness-integrated)
-    magnetization, and that dividing by the number of thickness voxels
+    """Verify that MBIR recovers the projected magnetization,
+    and that dividing by the number of voxels along z
     gives back the per-voxel magnetization.
 
     The synthetic workflow is:
@@ -2307,7 +2294,7 @@ class TestProjectedMagnetizationNormalization:
 
     N = 32
     R = 10
-    H = 10          # disc thickness in voxels
+    H = 10          # disc height in voxels
     PX = 1.0        # voxel size in nm
     B0 = 1.25       # Tesla
     PHI = np.pi / 2  # magnetization along y
@@ -2404,7 +2391,6 @@ class TestProjectedMagnetizationNormalization:
             phase=jnp.array(p["phase_rdfc"]),
             pixel_size_nm=self.PX,
             b0_tesla=self.B0,
-            thickness=self.PX,
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2426,14 +2412,13 @@ class TestProjectedMagnetizationNormalization:
         assert_allclose(rec_norm, float(self.H), rtol=1e-3,
                         err_msg=f"|M| should match projected value {self.H}")
 
-    def test_per_voxel_magnetization_via_thickness(self, disc_3d):
-        """Dividing the projected M by thickness recovers per-voxel M = 1."""
+    def test_projected_magnetization_divided_by_height_recovers_per_voxel(self, disc_3d):
+        """Dividing the projected M by the disc height recovers per-voxel M = 1."""
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
             pixel_size_nm=self.PX,
             b0_tesla=self.B0,
-            thickness=self.PX,
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2448,46 +2433,6 @@ class TestProjectedMagnetizationNormalization:
         assert_allclose(per_voxel, 1.0, rtol=1e-3,
                         err_msg="projected |M| / H should give per-voxel M = 1")
 
-    def test_thickness_parameter_gives_per_voxel(self, disc_3d):
-        """The ``thickness`` kwarg in ``reconstruct_2d`` divides M by H."""
-        p = disc_3d
-        result = reconstruct_2d(
-            phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
-            mask=jnp.array(p["mask"]),
-            lam=1e-10,
-            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
-            geometry="disc",
-            rdfc_kernel=p["kern_lt"],
-            thickness=self.H * self.PX,  # H voxels expressed in nm
-        )
-        rec = np.asarray(result.magnetization)
-        inside = p["mask"] > 0.5
-        rec_norm = np.sqrt(rec[inside, 0] ** 2 + rec[inside, 1] ** 2).mean()
-
-        assert_allclose(rec_norm, 1.0, rtol=1e-3,
-                        err_msg="reconstruct_2d(thickness=H) should give |M| ≈ 1")
-
-    def test_forward_model_thickness_roundtrip(self, disc_3d):
-        """forward_model_2d(thickness=H) round-trips with reconstruct_2d(thickness=H)."""
-        p = disc_3d
-        # Per-voxel magnetization: Mx=0, My=1 inside disc
-        inside = p["mask"] > 0.5
-        mag_per_voxel = np.zeros((self.N, self.N, 2))
-        mag_per_voxel[inside, 1] = 1.0  # unit My
-
-        phase_from_per_voxel = np.asarray(forward_model_2d(
-            jnp.array(mag_per_voxel), self.PX,
-            b0_tesla=self.B0, rdfc_kernel=p["kern_lt"],
-            thickness=self.H * self.PX,  # H voxels expressed in nm
-        ))
-        # This should equal the RDFC phase (from projected M = H)
-        assert_allclose(
-            phase_from_per_voxel, p["phase_rdfc"], atol=1e-10,
-            err_msg="forward_model_2d(per_voxel, thickness=H) should match projected phase",
-        )
-
     def test_fdfc_phase_gives_wrong_magnetization(self, disc_3d):
         """Using FDFC-generated phase with RDFC reconstruction is wrong.
 
@@ -2501,7 +2446,6 @@ class TestProjectedMagnetizationNormalization:
             phase=jnp.array(p["phase_fdfc"]),
             pixel_size_nm=self.PX,
             b0_tesla=self.B0,
-            thickness=self.PX,
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),

@@ -6,8 +6,6 @@ All functions in this module follow these naming and unit rules:
 
 * ``pixel_size_nm`` — pixel side length in **nanometres** (nm).
 * ``b0_tesla`` — saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla** (T).
-* ``thickness`` — sample thickness along the beam direction in **nanometres** (nm).
-  Converted internally to voxels via ``thickness / pixel_size_nm``.
 * ``phase`` — measured holographic phase in **radians** (rad).
 * ``ramp_coeffs`` — background phase-ramp parameters
   ``[offset, slope_y, slope_x]`` with units **[rad, rad/nm, rad/nm]**.
@@ -65,12 +63,8 @@ class SolverResult(NamedTuple):
     Attributes
     ----------
     magnetization : jnp.ndarray
-        Reconstructed in-plane magnetization of shape ``(N, M, 2)``.
-        When *thickness* is ``None`` (the default), this is the
-        **projected** (thickness-integrated) magnetization.  When
-        *thickness* is provided (in nm), the result is divided by
-        the thickness in voxels so that it represents the per-voxel
-        value.
+        Reconstructed projected in-plane magnetization of shape
+        ``(N, M, 2)``.
 
         The physical meaning of the values depends on *b0_tesla*:
         with ``b0_tesla`` equal to the true :math:`\\mu_0 M_s` the
@@ -101,7 +95,6 @@ class LCurveResult(NamedTuple):
         Regularization norm for each lambda.
     magnetizations : jnp.ndarray
         Reconstructed magnetizations, shape ``(n_lambdas, N, M, 2)``.
-        When *thickness* is provided, these are per-voxel values.
         See :class:`SolverResult` for how *b0_tesla* affects units.
     ramp_coeffs : jnp.ndarray
         Background ramp coefficients per lambda, in units of
@@ -1176,7 +1169,6 @@ def reconstruct_2d(
     phase,
     pixel_size_nm,
     b0_tesla,
-    thickness,
     mask,
     lam=1e-3,
     solver="newton_cg",
@@ -1202,14 +1194,6 @@ def reconstruct_2d(
         Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
         Determines the scale of the returned magnetization — see
         *Notes* below.
-    thickness : float or array_like
-        Sample thickness in **nanometres** (nm) along the beam
-        direction.  Converted to voxels internally via
-        ``thickness / pixel_size_nm``.  The returned magnetization
-        is divided by the thickness in voxels so that it represents
-        the per-voxel value rather than the projected
-        (thickness-integrated) value.  May be a scalar or a 2-D
-        map of shape ``(N, M)``.
     mask : array_like, optional
         Binary mask of shape ``(N, M)``.  Defaults to all ones.
     lam : float, optional
@@ -1250,7 +1234,6 @@ def reconstruct_2d(
     the output has units of **Tesla**.
     """
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
 
     phase = jnp.asarray(phase)
     if mask is None:
@@ -1282,12 +1265,7 @@ def reconstruct_2d(
         rdfc_kernel=rdfc_kernel,
         reg_mask=reg_mask,
     )
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
-    if thickness_vox.ndim >= 2:
-        thickness_vox = thickness_vox[..., jnp.newaxis]
-
-    mag = result.magnetization / thickness_vox
+    mag = result.magnetization
 
     return SolverResult(
         magnetization=mag,
@@ -1304,7 +1282,6 @@ def forward_model_2d(
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
-    thickness=None,
 ):
     """Convenience forward model for 2D projected magnetization.
 
@@ -1315,9 +1292,7 @@ def forward_model_2d(
     ----------
     magnetization : array_like
         In-plane magnetization of shape ``(N, M, 2)`` where the
-        last axis holds the (u, v) components.  If *thickness*
-        is provided, the magnetization is assumed to be per-voxel
-        and is multiplied by *thickness* before forward modeling.
+        last axis holds the (u, v) components.
     pixel_size_nm : float
         Pixel size in **nanometres** (nm).  Must be positive.
     b0_tesla : float, optional
@@ -1336,13 +1311,6 @@ def forward_model_2d(
     rdfc_kernel : dict, optional
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
         Built automatically when not provided.
-    thickness : float, optional
-        Sample thickness in **nanometres** (nm) along the beam
-        direction.  When provided, the magnetization is multiplied
-        by the thickness in voxels (``thickness / pixel_size_nm``)
-        before computing the phase (converting per-voxel to
-        projected magnetization).  Default ``None`` assumes the
-        input is already projected.
 
     Returns
     -------
@@ -1350,12 +1318,8 @@ def forward_model_2d(
         Predicted phase image of shape ``(N, M)`` in **radians**.
     """
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    if thickness is not None:
-        _validate_positive(thickness, "thickness")
 
     magnetization = jnp.asarray(magnetization)
-    if thickness is not None:
-        magnetization = magnetization * (thickness / pixel_size_nm)
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             magnetization.shape[:2],
@@ -2020,7 +1984,6 @@ def lcurve_sweep(
     pixel_size_nm,
     lambdas,
     b0_tesla,
-    thickness,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
@@ -2048,11 +2011,6 @@ def lcurve_sweep(
     b0_tesla : float
         Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
         See :class:`SolverResult` for how this affects units.
-    thickness : float or array_like
-        Sample thickness in **nanometres** (nm).  The returned
-        magnetizations are divided by the thickness in voxels
-        (``thickness / pixel_size_nm``) to give per-voxel values.
-        May be a scalar or a 2-D map of shape ``(N, M)``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.
@@ -2081,7 +2039,6 @@ def lcurve_sweep(
         ``corner_index``.
     """
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
 
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
@@ -2138,11 +2095,6 @@ def lcurve_sweep(
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
     all_mag = jnp.stack(mag_list)
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
-    if thickness_vox.ndim >= 2:
-        thickness_vox = thickness_vox[..., jnp.newaxis]
-    all_mag = all_mag / thickness_vox
 
     return LCurveResult(
         lambdas=lambdas,
@@ -2160,7 +2112,6 @@ def lcurve_sweep_vmap(
     pixel_size_nm,
     lambdas,
     b0_tesla,
-    thickness,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
@@ -2188,11 +2139,6 @@ def lcurve_sweep_vmap(
     b0_tesla : float
         Saturation induction :math:`B_0 = \\mu_0 M_s` in **Tesla**.
         See :class:`SolverResult` for how this affects units.
-    thickness : float or array_like
-        Sample thickness in **nanometres** (nm).  The returned
-        magnetizations are divided by the thickness in voxels
-        (``thickness / pixel_size_nm``) to give per-voxel values.
-        May be a scalar or a 2-D map of shape ``(N, M)``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.
@@ -2227,7 +2173,6 @@ def lcurve_sweep_vmap(
     the maximum number of steps.
     """
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
 
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
@@ -2343,11 +2288,7 @@ def lcurve_sweep_vmap(
     reg_norms = np.asarray(all_rn)
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
-    if thickness_vox.ndim >= 2:
-        thickness_vox = thickness_vox[..., jnp.newaxis]
-    all_mag = all_mag / thickness_vox
+    all_mag = all_mag
 
     return LCurveResult(
         lambdas=lambdas_np,
