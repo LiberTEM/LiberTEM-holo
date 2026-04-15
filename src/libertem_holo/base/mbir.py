@@ -40,19 +40,13 @@ import dataclasses
 from typing import Any, NamedTuple, Union
 
 import jax
-import quaxed.numpy as jnp
-import quaxed
+import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 import optax
 import numpy as np
 import unxt as u
 
-# quaxed.numpy.fft lacks rfft2/irfft2; shim them via rfftn/irfftn
-if not hasattr(jnp.fft, "rfft2"):
-    jnp.fft.rfft2 = lambda x, s=None, axes=(-2, -1): jnp.fft.rfftn(x, s=s, axes=axes)
-    jnp.fft.irfft2 = lambda x, s=None, axes=(-2, -1): jnp.fft.irfftn(x, s=s, axes=axes)
-
-PHI_0 = u.Quantity(2067.83, "T nm2")  # magnetic flux quantum h/(2e)
+PHI_0 = u.Quantity(2067.83, "T nm2 / rad")  # magnetic flux quantum h/(2e)
 PHI_0_T_NM2 = 2067.83  # backward-compatible plain-float alias
 
 
@@ -429,8 +423,10 @@ def forward_diff_norm(
 def get_freq_grid(
     height: int,
     width: int,
-    pixel_size_nm: float,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    pixel_size=None,
+    *,
+    pixel_size_nm=None,
+) -> tuple:
     """Build frequency grids for FFT-based phase propagation.
 
     Parameters
@@ -439,8 +435,10 @@ def get_freq_grid(
         Number of pixels along the y-axis.
     width
         Number of pixels along the x-axis.
+    pixel_size
+        Pixel size as ``Quantity["length"]`` or plain float (nm).
     pixel_size_nm
-        Pixel size in nanometres, used as the FFT sampling interval.
+        Legacy pixel size in nanometres (float).
 
     Returns
     -------
@@ -452,8 +450,12 @@ def get_freq_grid(
         ``f_x**2 + f_y**2`` with the zero-frequency bin set to 1
         to avoid division by zero.
     """
-    fy = jnp.fft.fftfreq(height, d=pixel_size_nm)
-    fx = jnp.fft.rfftfreq(width, d=pixel_size_nm)
+    if pixel_size is None and pixel_size_nm is not None:
+        pixel_size = pixel_size_nm
+    pixel_size = _ensure_quantity_pixel_size(pixel_size)
+    pixel_size_val = _to_nm(pixel_size).value
+    fy = jnp.fft.fftfreq(height, d=pixel_size_val)
+    fx = jnp.fft.rfftfreq(width, d=pixel_size_val)
     f_y, f_x = jnp.meshgrid(fy, fx, indexing="ij")
     denom = f_x**2 + f_y**2
     denom = jnp.where(denom == 0, 1.0, denom)
@@ -499,27 +501,50 @@ def _rdfc_elementary_phase(
     raise ValueError("Unknown geometry (use 'disc' or 'slab')")
 
 
-@jax.jit(static_argnames=["dim_uv", "b0_tesla", "geometry", "dtype"])
-def build_rdfc_kernel(
+def _ensure_quantity_b0(b0):
+    """Convert b0 argument to Quantity if it's a plain float/int."""
+    if isinstance(b0, u.Quantity):
+        return b0
+    return u.Quantity(float(b0), "T")
+
+
+def _ensure_quantity_pixel_size(pixel_size):
+    """Convert pixel_size argument to Quantity if it's a plain float/int."""
+    if isinstance(pixel_size, u.Quantity):
+        return pixel_size
+    return u.Quantity(float(pixel_size), "nm")
+
+
+def _ensure_ramp_coeffs(ramp_coeffs):
+    """Convert ramp_coeffs to RampCoeffs if it's a flat array."""
+    if isinstance(ramp_coeffs, RampCoeffs):
+        return ramp_coeffs
+    # Legacy flat array [offset, slope_y, slope_x]
+    return RampCoeffs(
+        offset=u.Quantity(ramp_coeffs[0], "rad"),
+        slope_y=u.Quantity(ramp_coeffs[1], "rad/nm"),
+        slope_x=u.Quantity(ramp_coeffs[2], "rad/nm"),
+    )
+
+
+@jax.jit(static_argnames=["dim_uv", "geometry", "dtype"])
+def _build_rdfc_kernel_impl(
     dim_uv: tuple[int, int],
-    b0_tesla: float = 1.0,
+    b0_val: float,
     geometry: str = "disc",
     prw_vec: jax.Array | None = None,
     dtype: type = jnp.float64,
 ) -> dict[str, Any]:
     """Build an RDFC phase-mapping kernel in Fourier space (JIT-compiled).
 
-    The kernel coefficient is ``b0_tesla / (2 * PHI_0_T_NM2)`` with
-    units of :math:`1/\\text{nm}^2`.  When multiplied by voxel-area
-    sums in the elementary-phase functions and by ``pixel_size_nm``
-    in the forward model, the final phase has units of **radians**.
+    Operates on plain arrays only — no Quantity inside the trace.
 
     Parameters
     ----------
     dim_uv : tuple[int, int]
         Image dimensions ``(height, width)``.
-    b0_tesla : float, optional
-        Saturation induction in **Tesla**, default 1.0.
+    b0_val : float
+        Saturation induction in Tesla (plain float).
     geometry : str, optional
         ``"disc"`` or ``"slab"``, default ``"disc"``.
     prw_vec : jax.Array or None, optional
@@ -530,9 +555,12 @@ def build_rdfc_kernel(
     Returns
     -------
     dict
-        Dictionary with keys ``"u_fft"``, ``"v_fft"``, ``"dim_uv"``,
-        and ``"dim_pad"``.
+        Dictionary with keys ``"u_fft"``, ``"v_fft"`` (complex
+        JAX arrays with coeff baked in), ``"dim_uv"``, and
+        ``"dim_pad"``.
     """
+    coeff_val = b0_val / (2 * PHI_0_T_NM2)
+
     height, width = dim_uv
     dim_kern = (2 * height - 1, 2 * width - 1)
     dim_pad = (2 * height, 2 * width)
@@ -541,22 +569,19 @@ def build_rdfc_kernel(
     v_coords = jnp.linspace(-(height - 1), height - 1, num=dim_kern[0]).astype(dtype)
     uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
 
-    coeff = b0_tesla / (2 * PHI_0_T_NM2)
-    
-    # Compute elementary phases once
     elem_uv = _rdfc_elementary_phase(geometry, uu, vv)
     elem_vu = _rdfc_elementary_phase(geometry, vv, uu)
-    
-    u_kernel = coeff * elem_uv
-    v_kernel = -coeff * elem_vu
+
+    u_kernel = coeff_val * elem_uv
+    v_kernel = -coeff_val * elem_vu
 
     if prw_vec is not None:
         uu_prw = uu + prw_vec[1]
         vv_prw = vv + prw_vec[0]
         elem_prw_uv = _rdfc_elementary_phase(geometry, uu_prw, vv_prw)
         elem_prw_vu = _rdfc_elementary_phase(geometry, vv_prw, uu_prw)
-        u_kernel = u_kernel - coeff * elem_prw_uv
-        v_kernel = v_kernel + coeff * elem_prw_vu
+        u_kernel = u_kernel - coeff_val * elem_prw_uv
+        v_kernel = v_kernel + coeff_val * elem_prw_vu
 
     u_pad = jnp.zeros(dim_pad, dtype=dtype).at[:dim_kern[0], :dim_kern[1]].set(u_kernel)
     v_pad = jnp.zeros(dim_pad, dtype=dtype).at[:dim_kern[0], :dim_kern[1]].set(v_kernel)
@@ -567,6 +592,34 @@ def build_rdfc_kernel(
         "dim_uv": dim_uv,
         "dim_pad": dim_pad,
     }
+
+
+def build_rdfc_kernel(
+    dim_uv,
+    b0=None,
+    geometry="disc",
+    prw_vec=None,
+    dtype=jnp.float64,
+    *,
+    b0_tesla=None,
+):
+    """Build an RDFC phase-mapping kernel in Fourier space.
+
+    Accepts either ``b0`` (Quantity) or ``b0_tesla`` (float, legacy).
+    See :func:`_build_rdfc_kernel_impl` for full documentation.
+    """
+    if b0 is None and b0_tesla is None:
+        b0 = u.Quantity(1.0, "T")
+    elif b0_tesla is not None:
+        b0 = _ensure_quantity_b0(b0_tesla)
+    else:
+        b0 = _ensure_quantity_b0(b0)
+    b0 = _to_tesla(b0)
+    result = _build_rdfc_kernel_impl(
+        dim_uv, b0_val=b0.value, geometry=geometry, prw_vec=prw_vec, dtype=dtype,
+    )
+    result["coeff"] = b0 / (2 * PHI_0)  # Quantity["rad / nm2"]
+    return result
 
 
 def phase_mapper_rdfc(
@@ -583,15 +636,20 @@ def phase_mapper_rdfc(
     ----------
     u_field
         In-plane magnetization component along x, shape ``(H, W)``.
+        Dimensionless (plain JAX array).
     v_field
         In-plane magnetization component along y, shape ``(H, W)``.
+        Dimensionless (plain JAX array).
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+        The coefficient is baked into the FFT arrays.
 
     Returns
     -------
     jax.Array
-        Magnetic phase-shift image of shape ``(H, W)``.
+        Magnetic phase-shift image of shape ``(H, W)``.  The
+        result has implicit units of ``rad/nm²`` (coeff baked in);
+        multiply by ``pixel_size**2`` for radians.
     """
     height, width = u_field.shape
     dim_pad = (2 * height, 2 * width)
@@ -612,31 +670,13 @@ def phase_mapper_rdfc(
     )
 
 
-def apply_ramp(
+def _apply_ramp_plain(
     ramp_coeffs: jax.Array,
     height: int,
     width: int,
     pixel_size_nm: float,
 ) -> jax.Array:
-    """Generate a first-order 2D polynomial background ramp.
-
-    Parameters
-    ----------
-    ramp_coeffs
-        Array of ``[offset, slope_y, slope_x]`` in units of
-        **[rad, rad/nm, rad/nm]**.
-    height
-        Number of pixels along the y-axis.
-    width
-        Number of pixels along the x-axis.
-    pixel_size_nm
-        Pixel size in **nanometres** (nm).
-
-    Returns
-    -------
-    jax.Array
-        Ramp image of shape ``(height, width)`` in **radians**.
-    """
+    """Plain-array ramp for use inside JIT-traced forward models."""
     y, x = jnp.meshgrid(jnp.arange(height), jnp.arange(width), indexing="ij")
     ramp = ramp_coeffs[0]
     if ramp_coeffs.shape[0] > 1:
@@ -645,28 +685,76 @@ def apply_ramp(
     return ramp
 
 
+def apply_ramp(
+    ramp_coeffs,
+    height: int,
+    width: int,
+    pixel_size=None,
+    *,
+    pixel_size_nm=None,
+):
+    """Generate a first-order 2D polynomial background ramp.
+
+    Accepts either ``RampCoeffs`` + ``Quantity["length"]`` (new API)
+    or a flat array + float nm (legacy).
+
+    Parameters
+    ----------
+    ramp_coeffs
+        :class:`RampCoeffs` or legacy flat array of shape ``(3,)``
+        with ``[offset, slope_y, slope_x]``.
+    height
+        Number of pixels along the y-axis.
+    width
+        Number of pixels along the x-axis.
+    pixel_size
+        Pixel size as ``Quantity["length"]``, or ``None`` when using
+        *pixel_size_nm*.
+    pixel_size_nm
+        Legacy pixel size in nanometres (float).
+
+    Returns
+    -------
+    Quantity["angle"] or jax.Array
+        Ramp image of shape ``(height, width)``.
+    """
+    if pixel_size is None and pixel_size_nm is not None:
+        pixel_size = pixel_size_nm
+    pixel_size = _ensure_quantity_pixel_size(pixel_size)
+    ramp_coeffs = _ensure_ramp_coeffs(ramp_coeffs)
+    ps_val = _to_nm(pixel_size).value
+    rc_arr = jnp.array([
+        ramp_coeffs.offset.value,
+        ramp_coeffs.slope_y.value * 1.0,  # already in rad/nm
+        ramp_coeffs.slope_x.value * 1.0,
+    ])
+    ramp = _apply_ramp_plain(rc_arr, height, width, ps_val)
+    return u.Quantity(ramp, "rad")
+
+
 def forward_model_single_rdfc_2d(
-    magnetization: jax.Array,
-    ramp_coeffs: jax.Array,
-    rdfc_kernel: dict[str, Any],
-    pixel_size_nm: float,
-) -> jax.Array:
+    magnetization,
+    ramp_coeffs,
+    rdfc_kernel,
+    pixel_size_nm,
+):
     """RDFC forward model mapping projected magnetization to phase.
 
-    Computes the magnetic phase shift from a 2D projected
-    magnetization field and adds a polynomial background ramp.
+    Operates on plain JAX arrays internally (no Quantity inside
+    the traced computation graph).
 
     Parameters
     ----------
     magnetization
         In-plane magnetization of shape ``(N, M, 2)`` where the
-        last axis holds the (u, v) components.
+        last axis holds the (u, v) components.  Plain JAX array.
     ramp_coeffs
         Background ramp coefficients ``[offset, slope_y, slope_x]``.
+        Plain JAX array of shape ``(3,)``.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
     pixel_size_nm
-        Pixel size in nanometres.
+        Pixel size in nanometres.  Plain float or scalar.
 
     Returns
     -------
@@ -678,9 +766,10 @@ def forward_model_single_rdfc_2d(
     u_field = magnetization[..., 0]
     v_field = magnetization[..., 1]
 
-    # Kernel is defined in pixel coordinates; convert to physical phase scale.
+    # Kernel has coeff baked in (units: 1/nm² implicit).
+    # Multiply by pixel_size² to get radians (implicit).
     phase = pixel_size_nm**2 * phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
-    ramp = apply_ramp(ramp_coeffs, height, width, pixel_size_nm)
+    ramp = _apply_ramp_plain(ramp_coeffs, height, width, pixel_size_nm)
 
     return phase + ramp
 
