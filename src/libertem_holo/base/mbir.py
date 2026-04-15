@@ -527,6 +527,31 @@ def _ensure_ramp_coeffs(ramp_coeffs):
     )
 
 
+def _resolve_pixel_size_nm(pixel_size, pixel_size_nm):
+    """Return pixel size in nm as a plain float from either new or legacy arg."""
+    if pixel_size is None and pixel_size_nm is not None:
+        pixel_size = pixel_size_nm
+    return _to_nm(_ensure_quantity_pixel_size(pixel_size)).value
+
+
+def _resolve_b0_tesla(b0, b0_tesla):
+    """Return B0 in Tesla as a plain float from either new or legacy arg."""
+    if b0 is None and b0_tesla is not None:
+        b0 = b0_tesla
+    if b0 is None:
+        return 1.0
+    return _to_tesla(_ensure_quantity_b0(b0)).value
+
+
+def _resolve_thickness_nm(thickness):
+    """Return thickness in nm as a plain float/array."""
+    if thickness is None:
+        return None
+    if isinstance(thickness, u.Quantity):
+        return _to_nm(thickness).value
+    return thickness
+
+
 @jax.jit(static_argnames=["dim_uv", "geometry", "dtype"])
 def _build_rdfc_kernel_impl(
     dim_uv: tuple[int, int],
@@ -1223,12 +1248,14 @@ def solve_mbir_2d(
     phase,
     init_mag,
     mask,
-    pixel_size_nm,
+    pixel_size=None,
     solver="newton_cg",
     reg_config=None,
     rdfc_kernel=None,
     init_ramp_coeffs=None,
     reg_mask=None,
+    *,
+    pixel_size_nm=None,
 ):
     """
     Unified MBIR solver for 2D projected magnetization reconstruction.
@@ -1270,6 +1297,8 @@ def solve_mbir_2d(
            For iterative solvers (Adam, L-BFGS) the ``loss_history`` array
            may contain trailing zeros if the solver stopped early.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+
     if isinstance(solver, str):
         solver_name = solver.lower()
         if solver_name not in _SOLVER_DEFAULTS:
@@ -1327,10 +1356,10 @@ def solve_mbir_2d(
 
 def reconstruct_2d(
     phase,
-    pixel_size_nm,
-    b0_tesla,
-    thickness,
-    mask,
+    pixel_size=None,
+    b0=None,
+    thickness=None,
+    mask=None,
     lam=1e-3,
     solver="newton_cg",
     reg_mask=None,
@@ -1338,6 +1367,9 @@ def reconstruct_2d(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Convenience wrapper for 2D MBIR magnetization reconstruction.
 
@@ -1402,6 +1434,9 @@ def reconstruct_2d(
     dimensionless, normalised :math:`M / M_s`.  With ``b0_tesla = 1.0``
     the output has units of **Tesla**.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
+    thickness = _resolve_thickness_nm(thickness)
     _validate_positive(pixel_size_nm, "pixel_size_nm")
     _validate_positive(thickness, "thickness")
 
@@ -1451,13 +1486,16 @@ def reconstruct_2d(
 
 def forward_model_2d(
     magnetization,
-    pixel_size_nm,
-    b0_tesla=1.0,
+    pixel_size=None,
+    b0=None,
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
     thickness=None,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Convenience forward model for 2D projected magnetization.
 
@@ -1502,6 +1540,9 @@ def forward_model_2d(
     jax.Array
         Predicted phase image of shape ``(N, M)`` in **radians**.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
+    thickness = _resolve_thickness_nm(thickness)
     _validate_positive(pixel_size_nm, "pixel_size_nm")
     if thickness is not None:
         _validate_positive(thickness, "thickness")
@@ -1529,8 +1570,8 @@ def forward_model_2d(
 def reconstruct_2d_ensemble(
     phase,
     masks,
-    pixel_size_nm,
-    b0_tesla=1.0,
+    pixel_size=None,
+    b0=None,
     lam=1e-3,
     solver="newton_cg",
     reg_masks=None,
@@ -1538,6 +1579,9 @@ def reconstruct_2d_ensemble(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Batched MBIR reconstruction over an ensemble of bootstrap masks.
 
@@ -1589,6 +1633,8 @@ def reconstruct_2d_ensemble(
     effectively disabled under ``vmap``; all bootstrap samples
     run for the maximum number of steps.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
     _validate_positive(pixel_size_nm, "pixel_size_nm")
 
     phase = jnp.asarray(phase)
@@ -1746,13 +1792,16 @@ def project_3d(
 
 def forward_model_3d(
     magnetization_3d,
-    pixel_size_nm,
-    b0_tesla=1.0,
+    pixel_size=None,
+    b0=None,
     axis="z",
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Convenience forward model for a 3D magnetization volume.
 
@@ -1792,8 +1841,8 @@ def forward_model_3d(
 
     return forward_model_2d(
         projected,
-        pixel_size_nm,
-        b0_tesla=b0_tesla,
+        pixel_size_nm=_resolve_pixel_size_nm(pixel_size, pixel_size_nm),
+        b0_tesla=_resolve_b0_tesla(b0, b0_tesla),
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
         prw_vec=prw_vec,
@@ -1808,8 +1857,9 @@ def decompose_loss(
     mask,
     reg_mask,
     rdfc_kernel,
-    pixel_size_nm,
+    pixel_size=None,
     *,
+    pixel_size_nm=None,
     pyramid_compat=False,
 ):
     """Decompose the MBIR loss into data-fidelity and regularization terms.
@@ -1856,6 +1906,7 @@ def decompose_loss(
         ``||Dx||²`` (forward differences); otherwise it uses the
         adaptive stencil from :func:`exchange_loss_fn`.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
     magnetization = jnp.asarray(magnetization)
     ramp_coeffs = jnp.asarray(ramp_coeffs)
     phase = jnp.asarray(phase)
@@ -1883,8 +1934,8 @@ def bootstrap_threshold_uncertainty_2d(
     phase,
     mip_phase,
     threshold,
-    pixel_size_nm,
-    b0_tesla=1.0,
+    pixel_size=None,
+    b0=None,
     lam=1e-3,
     solver="newton_cg",
     n_boot=50,
@@ -1895,6 +1946,9 @@ def bootstrap_threshold_uncertainty_2d(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Bootstrap a thresholded mask ensemble and summarize the uncertainty.
 
@@ -1948,6 +2002,8 @@ def bootstrap_threshold_uncertainty_2d(
         magnetizations, 2.5th and 97.5th percentile maps, their 95% width,
         the relative 95% width, and the mask inclusion frequency.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
     phase = jnp.asarray(phase)
     mip_phase = jnp.asarray(mip_phase)
     if phase.shape != mip_phase.shape:
@@ -2170,10 +2226,10 @@ def kneedle_corner(data_misfits, reg_norms):
 def lcurve_sweep(
     phase,
     mask,
-    pixel_size_nm,
-    lambdas,
-    b0_tesla,
-    thickness,
+    pixel_size=None,
+    lambdas=None,
+    b0=None,
+    thickness=None,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
@@ -2181,6 +2237,9 @@ def lcurve_sweep(
     rdfc_kernel=None,
     solver_config=None,
     pyramid_compat=False,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Sequential L-curve sweep over regularization weights.
 
@@ -2233,6 +2292,9 @@ def lcurve_sweep(
         ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
         ``corner_index``.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
+    thickness = _resolve_thickness_nm(thickness)
     _validate_positive(pixel_size_nm, "pixel_size_nm")
     _validate_positive(thickness, "thickness")
 
@@ -2310,10 +2372,10 @@ def lcurve_sweep(
 def lcurve_sweep_vmap(
     phase,
     mask,
-    pixel_size_nm,
-    lambdas,
-    b0_tesla,
-    thickness,
+    pixel_size=None,
+    lambdas=None,
+    b0=None,
+    thickness=None,
     solver="newton_cg",
     reg_mask=None,
     geometry="disc",
@@ -2321,6 +2383,9 @@ def lcurve_sweep_vmap(
     rdfc_kernel=None,
     solver_config=None,
     pyramid_compat=False,
+    *,
+    pixel_size_nm=None,
+    b0_tesla=None,
 ):
     """Parallel L-curve sweep using ``jax.vmap`` over lambda values.
 
@@ -2379,6 +2444,9 @@ def lcurve_sweep_vmap(
     effectively disabled under ``vmap``; all lambda values run for
     the maximum number of steps.
     """
+    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
+    thickness = _resolve_thickness_nm(thickness)
     _validate_positive(pixel_size_nm, "pixel_size_nm")
     _validate_positive(thickness, "thickness")
 
