@@ -423,9 +423,7 @@ def forward_diff_norm(
 def get_freq_grid(
     height: int,
     width: int,
-    pixel_size=None,
-    *,
-    pixel_size_nm=None,
+    pixel_size: u.Quantity,
 ) -> tuple:
     """Build frequency grids for FFT-based phase propagation.
 
@@ -435,10 +433,8 @@ def get_freq_grid(
         Number of pixels along the y-axis.
     width
         Number of pixels along the x-axis.
-    pixel_size
-        Pixel size as ``Quantity["length"]`` or plain float (nm).
-    pixel_size_nm
-        Legacy pixel size in nanometres (float).
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
 
     Returns
     -------
@@ -450,9 +446,6 @@ def get_freq_grid(
         ``f_x**2 + f_y**2`` with the zero-frequency bin set to 1
         to avoid division by zero.
     """
-    if pixel_size is None and pixel_size_nm is not None:
-        pixel_size = pixel_size_nm
-    pixel_size = _ensure_quantity_pixel_size(pixel_size)
     pixel_size_val = _to_nm(pixel_size).value
     fy = jnp.fft.fftfreq(height, d=pixel_size_val)
     fx = jnp.fft.rfftfreq(width, d=pixel_size_val)
@@ -501,55 +494,7 @@ def _rdfc_elementary_phase(
     raise ValueError("Unknown geometry (use 'disc' or 'slab')")
 
 
-def _ensure_quantity_b0(b0):
-    """Convert b0 argument to Quantity if it's a plain float/int."""
-    if isinstance(b0, u.Quantity):
-        return b0
-    return u.Quantity(float(b0), "T")
 
-
-def _ensure_quantity_pixel_size(pixel_size):
-    """Convert pixel_size argument to Quantity if it's a plain float/int."""
-    if isinstance(pixel_size, u.Quantity):
-        return pixel_size
-    return u.Quantity(float(pixel_size), "nm")
-
-
-def _ensure_ramp_coeffs(ramp_coeffs):
-    """Convert ramp_coeffs to RampCoeffs if it's a flat array."""
-    if isinstance(ramp_coeffs, RampCoeffs):
-        return ramp_coeffs
-    # Legacy flat array [offset, slope_y, slope_x]
-    return RampCoeffs(
-        offset=u.Quantity(ramp_coeffs[0], "rad"),
-        slope_y=u.Quantity(ramp_coeffs[1], "rad/nm"),
-        slope_x=u.Quantity(ramp_coeffs[2], "rad/nm"),
-    )
-
-
-def _resolve_pixel_size_nm(pixel_size, pixel_size_nm):
-    """Return pixel size in nm as a plain float from either new or legacy arg."""
-    if pixel_size is None and pixel_size_nm is not None:
-        pixel_size = pixel_size_nm
-    return _to_nm(_ensure_quantity_pixel_size(pixel_size)).value
-
-
-def _resolve_b0_tesla(b0, b0_tesla):
-    """Return B0 in Tesla as a plain float from either new or legacy arg."""
-    if b0 is None and b0_tesla is not None:
-        b0 = b0_tesla
-    if b0 is None:
-        return 1.0
-    return _to_tesla(_ensure_quantity_b0(b0)).value
-
-
-def _resolve_thickness_nm(thickness):
-    """Return thickness in nm as a plain float/array."""
-    if thickness is None:
-        return None
-    if isinstance(thickness, u.Quantity):
-        return _to_nm(thickness).value
-    return thickness
 
 
 @jax.jit(static_argnames=["dim_uv", "geometry", "dtype"])
@@ -621,24 +566,32 @@ def _build_rdfc_kernel_impl(
 
 def build_rdfc_kernel(
     dim_uv,
-    b0=None,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     geometry="disc",
     prw_vec=None,
     dtype=jnp.float64,
-    *,
-    b0_tesla=None,
 ):
     """Build an RDFC phase-mapping kernel in Fourier space.
 
-    Accepts either ``b0`` (Quantity) or ``b0_tesla`` (float, legacy).
-    See :func:`_build_rdfc_kernel_impl` for full documentation.
+    Parameters
+    ----------
+    dim_uv : tuple[int, int]
+        Image dimensions ``(height, width)``.
+    b0 : Quantity["magnetic flux density"]
+        Saturation induction, default ``Quantity(1.0, "T")``.
+    geometry : str, optional
+        ``"disc"`` or ``"slab"``, default ``"disc"``.
+    prw_vec : array_like or None, optional
+        Projected reference wave vector ``(v, u)``.
+    dtype : type, optional
+        JAX float dtype, default ``jnp.float64``.
+
+    Returns
+    -------
+    dict
+        Dictionary with keys ``"u_fft"``, ``"v_fft"``,
+        ``"coeff"``, ``"dim_uv"``, and ``"dim_pad"``.
     """
-    if b0 is None and b0_tesla is None:
-        b0 = u.Quantity(1.0, "T")
-    elif b0_tesla is not None:
-        b0 = _ensure_quantity_b0(b0_tesla)
-    else:
-        b0 = _ensure_quantity_b0(b0)
     b0 = _to_tesla(b0)
     result = _build_rdfc_kernel_impl(
         dim_uv, b0_val=b0.value, geometry=geometry, prw_vec=prw_vec, dtype=dtype,
@@ -711,47 +664,34 @@ def _apply_ramp_plain(
 
 
 def apply_ramp(
-    ramp_coeffs,
+    ramp_coeffs: RampCoeffs,
     height: int,
     width: int,
-    pixel_size=None,
-    *,
-    pixel_size_nm=None,
+    pixel_size: u.Quantity,
 ):
     """Generate a first-order 2D polynomial background ramp.
 
-    Accepts either ``RampCoeffs`` + ``Quantity["length"]`` (new API)
-    or a flat array + float nm (legacy).
-
     Parameters
     ----------
-    ramp_coeffs
-        :class:`RampCoeffs` or legacy flat array of shape ``(3,)``
-        with ``[offset, slope_y, slope_x]``.
+    ramp_coeffs : RampCoeffs
+        Background phase-ramp coefficients with units.
     height
         Number of pixels along the y-axis.
     width
         Number of pixels along the x-axis.
-    pixel_size
-        Pixel size as ``Quantity["length"]``, or ``None`` when using
-        *pixel_size_nm*.
-    pixel_size_nm
-        Legacy pixel size in nanometres (float).
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
 
     Returns
     -------
-    Quantity["angle"] or jax.Array
+    Quantity["angle"]
         Ramp image of shape ``(height, width)``.
     """
-    if pixel_size is None and pixel_size_nm is not None:
-        pixel_size = pixel_size_nm
-    pixel_size = _ensure_quantity_pixel_size(pixel_size)
-    ramp_coeffs = _ensure_ramp_coeffs(ramp_coeffs)
     ps_val = _to_nm(pixel_size).value
     rc_arr = jnp.array([
-        ramp_coeffs.offset.value,
-        ramp_coeffs.slope_y.value * 1.0,  # already in rad/nm
-        ramp_coeffs.slope_x.value * 1.0,
+        _to_rad(ramp_coeffs.offset).value,
+        u.uconvert("rad / nm", ramp_coeffs.slope_y).value,
+        u.uconvert("rad / nm", ramp_coeffs.slope_x).value,
     ])
     ramp = _apply_ramp_plain(rc_arr, height, width, ps_val)
     return u.Quantity(ramp, "rad")
@@ -1248,14 +1188,12 @@ def solve_mbir_2d(
     phase,
     init_mag,
     mask,
-    pixel_size=None,
+    pixel_size,
     solver="newton_cg",
     reg_config=None,
     rdfc_kernel=None,
     init_ramp_coeffs=None,
     reg_mask=None,
-    *,
-    pixel_size_nm=None,
 ):
     """
     Unified MBIR solver for 2D projected magnetization reconstruction.
@@ -1269,8 +1207,8 @@ def solve_mbir_2d(
     mask : array_like
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    pixel_size_nm : float
-        Voxel size in **nanometres** (nm).
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
     solver : str or SolverConfig, optional
         Which solver to use.  Pass a string (``"newton_cg"``, ``"adam"``,
         ``"lbfgs"``) for default parameters, or a config object
@@ -1297,7 +1235,7 @@ def solve_mbir_2d(
            For iterative solvers (Adam, L-BFGS) the ``loss_history`` array
            may contain trailing zeros if the solver stopped early.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    pixel_size_nm = _to_nm(pixel_size).value
 
     if isinstance(solver, str):
         solver_name = solver.lower()
@@ -1356,8 +1294,8 @@ def solve_mbir_2d(
 
 def reconstruct_2d(
     phase,
-    pixel_size=None,
-    b0=None,
+    pixel_size,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     thickness=None,
     mask=None,
     lam=1e-3,
@@ -1367,9 +1305,6 @@ def reconstruct_2d(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Convenience wrapper for 2D MBIR magnetization reconstruction.
 
@@ -1434,11 +1369,11 @@ def reconstruct_2d(
     dimensionless, normalised :math:`M / M_s`.  With ``b0_tesla = 1.0``
     the output has units of **Tesla**.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
-    thickness = _resolve_thickness_nm(thickness)
+    pixel_size_nm = _to_nm(pixel_size).value
+    b0_tesla = _to_tesla(b0).value
+    thickness_nm = _to_nm(thickness).value if thickness is not None else None
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
+    _validate_positive(thickness_nm, "thickness")
 
     phase = jnp.asarray(phase)
     if mask is None:
@@ -1449,7 +1384,7 @@ def reconstruct_2d(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
-            b0_tesla=b0_tesla,
+            b0=b0,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -1464,14 +1399,14 @@ def reconstruct_2d(
         phase=phase,
         init_mag=init_mag,
         mask=mask,
-        pixel_size_nm=pixel_size_nm,
+        pixel_size=pixel_size,
         solver=solver,
         reg_config=reg_config,
         rdfc_kernel=rdfc_kernel,
         reg_mask=reg_mask,
     )
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
+    thickness_nm = jnp.asarray(thickness_nm, dtype=jnp.float64)
+    thickness_vox = thickness_nm / pixel_size_nm
     if thickness_vox.ndim >= 2:
         thickness_vox = thickness_vox[..., jnp.newaxis]
 
@@ -1486,16 +1421,13 @@ def reconstruct_2d(
 
 def forward_model_2d(
     magnetization,
-    pixel_size=None,
-    b0=None,
+    pixel_size,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
     thickness=None,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Convenience forward model for 2D projected magnetization.
 
@@ -1540,20 +1472,20 @@ def forward_model_2d(
     jax.Array
         Predicted phase image of shape ``(N, M)`` in **radians**.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
-    thickness = _resolve_thickness_nm(thickness)
+    pixel_size_nm = _to_nm(pixel_size).value
+    b0_tesla = _to_tesla(b0).value
+    thickness_nm = _to_nm(thickness).value if thickness is not None else None
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    if thickness is not None:
-        _validate_positive(thickness, "thickness")
+    if thickness_nm is not None:
+        _validate_positive(thickness_nm, "thickness")
 
     magnetization = jnp.asarray(magnetization)
-    if thickness is not None:
-        magnetization = magnetization * (thickness / pixel_size_nm)
+    if thickness_nm is not None:
+        magnetization = magnetization * (thickness_nm / pixel_size_nm)
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             magnetization.shape[:2],
-            b0_tesla=b0_tesla,
+            b0=b0,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -1570,8 +1502,8 @@ def forward_model_2d(
 def reconstruct_2d_ensemble(
     phase,
     masks,
-    pixel_size=None,
-    b0=None,
+    pixel_size,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     lam=1e-3,
     solver="newton_cg",
     reg_masks=None,
@@ -1579,9 +1511,6 @@ def reconstruct_2d_ensemble(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Batched MBIR reconstruction over an ensemble of bootstrap masks.
 
@@ -1633,8 +1562,8 @@ def reconstruct_2d_ensemble(
     effectively disabled under ``vmap``; all bootstrap samples
     run for the maximum number of steps.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
+    pixel_size_nm = _to_nm(pixel_size).value
+    b0_tesla = _to_tesla(b0).value
     _validate_positive(pixel_size_nm, "pixel_size_nm")
 
     phase = jnp.asarray(phase)
@@ -1647,7 +1576,7 @@ def reconstruct_2d_ensemble(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
-            b0_tesla=b0_tesla,
+            b0=b0,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -1792,16 +1721,13 @@ def project_3d(
 
 def forward_model_3d(
     magnetization_3d,
-    pixel_size=None,
-    b0=None,
+    pixel_size,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     axis="z",
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Convenience forward model for a 3D magnetization volume.
 
@@ -1814,10 +1740,10 @@ def forward_model_3d(
     magnetization_3d : array_like
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
-    pixel_size_nm : float
-        Voxel size in nanometres.
-    b0_tesla : float, optional
-        Magnetic induction in Tesla, default 1.0.
+    pixel_size : Quantity["length"]
+        Voxel size as a ``unxt.Quantity`` with length units.
+    b0 : Quantity["magnetic flux density"], optional
+        Magnetic induction, default ``Quantity(1.0, "T")``.
     axis : {'z', 'y', 'x'}, optional
         Projection axis, default ``'z'``.
     ramp_coeffs : array_like, optional
@@ -1841,8 +1767,8 @@ def forward_model_3d(
 
     return forward_model_2d(
         projected,
-        pixel_size_nm=_resolve_pixel_size_nm(pixel_size, pixel_size_nm),
-        b0_tesla=_resolve_b0_tesla(b0, b0_tesla),
+        pixel_size=pixel_size,
+        b0=b0,
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
         prw_vec=prw_vec,
@@ -1857,9 +1783,7 @@ def decompose_loss(
     mask,
     reg_mask,
     rdfc_kernel,
-    pixel_size=None,
-    *,
-    pixel_size_nm=None,
+    pixel_size,
     pyramid_compat=False,
 ):
     """Decompose the MBIR loss into data-fidelity and regularization terms.
@@ -1906,7 +1830,7 @@ def decompose_loss(
         ``||Dx||²`` (forward differences); otherwise it uses the
         adaptive stencil from :func:`exchange_loss_fn`.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
+    pixel_size_nm = _to_nm(pixel_size).value
     magnetization = jnp.asarray(magnetization)
     ramp_coeffs = jnp.asarray(ramp_coeffs)
     phase = jnp.asarray(phase)
@@ -1934,8 +1858,8 @@ def bootstrap_threshold_uncertainty_2d(
     phase,
     mip_phase,
     threshold,
-    pixel_size=None,
-    b0=None,
+    pixel_size,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     lam=1e-3,
     solver="newton_cg",
     n_boot=50,
@@ -1946,9 +1870,6 @@ def bootstrap_threshold_uncertainty_2d(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Bootstrap a thresholded mask ensemble and summarize the uncertainty.
 
@@ -2002,8 +1923,6 @@ def bootstrap_threshold_uncertainty_2d(
         magnetizations, 2.5th and 97.5th percentile maps, their 95% width,
         the relative 95% width, and the mask inclusion frequency.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
     phase = jnp.asarray(phase)
     mip_phase = jnp.asarray(mip_phase)
     if phase.shape != mip_phase.shape:
@@ -2036,8 +1955,8 @@ def bootstrap_threshold_uncertainty_2d(
     bootstrap_mag = reconstruct_2d_ensemble(
         phase=phase,
         masks=bootstrap_masks,
-        pixel_size_nm=pixel_size_nm,
-        b0_tesla=b0_tesla,
+        pixel_size=pixel_size,
+        b0=b0,
         lam=lam,
         solver=solver,
         reg_masks=bootstrap_masks,
@@ -2226,9 +2145,9 @@ def kneedle_corner(data_misfits, reg_norms):
 def lcurve_sweep(
     phase,
     mask,
-    pixel_size=None,
+    pixel_size,
     lambdas=None,
-    b0=None,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     thickness=None,
     solver="newton_cg",
     reg_mask=None,
@@ -2237,9 +2156,6 @@ def lcurve_sweep(
     rdfc_kernel=None,
     solver_config=None,
     pyramid_compat=False,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Sequential L-curve sweep over regularization weights.
 
@@ -2292,11 +2208,11 @@ def lcurve_sweep(
         ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
         ``corner_index``.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
-    thickness = _resolve_thickness_nm(thickness)
+    pixel_size_nm = _to_nm(pixel_size).value
+    b0_tesla = _to_tesla(b0).value
+    thickness_nm = _to_nm(thickness).value if thickness is not None else None
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
+    _validate_positive(thickness_nm, "thickness")
 
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
@@ -2310,7 +2226,7 @@ def lcurve_sweep(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
-            b0_tesla=b0_tesla,
+            b0=b0,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -2331,7 +2247,7 @@ def lcurve_sweep(
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=pixel_size_nm,
+            pixel_size=pixel_size,
             solver=actual_solver,
             reg_config=reg_config,
             rdfc_kernel=rdfc_kernel,
@@ -2340,7 +2256,7 @@ def lcurve_sweep(
 
         dm, rn = decompose_loss(
             result.magnetization, result.ramp_coeffs,
-            phase, mask, reg_mask, rdfc_kernel, pixel_size_nm,
+            phase, mask, reg_mask, rdfc_kernel, pixel_size,
             pyramid_compat=pyramid_compat,
         )
         data_misfits.append(dm)
@@ -2353,8 +2269,8 @@ def lcurve_sweep(
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
     all_mag = jnp.stack(mag_list)
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
+    thickness_nm = jnp.asarray(thickness_nm, dtype=jnp.float64)
+    thickness_vox = thickness_nm / pixel_size_nm
     if thickness_vox.ndim >= 2:
         thickness_vox = thickness_vox[..., jnp.newaxis]
     all_mag = all_mag / thickness_vox
@@ -2372,9 +2288,9 @@ def lcurve_sweep(
 def lcurve_sweep_vmap(
     phase,
     mask,
-    pixel_size=None,
+    pixel_size,
     lambdas=None,
-    b0=None,
+    b0: u.Quantity = u.Quantity(1.0, "T"),
     thickness=None,
     solver="newton_cg",
     reg_mask=None,
@@ -2383,9 +2299,6 @@ def lcurve_sweep_vmap(
     rdfc_kernel=None,
     solver_config=None,
     pyramid_compat=False,
-    *,
-    pixel_size_nm=None,
-    b0_tesla=None,
 ):
     """Parallel L-curve sweep using ``jax.vmap`` over lambda values.
 
@@ -2444,11 +2357,11 @@ def lcurve_sweep_vmap(
     effectively disabled under ``vmap``; all lambda values run for
     the maximum number of steps.
     """
-    pixel_size_nm = _resolve_pixel_size_nm(pixel_size, pixel_size_nm)
-    b0_tesla = _resolve_b0_tesla(b0, b0_tesla)
-    thickness = _resolve_thickness_nm(thickness)
+    pixel_size_nm = _to_nm(pixel_size).value
+    b0_tesla = _to_tesla(b0).value
+    thickness_nm = _to_nm(thickness).value if thickness is not None else None
     _validate_positive(pixel_size_nm, "pixel_size_nm")
-    _validate_positive(thickness, "thickness")
+    _validate_positive(thickness_nm, "thickness")
 
     phase = jnp.asarray(phase)
     mask = jnp.asarray(mask, dtype=bool)
@@ -2463,7 +2376,7 @@ def lcurve_sweep_vmap(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
-            b0_tesla=b0_tesla,
+            b0=b0,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -2564,8 +2477,8 @@ def lcurve_sweep_vmap(
     reg_norms = np.asarray(all_rn)
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
-    thickness = jnp.asarray(thickness, dtype=jnp.float64)
-    thickness_vox = thickness / pixel_size_nm
+    thickness_nm = jnp.asarray(thickness_nm, dtype=jnp.float64)
+    thickness_vox = thickness_nm / pixel_size_nm
     if thickness_vox.ndim >= 2:
         thickness_vox = thickness_vox[..., jnp.newaxis]
     all_mag = all_mag / thickness_vox

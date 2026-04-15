@@ -20,6 +20,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+import unxt  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
     PHI_0_T_NM2,
@@ -27,6 +28,7 @@ from libertem_holo.base.mbir import (  # noqa: E402
     LBFGSConfig,
     LCurveResult,
     NewtonCGConfig,
+    RampCoeffs,
     SolverResult,
     _rdfc_elementary_phase,
     apply_ramp,
@@ -95,7 +97,7 @@ def small_problem():
     gt_mag[..., 0] = mask.astype(np.float64)  # u-component
     gt_mag[..., 1] = 0.5 * mask.astype(np.float64)  # v-component
 
-    kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
+    kernel = build_rdfc_kernel((H, W), b0=unxt.Quantity(b0, "T"), geometry="disc")
 
     ramp = jnp.zeros(3, dtype=jnp.float64)
     phase = forward_model_single_rdfc_2d(
@@ -125,7 +127,7 @@ class TestBuildRDFCKernel:
     """Verify build_rdfc_kernel against pyramid's Kernel class."""
 
     def test_kernel_u_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         assert_allclose(
             np.asarray(kernel["u_fft"]),
             kernel_ref["ref_u_fft"],
@@ -134,7 +136,7 @@ class TestBuildRDFCKernel:
         )
 
     def test_kernel_v_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         assert_allclose(
             np.asarray(kernel["v_fft"]),
             kernel_ref["ref_v_fft"],
@@ -196,8 +198,8 @@ class TestBuildRDFCKernel:
             build_rdfc_kernel((4, 4), geometry="cube")
 
     def test_kernel_b0_scaling(self):
-        k1 = build_rdfc_kernel((4, 4), b0_tesla=1.0)
-        k2 = build_rdfc_kernel((4, 4), b0_tesla=2.0)
+        k1 = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"))
+        k2 = build_rdfc_kernel((4, 4), b0=unxt.Quantity(2.0, "T"))
         assert_allclose(
             np.asarray(k2["u_fft"]),
             2.0 * np.asarray(k1["u_fft"]),
@@ -221,7 +223,7 @@ class TestPhaseMapperRDFC:
         phase_ref = phasemapper_ref["phase_ref"]
         voxel_size = float(phasemapper_ref["voxel_size"])
 
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
 
         assert_allclose(
@@ -235,7 +237,7 @@ class TestPhaseMapperRDFC:
         """RDFC mapper should be linear: f(a*u) = a*f(u)."""
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0=unxt.Quantity(1.0, "T"))
 
         phase1 = phase_mapper_rdfc(u, v, kernel)
         phase2 = phase_mapper_rdfc(2.0 * u, 2.0 * v, kernel)
@@ -268,7 +270,7 @@ class TestPhaseMapperRDFC:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0=unxt.Quantity(1.0, "T"))
 
         # Direct phase
         phase_direct = np.asarray(voxel_size**2 * phase_mapper_rdfc(u, v, kernel)).ravel()
@@ -318,7 +320,7 @@ class TestPhaseMapperRDFC:
 
         u_shape = (4, 4)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u_shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u_shape, b0=unxt.Quantity(1.0, "T"))
 
         H, W = u_shape
         n = 2 * H * W
@@ -357,7 +359,7 @@ class TestPhaseMapperRDFC:
         H, W = 4, 4
         n = 2 * H * W
 
-        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+        kernel = build_rdfc_kernel((H, W), b0=unxt.Quantity(1.0, "T"))
 
         def phase_from_mag_vec(mag_vec):
             u_vec = mag_vec[: H * W].reshape(H, W)
@@ -477,7 +479,7 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0=unxt.Quantity(1.0, "T"))
 
         phase_mapper = voxel_size**2 * phase_mapper_rdfc(u, v, kernel)
 
@@ -496,7 +498,7 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u.shape, b0=unxt.Quantity(1.0, "T"))
 
         mag = jnp.stack([u, v], axis=-1)
         ramp_zero = jnp.zeros(3, dtype=jnp.float64)
@@ -520,7 +522,7 @@ class TestForwardModels:
         voxel_size = float(phasemapper_ref["voxel_size"])
 
         mag = jnp.stack([jnp.array(u), jnp.array(v)], axis=-1)
-        phase = forward_model_2d(mag, voxel_size, b0_tesla=1.0, geometry="disc")
+        phase = forward_model_2d(mag, unxt.Quantity(voxel_size, "nm"), b0=unxt.Quantity(1.0, "T"), geometry="disc")
 
         assert_allclose(
             np.asarray(phase),
@@ -535,7 +537,7 @@ class TestForwardModels:
         mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
 
-        phase = forward_model_3d(mag_3d, voxel_size, b0_tesla=1.0, axis="z")
+        phase = forward_model_3d(mag_3d, unxt.Quantity(voxel_size, "nm"), b0=unxt.Quantity(1.0, "T"), axis="z")
         # Should produce a (5, 4) phase image
         assert phase.shape == (5, 4)
         # Not all zeros (the magdata is non-trivial)
@@ -549,8 +551,8 @@ class TestForwardModels:
 
         for axis in ["z", "y", "x"]:
             projected = project_3d(mag_3d, axis=axis)
-            phase_2step = forward_model_2d(projected, voxel_size, b0_tesla=1.0)
-            phase_direct = forward_model_3d(mag_3d, voxel_size, b0_tesla=1.0, axis=axis)
+            phase_2step = forward_model_2d(projected, unxt.Quantity(voxel_size, "nm"), b0=unxt.Quantity(1.0, "T"))
+            phase_direct = forward_model_3d(mag_3d, unxt.Quantity(voxel_size, "nm"), b0=unxt.Quantity(1.0, "T"), axis=axis)
 
             assert_allclose(
                 np.asarray(phase_direct),
@@ -567,28 +569,37 @@ class TestForwardModels:
 
 class TestGetFreqGrid:
     def test_shapes(self):
-        f_y, f_x, denom = get_freq_grid(8, 10, 1.0)
+        f_y, f_x, denom = get_freq_grid(8, 10, unxt.Quantity(1.0, "nm"))
         assert f_y.shape == (8, 6)  # rfft half-spectrum
         assert f_x.shape == (8, 6)
         assert denom.shape == (8, 6)
 
     def test_dc_bin_is_one(self):
-        _, _, denom = get_freq_grid(8, 8, 1.0)
+        _, _, denom = get_freq_grid(8, 8, unxt.Quantity(1.0, "nm"))
         assert float(denom[0, 0]) == 1.0
 
 
 class TestApplyRamp:
     def test_offset_only(self):
-        ramp = apply_ramp(jnp.array([3.0, 0.0, 0.0]), 4, 4, 1.0)
-        assert_allclose(np.asarray(ramp), 3.0, atol=1e-12)
+        rc = RampCoeffs(
+            offset=unxt.Quantity(3.0, "rad"),
+            slope_y=unxt.Quantity(0.0, "rad/nm"),
+            slope_x=unxt.Quantity(0.0, "rad/nm"),
+        )
+        ramp = apply_ramp(rc, 4, 4, unxt.Quantity(1.0, "nm"))
+        assert_allclose(np.asarray(ramp.value), 3.0, atol=1e-12)
 
     def test_slope(self):
-        coeffs = jnp.array([0.0, 1.0, 0.0], dtype=jnp.float64)
-        ramp = apply_ramp(coeffs, 4, 4, 1.0)
+        rc = RampCoeffs(
+            offset=unxt.Quantity(0.0, "rad"),
+            slope_y=unxt.Quantity(1.0, "rad/nm"),
+            slope_x=unxt.Quantity(0.0, "rad/nm"),
+        )
+        ramp = apply_ramp(rc, 4, 4, unxt.Quantity(1.0, "nm"))
         # slope_y * (y * voxel_size): y=0..3, voxel_size=1
         expected_col = np.array([0.0, 1.0, 2.0, 3.0])
         for col in range(4):
-            assert_allclose(np.asarray(ramp[:, col]), expected_col, atol=1e-12)
+            assert_allclose(np.asarray(ramp.value[:, col]), expected_col, atol=1e-12)
 
 
 # ===================================================================
@@ -753,7 +764,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             solver=NewtonCGConfig(cg_maxiter=200, cg_tol=1e-8),
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=kernel,
@@ -788,7 +799,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             solver=AdamConfig(num_steps=200, learning_rate=1e-2, patience=50),
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=kernel,
@@ -818,7 +829,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             solver=LBFGSConfig(num_steps=100, patience=30),
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=kernel,
@@ -847,7 +858,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             solver="newton_cg",
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=sp["kernel"],
@@ -861,7 +872,7 @@ class TestSolvers:
                 phase=jnp.array(sp["phase"]),
                 init_mag=jnp.zeros_like(jnp.array(sp["gt_mag"])),
                 mask=jnp.array(sp["mask"]),
-                pixel_size_nm=sp["voxel_size"],
+                pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
                 solver="bogus",
                 rdfc_kernel=sp["kernel"],
             )
@@ -873,7 +884,7 @@ class TestSolvers:
                 phase=jnp.array(sp["phase"]),
                 init_mag=jnp.zeros_like(jnp.array(sp["gt_mag"])),
                 mask=jnp.array(sp["mask"]),
-                pixel_size_nm=sp["voxel_size"],
+                pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
                 solver=42,
                 rdfc_kernel=sp["kernel"],
             )
@@ -891,9 +902,9 @@ class TestReconstruct2D:
         sp = small_problem
         result = reconstruct_2d(
             phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             mask=jnp.array(sp["mask"]),
             lam=1e-3,
             solver="newton_cg",
@@ -905,9 +916,9 @@ class TestReconstruct2D:
         sp = small_problem
         result = reconstruct_2d(
             phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             mask=None,
         )
         assert isinstance(result, SolverResult)
@@ -916,9 +927,9 @@ class TestReconstruct2D:
         sp = small_problem
         result = reconstruct_2d(
             phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             mask=jnp.array(sp["mask"]),
             solver="adam",  # this should be overridden
             solver_config=NewtonCGConfig(cg_maxiter=200),
@@ -943,7 +954,7 @@ class TestDecomposeLoss:
         kernel = sp["kernel"]
 
         dm, rn = decompose_loss(
-            mag, ramp, phase, mask, mask, kernel, sp["voxel_size"],
+            mag, ramp, phase, mask, mask, kernel, unxt.Quantity(sp["voxel_size"], "nm"),
         )
         assert dm < 1e-10, f"Data misfit should be ~0, got {dm}"
 
@@ -957,7 +968,7 @@ class TestDecomposeLoss:
         kernel = sp["kernel"]
 
         _, rn = decompose_loss(
-            uniform_mag, ramp, phase, mask, mask, kernel, sp["voxel_size"],
+            uniform_mag, ramp, phase, mask, mask, kernel, unxt.Quantity(sp["voxel_size"], "nm"),
         )
         assert_allclose(rn, 0.0, atol=1e-12)
 
@@ -970,7 +981,7 @@ class TestDecomposeLoss:
             jnp.array(sp["mask"]),
             jnp.array(sp["mask"]),
             sp["kernel"],
-            sp["voxel_size"],
+            unxt.Quantity(sp["voxel_size"], "nm"),
         )
         assert isinstance(dm, float)
         assert isinstance(rn, float)
@@ -1023,10 +1034,10 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             solver="newton_cg",
             rdfc_kernel=sp["kernel"],
         )
@@ -1043,10 +1054,10 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             rdfc_kernel=sp["kernel"],
         )
         # Should be sorted
@@ -1060,10 +1071,10 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=unxt.Quantity(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
-            thickness=sp["voxel_size"],
+            b0=unxt.Quantity(sp["b0"], "T"),
+            thickness=unxt.Quantity(sp["voxel_size"], "nm"),
             rdfc_kernel=sp["kernel"],
         )
         assert np.all(np.isfinite(result.data_misfits))
@@ -1080,8 +1091,8 @@ class TestLCurveSweep:
 class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
-        assert cfg.cg_maxiter == 1000
-        assert cfg.cg_tol == 1e-10
+        assert cfg.cg_maxiter == 10000
+        assert cfg.cg_tol == 1e-16
 
     def test_adam_defaults(self):
         cfg = AdamConfig()
@@ -1198,7 +1209,7 @@ class TestUpstreamKernelNpy:
 
     def test_u_fft_matches_upstream_npy(self):
         ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_u_fft.npy"))
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         assert_allclose(
             np.asarray(kernel["u_fft"]), ref, atol=1e-7,
             err_msg="u_fft does not match upstream test_kernel/ref_u_fft.npy",
@@ -1206,7 +1217,7 @@ class TestUpstreamKernelNpy:
 
     def test_v_fft_matches_upstream_npy(self):
         ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_v_fft.npy"))
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         assert_allclose(
             np.asarray(kernel["v_fft"]), ref, atol=1e-7,
             err_msg="v_fft does not match upstream test_kernel/ref_v_fft.npy",
@@ -1255,7 +1266,7 @@ class TestUpstreamPhaseMapperHDF5:
 
         u_field = jnp.array(mag_field[0, 0], dtype=jnp.float64)
         v_field = jnp.array(mag_field[1, 0], dtype=jnp.float64)
-        kernel = build_rdfc_kernel(u_field.shape, b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel(u_field.shape, b0=unxt.Quantity(1.0, "T"), geometry="disc")
         phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
 
         assert_allclose(
@@ -1279,7 +1290,7 @@ class TestUpstreamPhaseMapperHDF5:
         u = jnp.array(mag_field[0, 0], dtype=jnp.float64)
         v = jnp.array(mag_field[1, 0], dtype=jnp.float64)
         mag = jnp.stack([u, v], axis=-1)
-        phase = forward_model_2d(mag, voxel_size, b0_tesla=1.0, geometry="disc")
+        phase = forward_model_2d(mag, unxt.Quantity(voxel_size, "nm"), b0=unxt.Quantity(1.0, "T"), geometry="disc")
 
         assert_allclose(
             np.asarray(phase), phase_ref, atol=1e-7,
@@ -1295,7 +1306,7 @@ class TestUpstreamPhaseMapperHDF5:
         )
         H, W = 4, 4
         n = 2 * H * W
-        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+        kernel = build_rdfc_kernel((H, W), b0=unxt.Quantity(1.0, "T"))
 
         def phase_from_mag_vec(mag_vec):
             u = mag_vec[:H * W].reshape(H, W)
@@ -1395,7 +1406,7 @@ class TestUpstreamForwardModelChain:
         n = 3 * n_masked  # 72
 
         voxel_size = 10.0
-        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((Y, X), b0=unxt.Quantity(1.0, "T"), geometry="disc")
 
         # Indices of masked voxels for scatter
         mask_flat = mask_3d.ravel()
@@ -1460,7 +1471,7 @@ class TestUpstreamForwardModelChain:
         n_masked = int(mask_3d.sum())
 
         voxel_size = 10.0
-        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((Y, X), b0=unxt.Quantity(1.0, "T"), geometry="disc")
         masked_indices = np.where(mask_3d.ravel())[0]
 
         # ones vector (like costfunction test: self.cost(np.ones(self.cost.n)) ≈ 0)
@@ -1719,7 +1730,7 @@ def slab_roundtrip():
     gt_proj_mag[..., 1] = mask_2d * depth * np.sin(phi)
 
     kernel = build_rdfc_kernel(
-        (y_dim, x_dim), b0_tesla=b_0, geometry="slab",
+        (y_dim, x_dim), b0=unxt.Quantity(b_0, "T"), geometry="slab",
     )
 
     analytic_phase = _analytic_phase_slab(
@@ -1727,8 +1738,8 @@ def slab_roundtrip():
     )
 
     fwd_phase = np.asarray(forward_model_2d(
-        jnp.array(gt_proj_mag), a,
-        b0_tesla=b_0, geometry="slab", rdfc_kernel=kernel,
+        jnp.array(gt_proj_mag), unxt.Quantity(a, "nm"),
+        b0=unxt.Quantity(b_0, "T"), geometry="slab", rdfc_kernel=kernel,
     ))
 
     return {
@@ -1795,9 +1806,9 @@ class TestMBIRAnalyticRoundTrip:
         s = slab_roundtrip
         result = reconstruct_2d(
             phase=jnp.array(s["fwd_phase"]),
-            pixel_size_nm=s["a"],
-            b0_tesla=s["b_0"],
-            thickness=s["a"],
+            pixel_size=unxt.Quantity(s["a"], "nm"),
+            b0=unxt.Quantity(s["b_0"], "T"),
+            thickness=unxt.Quantity(s["a"], "nm"),
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1858,9 +1869,9 @@ class TestMBIRAnalyticRoundTrip:
         s = slab_roundtrip
         result = reconstruct_2d(
             phase=jnp.array(s["analytic_phase"]),
-            pixel_size_nm=s["a"],
-            b0_tesla=s["b_0"],
-            thickness=s["a"],
+            pixel_size=unxt.Quantity(s["a"], "nm"),
+            b0=unxt.Quantity(s["b_0"], "T"),
+            thickness=unxt.Quantity(s["a"], "nm"),
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1936,8 +1947,8 @@ class TestMBIRAnalyticRoundTrip:
         mag_3d[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi, 1] = np.sin(s["phi"])
 
         phase_3d = np.asarray(forward_model_3d(
-            jnp.array(mag_3d), s["a"],
-            b0_tesla=s["b_0"], axis="z", geometry="slab",
+            jnp.array(mag_3d), unxt.Quantity(s["a"], "nm"),
+            b0=unxt.Quantity(s["b_0"], "T"), axis="z", geometry="slab",
         ))
 
         ana = s["analytic_phase"]
@@ -1982,7 +1993,7 @@ class TestMBIRAnalyticRoundTrip:
         gt_proj_mag[..., 1] = mask_2d * depth * np.sin(phi)
 
         kernel = build_rdfc_kernel(
-            (y_dim, x_dim), b0_tesla=b0, geometry="slab",
+            (y_dim, x_dim), b0=unxt.Quantity(b0, "T"), geometry="slab",
         )
 
         # Use analytic phase (independent code path) at this b0
@@ -1992,9 +2003,9 @@ class TestMBIRAnalyticRoundTrip:
 
         result = reconstruct_2d(
             phase=jnp.array(analytic_phase),
-            pixel_size_nm=a,
-            b0_tesla=b0,
-            thickness=a,
+            pixel_size=unxt.Quantity(a, "nm"),
+            b0=unxt.Quantity(b0, "T"),
+            thickness=unxt.Quantity(a, "nm"),
             mask=jnp.array(mask_2d),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2068,12 +2079,12 @@ class TestMBIRRoundTripNotebookParams:
         gt_mag[..., 0] = mask * gt_norm * np.cos(phi)
         gt_mag[..., 1] = mask * gt_norm * np.sin(phi)
 
-        kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
+        kernel = build_rdfc_kernel((H, W), b0=unxt.Quantity(b0, "T"), geometry="disc")
 
         # Generate phase from the forward model
         fwd_phase = np.asarray(forward_model_2d(
-            jnp.array(gt_mag), a,
-            b0_tesla=b0, geometry="disc", rdfc_kernel=kernel,
+            jnp.array(gt_mag), unxt.Quantity(a, "nm"),
+            b0=unxt.Quantity(b0, "T"), geometry="disc", rdfc_kernel=kernel,
         ))
 
         return {
@@ -2087,9 +2098,9 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
-            thickness=p["a"],
+            pixel_size=unxt.Quantity(p["a"], "nm"),
+            b0=unxt.Quantity(p["b0"], "T"),
+            thickness=unxt.Quantity(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2132,9 +2143,9 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
-            thickness=p["a"],
+            pixel_size=unxt.Quantity(p["a"], "nm"),
+            b0=unxt.Quantity(p["b0"], "T"),
+            thickness=unxt.Quantity(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2155,9 +2166,9 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
-            thickness=p["a"],
+            pixel_size=unxt.Quantity(p["a"], "nm"),
+            b0=unxt.Quantity(p["b0"], "T"),
+            thickness=unxt.Quantity(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2212,7 +2223,7 @@ class TestPyramidCrossValidation:
 
         # libertem_holo forward model
         kern_lt = build_rdfc_kernel(
-            (self.NY, self.NX), b0_tesla=self.B0, geometry="disc",
+            (self.NY, self.NX), b0=unxt.Quantity(self.B0, "T"), geometry="disc",
         )
         mag_lt = jnp.stack([jnp.array(Mx), jnp.array(My)], axis=-1)
         phase_lt = np.asarray(
@@ -2248,9 +2259,9 @@ class TestPyramidCrossValidation:
         # libertem_holo reconstruction
         result_lt = reconstruct_2d(
             phase=jnp.array(phase),
-            pixel_size_nm=self.A,
-            b0_tesla=self.B0,
-            thickness=self.A,
+            pixel_size=unxt.Quantity(self.A, "nm"),
+            b0=unxt.Quantity(self.B0, "T"),
+            thickness=unxt.Quantity(self.A, "nm"),
             mask=jnp.array(mask),
             lam=self.LAM,
             solver="newton_cg",
@@ -2350,14 +2361,14 @@ class TestProjectedMagnetizationNormalization:
 
         # Phase via MBIR forward model
         kern_lt = build_rdfc_kernel(
-            (N, N), b0_tesla=self.B0, geometry="disc",
+            (N, N), b0=unxt.Quantity(self.B0, "T"), geometry="disc",
         )
         mag_2d = np.zeros((N, N, 2))
         mag_2d[..., 0] = projected_u
         mag_2d[..., 1] = projected_v
         phase_mbir = np.asarray(forward_model_2d(
-            jnp.array(mag_2d), self.PX,
-            b0_tesla=self.B0, rdfc_kernel=kern_lt,
+            jnp.array(mag_2d), unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"), rdfc_kernel=kern_lt,
         ))
 
         return {
@@ -2402,9 +2413,9 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
-            thickness=self.PX,
+            pixel_size=unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"),
+            thickness=unxt.Quantity(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2431,9 +2442,9 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
-            thickness=self.PX,
+            pixel_size=unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"),
+            thickness=unxt.Quantity(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2453,14 +2464,14 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
+            pixel_size=unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
             geometry="disc",
             rdfc_kernel=p["kern_lt"],
-            thickness=self.H * self.PX,  # H voxels expressed in nm
+            thickness=unxt.Quantity(self.H * self.PX, "nm"),  # H voxels expressed in nm
         )
         rec = np.asarray(result.magnetization)
         inside = p["mask"] > 0.5
@@ -2478,9 +2489,9 @@ class TestProjectedMagnetizationNormalization:
         mag_per_voxel[inside, 1] = 1.0  # unit My
 
         phase_from_per_voxel = np.asarray(forward_model_2d(
-            jnp.array(mag_per_voxel), self.PX,
-            b0_tesla=self.B0, rdfc_kernel=p["kern_lt"],
-            thickness=self.H * self.PX,  # H voxels expressed in nm
+            jnp.array(mag_per_voxel), unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"), rdfc_kernel=p["kern_lt"],
+            thickness=unxt.Quantity(self.H * self.PX, "nm"),  # H voxels expressed in nm
         ))
         # This should equal the RDFC phase (from projected M = H)
         assert_allclose(
@@ -2499,9 +2510,9 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_fdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
-            thickness=self.PX,
+            pixel_size=unxt.Quantity(self.PX, "nm"),
+            b0=unxt.Quantity(self.B0, "T"),
+            thickness=unxt.Quantity(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
