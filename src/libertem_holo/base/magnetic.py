@@ -46,6 +46,7 @@ def plot_radius_ranges(
     pixel_size_m: float,
     min_radius_m: float,
     max_radius_m: float,
+    center: tuple = None,
 ) -> None:
     """Plot the minimum and maximum radius ranges on the magnetic phase image.
 
@@ -62,7 +63,10 @@ def plot_radius_ranges(
 
     """
     ny, nx = phase_image.shape
-    x_center, y_center = nx // 2, ny // 2
+    if center is None:
+        x_center, y_center = nx // 2, ny // 2
+    else:
+        x_center, y_center = center
 
     min_radius_px = int(min_radius_m / pixel_size_m)
     max_radius_px = int(max_radius_m / pixel_size_m)
@@ -94,6 +98,7 @@ def radial_integration(
     min_radius_m: float,
     max_radius_m: float,
     num_radii: int = 50,
+    center: tuple = None,
 ) -> dict:
     """Perform iterative radial integration of a magnetic phase image.
 
@@ -124,7 +129,10 @@ def radial_integration(
 
     ny, nx = phase_image.shape
     y, x = np.indices((ny, nx))
-    x_center, y_center = nx // 2, ny // 2
+    if center is None:
+        x_center, y_center = nx // 2, ny // 2
+    else:
+        x_center, y_center = center
 
     radii = np.linspace(
         min_radius_px, max_radius_px, num_radii, endpoint=True
@@ -191,6 +199,7 @@ def fit_magnetic_moment(
     m_y = _quadratic(0, *fit_y[0])
 
     if plot:
+        radii = np.linspace(0, np.max(result['radii']), 100)
         fig, ax = plt.subplots(ncols=2, figsize=(12, 5))
         ax[0].scatter(
             result['radii']*1e9, result['m_components'][:, 0], label='m_x data'
@@ -199,11 +208,11 @@ def fit_magnetic_moment(
             result['radii']*1e9, result['m_components'][:, 1], label='m_y data'
             )
         ax[0].plot(
-            result['radii']*1e9, _quadratic(result['radii'], *fit_x[0]),
+            radii*1e9, _quadratic(radii, *fit_x[0]),
             'r--', label='m_x fit'
             )
         ax[1].plot(
-            result['radii']*1e9, _quadratic(result['radii'], *fit_y[0]),
+            radii*1e9, _quadratic(radii, *fit_y[0]),
             'b--', label='m_y fit'
             )
         plt.xlabel('Radius (nm)')
@@ -213,6 +222,69 @@ def fit_magnetic_moment(
         plt.show()
 
     return m_x, m_y
+
+
+def generate_rectangular_lines(
+    center: tuple,
+    a: float,
+    b: float,
+    pixel_size: float,
+    n_samples: int = 100,
+    image: np.ndarray = None,
+    show_plot: bool = True,
+) -> dict:
+    """Generate pixel coordinates for rectangular lines centered at a given point.
+    Parameters
+    ----------
+    center : tuple
+        (x, y) coordinates of the rectangle center in pixels.
+    a : float
+        Half-width of the rectangle in meters.
+    b : float
+        Half-height of the rectangle in meters.
+    pixel_size : float
+        Size of a pixel in meters.
+    n_samples : int, optional
+        Number of sample points along each line (default: 100).
+    image : np.ndarray, optional
+        Optional image to display the lines on (default: None).
+    show_plot : bool, optional
+        Whether to display the plot (default: True).
+    Returns
+    -------
+    dict
+        Dictionary containing pixel coordinates for 'top', 'bottom', 'left', and 'right' lines.
+
+    """
+    cx, cy = center
+
+    ax = a / pixel_size
+    by = b / pixel_size
+
+    t = np.linspace(-1, 1, 2 * n_samples + 1)
+
+    top = np.column_stack((cx + ax * t, np.full_like(t, cy - by)))
+    bottom = np.column_stack((cx + ax * t, np.full_like(t, cy + by)))
+    left = np.column_stack((np.full_like(t, cx - ax), cy + by * t))
+    right = np.column_stack((np.full_like(t, cx + ax), cy + by * t))
+
+    lines = {
+        "top": np.round(top).astype(int),
+        "bottom": np.round(bottom).astype(int),
+        "left": np.round(left).astype(int),
+        "right": np.round(right).astype(int),
+    }
+
+    if show_plot and image is not None:
+        plt.imshow(image, cmap="gray")
+        for line in lines.values():
+            plt.plot(line[:, 1], line[:, 0], linewidth=1.5)
+        plt.scatter(cy, cx, c="red", s=30)
+        plt.title("Integration rectangle")
+        plt.axis("off")
+        plt.show()
+
+    return lines
 
 
 def phase_uniform_rod(
