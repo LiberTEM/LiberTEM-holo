@@ -21,35 +21,22 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+import libertem_holo.base.mbir as mbir_mod  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
-    _KERNEL_COEFF_FLOAT,
-    AdamConfig,
-    LBFGSConfig,
     LCurveResult,
     NewtonCGConfig,
     RampCoeffs,
     SolverResult,
     _rdfc_elementary_phase,
-    apply_ramp,
     build_rdfc_kernel,
-    decompose_loss,
-    exchange_loss_fn,
-    forward_model_2d,
-    forward_model_3d,
-    forward_model_single_rdfc_2d,
-    get_freq_grid,
     kneedle_corner,
-    lcurve_sweep,
     mbir_loss_2d,
-    phase_mapper_rdfc,
-    project_3d,
-    reconstruct_2d,
-    solve_mbir_2d,
 )
 import unxt as u
 
 _Q = u.Quantity  # shorthand for test readability
+_KERNEL_COEFF_FLOAT = 1.0 / (2 * 2067.83)
 
 
 def _ramp_array(rc):
@@ -58,6 +45,163 @@ def _ramp_array(rc):
 
 def _shape2d(array) -> tuple[int, int]:
     return cast(tuple[int, int], array.shape)
+
+
+def _scalar_value(value) -> float:
+    if isinstance(value, u.Quantity):
+        return float(np.asarray(value.value))
+    return float(value)
+
+
+def _mag_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "")
+
+
+def _phase_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "rad")
+
+
+def _pixel_size_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(value, "nm")
+
+
+def _lambda_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "rad2")
+
+
+def _ramp_q(value, *, dtype=jnp.float64):
+    if value is None:
+        return RampCoeffs.zeros(dtype=dtype)
+    if isinstance(value, RampCoeffs):
+        return value
+    values = jnp.asarray(value)
+    return RampCoeffs(
+        offset=_Q(values[0], "rad"),
+        slope_y=_Q(values[1], "rad/nm"),
+        slope_x=_Q(values[2], "rad/nm"),
+    )
+
+
+def apply_ramp(ramp_coeffs, height, width, pixel_size):
+    return mbir_mod.apply_ramp(_ramp_q(ramp_coeffs), height, width, _pixel_size_q(pixel_size))
+
+
+def get_freq_grid(height, width, pixel_size):
+    return mbir_mod.get_freq_grid(height, width, _pixel_size_q(pixel_size))
+
+
+def phase_mapper_rdfc(u_field, v_field, rdfc_kernel):
+    return mbir_mod.phase_mapper_rdfc(_mag_q(u_field), _mag_q(v_field), rdfc_kernel)
+
+
+def project_3d(magnetization_3d, axis="z"):
+    return mbir_mod.project_3d(_mag_q(magnetization_3d), axis=axis)
+
+
+def forward_model_single_rdfc_2d(magnetization, ramp_coeffs, rdfc_kernel, pixel_size):
+    return mbir_mod.forward_model_single_rdfc_2d(
+        _mag_q(magnetization),
+        _ramp_q(ramp_coeffs),
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+    )
+
+
+def forward_model_2d(magnetization, pixel_size, ramp_coeffs=None, **kwargs):
+    return mbir_mod.forward_model_2d(
+        _mag_q(magnetization),
+        _pixel_size_q(pixel_size),
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def forward_model_3d(magnetization_3d, pixel_size, axis="z", ramp_coeffs=None, **kwargs):
+    return mbir_mod.forward_model_3d(
+        _mag_q(magnetization_3d),
+        _pixel_size_q(pixel_size),
+        axis=axis,
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def exchange_loss_fn(mag, mask):
+    return mbir_mod.exchange_loss_fn(_mag_q(mag), mask)
+
+
+def decompose_loss(magnetization, ramp_coeffs, phase, mask, reg_mask, rdfc_kernel, pixel_size, **kwargs):
+    return mbir_mod.decompose_loss(
+        _mag_q(magnetization),
+        _ramp_q(ramp_coeffs),
+        _phase_q(phase),
+        mask,
+        reg_mask,
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+        **kwargs,
+    )
+
+
+def mbir_loss_2d(params, mask, phase, rdfc_kernel, pixel_size, reg_config, reg_mask=None):
+    magnetization, ramp_coeffs = params
+    reg_config_q = dict(reg_config)
+    if "lambda_exchange" in reg_config_q:
+        reg_config_q["lambda_exchange"] = _lambda_q(reg_config_q["lambda_exchange"])
+    return mbir_mod.mbir_loss_2d(
+        (_mag_q(magnetization), _ramp_q(ramp_coeffs)),
+        mask,
+        _phase_q(phase),
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+        reg_config_q,
+        reg_mask,
+    )
+
+
+def solve_mbir_2d(phase, init_mag, mask, pixel_size, solver: str | NewtonCGConfig = "newton_cg", reg_config=None, rdfc_kernel=None, init_ramp_coeffs=None, reg_mask=None):
+    reg_config_q = None if reg_config is None else dict(reg_config)
+    if reg_config_q is not None and "lambda_exchange" in reg_config_q:
+        reg_config_q["lambda_exchange"] = _lambda_q(reg_config_q["lambda_exchange"])
+    return mbir_mod.solve_mbir_2d(
+        _phase_q(phase),
+        _mag_q(init_mag),
+        mask,
+        _pixel_size_q(pixel_size),
+        solver=solver,
+        reg_config=reg_config_q,
+        rdfc_kernel=rdfc_kernel,
+        init_ramp_coeffs=_ramp_q(init_ramp_coeffs),
+        reg_mask=reg_mask,
+    )
+
+
+def reconstruct_2d(phase, pixel_size, mask, lam=_Q(1e-3, "rad2"), **kwargs):
+    return mbir_mod.reconstruct_2d(
+        _phase_q(phase),
+        _pixel_size_q(pixel_size),
+        mask,
+        lam=_lambda_q(lam),
+        **kwargs,
+    )
+
+
+def lcurve_sweep(phase, mask, pixel_size, lambdas, **kwargs):
+    return mbir_mod.lcurve_sweep(
+        _phase_q(phase),
+        mask,
+        _pixel_size_q(pixel_size),
+        _lambda_q(lambdas),
+        **kwargs,
+    )
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data")
 UPSTREAM_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data", "upstream")
@@ -455,7 +599,7 @@ class TestProject3D:
             mag_comp_first = vec_flat.reshape(3, Z, Y, X)
             mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
             proj = project_3d(mag_ours, axis=axis)
-            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+            return jnp.transpose(proj.value, (2, 0, 1)).reshape(-1)
 
         jac = np.asarray(jax.jacfwd(project_from_vec)(jnp.zeros((n,), dtype=jnp.float64)))
 
@@ -577,7 +721,7 @@ class TestGetFreqGrid:
 
     def test_dc_bin_is_one(self):
         _, _, denom = get_freq_grid(8, 8, 1.0)
-        assert float(denom[0, 0]) == 1.0
+        assert _scalar_value(denom[0, 0]) == 1.0
 
 
 class TestApplyRamp:
@@ -613,13 +757,13 @@ class TestExchangeLossFn:
         mask = jnp.ones((6, 6), dtype=bool)
         mag = jnp.ones((6, 6, 2), dtype=jnp.float64) * 3.14
         loss = exchange_loss_fn(mag, mask)
-        assert_allclose(float(loss), 0.0, atol=1e-12)
+        assert_allclose(_scalar_value(loss), 0.0, atol=1e-12)
 
     def test_zero_field_zero_loss(self):
         mask = jnp.ones((6, 6), dtype=bool)
         mag = jnp.zeros((6, 6, 2), dtype=jnp.float64)
         loss = exchange_loss_fn(mag, mask)
-        assert_allclose(float(loss), 0.0, atol=1e-15)
+        assert_allclose(_scalar_value(loss), 0.0, atol=1e-15)
 
     def test_non_uniform_positive_loss(self):
         """A non-uniform field should produce positive exchange loss."""
@@ -627,7 +771,7 @@ class TestExchangeLossFn:
         rng = np.random.default_rng(42)
         mag = jnp.array(rng.standard_normal((6, 6, 2)))
         loss = exchange_loss_fn(mag, mask)
-        assert float(loss) > 0
+        assert _scalar_value(loss) > 0
 
     def test_mask_limits_region(self):
         """Variation outside the mask should not contribute to the loss."""
@@ -641,8 +785,8 @@ class TestExchangeLossFn:
         # Mask everything
         mask_full = jnp.ones((8, 8), dtype=bool)
 
-        loss_center = float(exchange_loss_fn(full_mag, mask_center))
-        loss_full = float(exchange_loss_fn(full_mag, mask_full))
+        loss_center = _scalar_value(exchange_loss_fn(full_mag, mask_center))
+        loss_full = _scalar_value(exchange_loss_fn(full_mag, mask_full))
 
         # Center loss should be less than full loss
         assert loss_center < loss_full
@@ -652,7 +796,7 @@ class TestExchangeLossFn:
         mask = jnp.ones((4, 4), dtype=bool)
         mag = jnp.ones((4, 4, 2), dtype=jnp.float64)
 
-        grad_fn = jax.grad(lambda m: exchange_loss_fn(m, mask))
+        grad_fn = jax.grad(lambda m: cast(Any, exchange_loss_fn(m, mask)).value)
         grad = grad_fn(mag)
         # Uniform field: gradient should be zero
         assert_allclose(np.asarray(grad), 0.0, atol=1e-12)
@@ -684,7 +828,7 @@ class TestMBIRLoss:
             reg_config={"lambda_exchange": 0.0},
         )
         # With lambda=0 and perfect forward model, loss should be ~0
-        assert float(loss) < 1e-10
+        assert _scalar_value(loss) < 1e-10
 
     def test_positive_loss_with_wrong_params(self, small_problem):
         """Loss should be positive when params don't match observed phase."""
@@ -698,7 +842,7 @@ class TestMBIRLoss:
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 0.0},
         )
-        assert float(loss) > 0
+        assert _scalar_value(loss) > 0
 
     def test_regularization_increases_loss(self, small_problem):
         """Adding regularization should increase (or not decrease) loss."""
@@ -709,11 +853,11 @@ class TestMBIRLoss:
         mask = jnp.array(sp["mask"])
         phase = jnp.array(sp["phase"])
 
-        loss_noreg = float(mbir_loss_2d(
+        loss_noreg = _scalar_value(mbir_loss_2d(
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 0.0},
         ))
-        loss_reg = float(mbir_loss_2d(
+        loss_reg = _scalar_value(mbir_loss_2d(
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 1.0},
         ))
@@ -730,7 +874,7 @@ class TestMBIRLoss:
             lambda p: mbir_loss_2d(
                 p, mask, phase, sp["kernel"], sp["voxel_size"],
                 reg_config={"lambda_exchange": 1e-3},
-            ),
+            ).value,
         )
         grad = grad_fn(params)
         assert grad[0].shape == sp["gt_mag"].shape
@@ -768,72 +912,12 @@ class TestSolvers:
         assert result.loss_history.shape == (1,)
 
         # Final loss should be significantly less than initial
-        final_loss = float(mbir_loss_2d(
+        final_loss = _scalar_value(mbir_loss_2d(
             (result.magnetization.value, _ramp_array(result.ramp_coeffs)),
             mask, phase, kernel, sp["voxel_size"],
             reg_config={"lambda_exchange": 1e-4},
         ))
-        init_loss = float(mbir_loss_2d(
-            (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        assert final_loss < init_loss
-
-    @pytest.mark.slow
-    def test_adam_reduces_loss(self, small_problem):
-        sp = small_problem
-        mask = jnp.array(sp["mask"])
-        phase = jnp.array(sp["phase"])
-        init_mag = jnp.zeros_like(jnp.array(sp["gt_mag"]))
-        kernel = sp["kernel"]
-
-        result = solve_mbir_2d(
-            phase=phase,
-            init_mag=init_mag,
-            mask=mask,
-            pixel_size=_Q(sp["voxel_size"], "nm"),
-            solver=AdamConfig(num_steps=200, learning_rate=1e-2, patience=50),
-            reg_config={"lambda_exchange": 1e-4},
-            rdfc_kernel=kernel,
-        )
-
-        assert isinstance(result, SolverResult)
-        final_loss = float(mbir_loss_2d(
-            (result.magnetization.value, _ramp_array(result.ramp_coeffs)),
-            mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        init_loss = float(mbir_loss_2d(
-            (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        assert final_loss < init_loss
-
-    @pytest.mark.slow
-    def test_lbfgs_reduces_loss(self, small_problem):
-        sp = small_problem
-        mask = jnp.array(sp["mask"])
-        phase = jnp.array(sp["phase"])
-        init_mag = jnp.zeros_like(jnp.array(sp["gt_mag"]))
-        kernel = sp["kernel"]
-
-        result = solve_mbir_2d(
-            phase=phase,
-            init_mag=init_mag,
-            mask=mask,
-            pixel_size=_Q(sp["voxel_size"], "nm"),
-            solver=LBFGSConfig(num_steps=100, patience=30),
-            reg_config={"lambda_exchange": 1e-4},
-            rdfc_kernel=kernel,
-        )
-
-        assert isinstance(result, SolverResult)
-        final_loss = float(mbir_loss_2d(
-            (result.magnetization.value, _ramp_array(result.ramp_coeffs)),
-            mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        init_loss = float(mbir_loss_2d(
+        init_loss = _scalar_value(mbir_loss_2d(
             (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
             reg_config={"lambda_exchange": 1e-4},
         ))
@@ -917,7 +1001,7 @@ class TestReconstruct2D:
             phase=jnp.array(sp["phase"]),
             pixel_size=_Q(sp["voxel_size"], "nm"),
             mask=jnp.array(sp["mask"]),
-            solver="adam",  # this should be overridden
+            solver="newton_cg",
             solver_config=NewtonCGConfig(cg_maxiter=200),
         )
         assert isinstance(result, SolverResult)
@@ -1073,17 +1157,6 @@ class TestSolverConfigs:
         cfg = NewtonCGConfig()
         assert cfg.cg_maxiter == 10000
         assert cfg.cg_tol == 1e-16
-
-    def test_adam_defaults(self):
-        cfg = AdamConfig()
-        assert cfg.num_steps == 2000
-        assert cfg.learning_rate == 1e-2
-        assert cfg.patience == 50
-
-    def test_lbfgs_defaults(self):
-        cfg = LBFGSConfig()
-        assert cfg.num_steps == 500
-        assert cfg.patience == 50
 
     def test_configs_are_frozen(self):
         cfg = NewtonCGConfig()
@@ -1354,7 +1427,7 @@ class TestUpstreamProjectorHDF5:
             mag_comp_first = vec_flat.reshape(3, Z, Y, X)
             mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
             proj = project_3d(mag_ours, axis=axis)
-            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+            return jnp.transpose(proj.value, (2, 0, 1)).reshape(-1)
 
         jac = np.asarray(
             jax.jacfwd(project_from_vec)(jnp.zeros(n, dtype=jnp.float64))

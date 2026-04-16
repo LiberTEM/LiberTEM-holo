@@ -20,6 +20,7 @@ import unxt as u  # noqa: E402
 from libertem_holo.base.mbir import (  # noqa: E402
     RampCoeffs,
     SolverResult,
+    add_units_to_inputs,
     apply_ramp,
     bootstrap_threshold_uncertainty_2d,
     build_rdfc_kernel,
@@ -28,10 +29,17 @@ from libertem_holo.base.mbir import (  # noqa: E402
     forward_model_3d,
     forward_model_single_rdfc_2d,
     lcurve_sweep,
+    make_quantity,
     mbir_loss_2d,
     reconstruct_2d,
     solve_mbir_2d,
     NewtonCGConfig,
+    to_local_induction,
+    to_local_magnetization,
+    to_magnetic_induction,
+    to_projected_induction_integral,
+    to_projected_magnetization_integral,
+    to_physical_magnetization,
 )
 
 
@@ -44,6 +52,55 @@ def array_value(value):
 def assert_quantity_compatible(value, unit: str):
     assert isinstance(value, u.Quantity)
     u.uconvert(unit, value)
+
+
+def test_make_quantity_constructs_scalar_and_array_values():
+    scalar = make_quantity(0.58, "nm")
+    vector = make_quantity([1.0, 2.0, 3.0], "rad2")
+
+    assert_quantity_compatible(scalar, "nm")
+    assert_quantity_compatible(vector, "rad2")
+    assert_allclose(np.asarray(scalar.value), 0.58)
+    assert_allclose(np.asarray(vector.value), np.array([1.0, 2.0, 3.0]))
+
+
+def test_add_units_to_inputs_builds_common_quantity_dict():
+    result = add_units_to_inputs(
+        phase=np.array([[1.0, 2.0]]),
+        pixel_size=0.58,
+        thickness=125.0,
+        lam=1e-3,
+        reference_induction=0.6,
+    )
+
+    assert set(result) == {
+        "phase",
+        "pixel_size",
+        "thickness",
+        "lam",
+        "reference_induction",
+    }
+    assert_quantity_compatible(result["phase"], "rad")
+    assert_quantity_compatible(result["pixel_size"], "nm")
+    assert_quantity_compatible(result["thickness"], "nm")
+    assert_quantity_compatible(result["lam"], "rad2")
+    assert_quantity_compatible(result["reference_induction"], "T")
+
+
+def test_add_units_to_inputs_converts_existing_quantities():
+    result = add_units_to_inputs(
+        phase=u.Quantity([180.0], "deg"),
+        pixel_size=u.Quantity(0.007423, "um"),
+        thickness=u.Quantity(0.125, "um"),
+        lam=u.Quantity(0.001, "rad2"),
+        reference_induction=u.Quantity(600.0, "mT"),
+    )
+
+    assert_allclose(array_value(result["phase"]), np.array([np.pi]), rtol=1e-12, atol=1e-12)
+    assert_allclose(array_value(result["pixel_size"]), 7.423, rtol=1e-12, atol=1e-12)
+    assert_allclose(array_value(result["thickness"]), 125.0, rtol=1e-12, atol=1e-12)
+    assert_allclose(array_value(result["lam"]), 0.001, rtol=1e-12, atol=1e-12)
+    assert_allclose(array_value(result["reference_induction"]), 0.6, rtol=1e-12, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +198,7 @@ class TestApplyRampQuantity:
 
     def test_rejects_non_length_pixel_size(self):
         rc = RampCoeffs.zeros(dtype=jnp.float64)
-        with pytest.raises(AssertionError, match="pixel_size"):
+        with pytest.raises(ValueError, match="pixel_size"):
             apply_ramp(rc, 4, 4, pixel_size=u.Quantity(1.0, "rad"))
 
 
@@ -180,7 +237,7 @@ class TestForwardModel2DQuantity:
 
     def test_rejects_non_dimensionless_magnetization(self, small_problem):
         sp = small_problem
-        with pytest.raises(AssertionError, match="magnetization"):
+        with pytest.raises(ValueError, match="magnetization"):
             forward_model_2d(
                 u.Quantity(sp["gt_mag"], "T"),
                 pixel_size=sp["pixel_size"],
@@ -219,7 +276,7 @@ class TestForwardModel3DQuantity:
         mag_3d = np.zeros((4, 4, 4, 3), dtype=np.float64)
         mag_3d[1:3, 1:3, 1:3, 0] = 1.0
         result = forward_model_3d(
-            mag_3d,
+            u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(10.0, "nm"),
             axis="z",
         )
@@ -230,12 +287,12 @@ class TestForwardModel3DQuantity:
         mag_3d = np.zeros((4, 4, 4, 3), dtype=np.float64)
         mag_3d[1:3, 1:3, 1:3, 0] = 1.0
         ref = forward_model_3d(
-            mag_3d,
+            u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(10.0, "nm"),
             axis="z",
         )
         qty = forward_model_3d(
-            mag_3d,
+            u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(0.01, "um"),
             axis="z",
         )
@@ -304,14 +361,14 @@ class TestReconstruct2DQuantity:
             sp["phase"],
             pixel_size=sp["pixel_size"],
             mask=sp["mask"],
-            lam=1e-3,
+            lam=u.Quantity(1e-3, "rad2"),
             solver=cfg,
         )
         qty = reconstruct_2d(
             sp["phase"],
             pixel_size=u.Quantity(sp["voxel_size"] / 1000.0, "um"),
             mask=sp["mask"],
-            lam=1e-3,
+            lam=u.Quantity(1e-3, "rad2"),
             solver=cfg,
         )
         assert_allclose(
@@ -322,14 +379,175 @@ class TestReconstruct2DQuantity:
 
     def test_rejects_non_angle_phase(self, small_problem):
         sp = small_problem
-        with pytest.raises(AssertionError, match="phase"):
+        with pytest.raises(ValueError, match="phase"):
             reconstruct_2d(
                 u.Quantity(array_value(sp["phase"]), "nm"),
                 pixel_size=sp["pixel_size"],
                 mask=sp["mask"],
-                lam=1e-3,
+                lam=u.Quantity(1e-3, "rad2"),
                 solver=NewtonCGConfig(cg_maxiter=10),
             )
+
+
+# ===================================================================
+# magnetization conversion helpers
+# ===================================================================
+
+class TestMagnetizationConversionHelpers:
+    """Public helpers for projected integrals and local physical fields."""
+
+    def test_to_projected_induction_integral_scales_dimensionless_result(self, small_problem):
+        magnetization = small_problem["gt_mag_q"]
+        result = to_projected_induction_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+            reference_induction=u.Quantity(0.6, "T"),
+        )
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "T nm")
+        assert_allclose(
+            array_value(result),
+            0.6 * small_problem["voxel_size"] * array_value(magnetization),
+            atol=1e-12,
+        )
+
+    def test_to_projected_magnetization_integral_uses_mu0(self, small_problem):
+        magnetization = small_problem["gt_mag_q"]
+        result = to_projected_magnetization_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+            reference_induction=u.Quantity(0.6, "T"),
+        )
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "A")
+        expected = 0.6 * (small_problem["voxel_size"] * 1e-9) * array_value(magnetization) / (4e-7 * np.pi)
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_to_magnetic_induction_rejects_non_dimensionless_input(self, small_problem):
+        with pytest.raises(ValueError, match="magnetization"):
+            to_magnetic_induction(
+                u.Quantity(array_value(small_problem["gt_mag_q"]), "T"),
+                pixel_size=small_problem["pixel_size"],
+            )
+
+    def test_to_local_induction_scales_by_scalar_thickness(self, small_problem):
+        magnetization = small_problem["gt_mag_q"]
+        projected = to_projected_induction_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+            reference_induction=u.Quantity(0.6, "T"),
+        )
+        thickness = u.Quantity(12.5, "nm")
+
+        result = to_local_induction(projected, thickness)
+
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "T")
+        expected = 0.6 * small_problem["voxel_size"] * array_value(magnetization) / 12.5
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_to_local_induction_broadcasts_thickness_image(self, small_problem):
+        magnetization = small_problem["gt_mag_q"]
+        projected = to_projected_induction_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+        )
+        thickness_map = u.Quantity(
+            jnp.linspace(5.0, 20.0, small_problem["H"] * small_problem["W"]).reshape(
+                small_problem["H"], small_problem["W"]
+            ),
+            "nm",
+        )
+
+        result = to_local_induction(projected, thickness_map)
+
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "T")
+        expected = array_value(projected) / array_value(thickness_map)[..., None]
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_to_local_magnetization_scales_by_scalar_thickness(self, small_problem):
+        projected = to_projected_magnetization_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+            reference_induction=u.Quantity(0.6, "T"),
+        )
+        thickness = u.Quantity(12.5, "nm")
+
+        result = to_local_magnetization(projected, thickness)
+
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "A / m")
+        expected = array_value(projected) / (12.5e-9)
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_to_local_magnetization_broadcasts_thickness_image(self, small_problem):
+        projected = to_projected_magnetization_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        thickness_map = u.Quantity(
+            jnp.linspace(5.0, 20.0, small_problem["H"] * small_problem["W"]).reshape(
+                small_problem["H"], small_problem["W"]
+            ),
+            "nm",
+        )
+
+        result = to_local_magnetization(projected, thickness_map)
+
+        assert isinstance(result, u.Quantity)
+        assert_quantity_compatible(result, "A / m")
+        expected = array_value(projected) / (array_value(thickness_map)[..., None] * 1e-9)
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_local_scaling_rejects_non_positive_thickness(self, small_problem):
+        projected = to_projected_induction_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        thickness_map = u.Quantity(jnp.ones((small_problem["H"], small_problem["W"])), "nm")
+        thickness_map = u.Quantity(thickness_map.value.at[0, 0].set(0.0), "nm")
+
+        with pytest.raises(ValueError, match="thickness"):
+            to_local_induction(projected, thickness_map)
+
+    def test_to_local_induction_rejects_non_length_thickness(self, small_problem):
+        projected = to_projected_induction_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        with pytest.raises(ValueError, match="thickness"):
+            to_local_induction(projected, u.Quantity(3.0, "rad"))
+
+    def test_to_local_magnetization_rejects_non_magnetization_input(self, small_problem):
+        projected = to_projected_induction_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        with pytest.raises(ValueError, match="projected_magnetization_integral"):
+            to_local_magnetization(projected, u.Quantity(10.0, "nm"))
+
+    def test_compatibility_aliases_match_explicit_helpers(self, small_problem):
+        magnetization = small_problem["gt_mag_q"]
+        induction_alias = to_magnetic_induction(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+        )
+        induction_explicit = to_projected_induction_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+        )
+        magnetization_alias = to_physical_magnetization(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+        )
+        magnetization_explicit = to_projected_magnetization_integral(
+            magnetization,
+            pixel_size=small_problem["pixel_size"],
+        )
+
+        assert_allclose(array_value(induction_alias), array_value(induction_explicit), atol=1e-12)
+        assert_allclose(array_value(magnetization_alias), array_value(magnetization_explicit), atol=1e-12)
 
 
 # ===================================================================
@@ -356,7 +574,7 @@ class TestMBIRLossQuantity:
 
     def test_rejects_non_angle_lambda(self, small_problem):
         sp = small_problem
-        with pytest.raises(AssertionError, match="lambda_exchange"):
+        with pytest.raises(ValueError, match="lambda_exchange"):
             mbir_loss_2d(
                 (sp["gt_mag_q"], cast(Any, sp["ramp"])),
                 sp["mask"],
@@ -432,7 +650,7 @@ class TestLCurveQuantity:
 
     def test_rejects_non_rad2_lambdas(self, small_problem):
         sp = small_problem
-        with pytest.raises(AssertionError, match="lambda_exchange"):
+        with pytest.raises(ValueError, match="lambda_exchange"):
             lcurve_sweep(
                 phase=sp["phase"],
                 mask=sp["mask"],
@@ -467,8 +685,41 @@ class TestBootstrapThresholdQuantity:
             rdfc_kernel=sp["kernel"],
         )
         assert isinstance(result.threshold, u.Quantity)
+        assert isinstance(result.threshold_low, u.Quantity)
+        assert isinstance(result.threshold_high, u.Quantity)
         assert isinstance(result.threshold_draws, u.Quantity)
         assert isinstance(result.mean_norm, u.Quantity)
+        assert_quantity_compatible(result.threshold, "rad")
+        assert_quantity_compatible(result.threshold_low, "rad")
+        assert_quantity_compatible(result.threshold_high, "rad")
+        assert result.magnetizations.shape[0] == 3
+
+    def test_float_thresholds_are_interpreted_as_radians(self, small_problem):
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        result = bootstrap_threshold_uncertainty_2d(
+            phase=sp["phase"],
+            mip_phase=sp["phase"],
+            threshold=threshold_value,
+            threshold_low=0.8 * threshold_value,
+            threshold_high=1.2 * threshold_value,
+            pixel_size=sp["pixel_size"],
+            lam=u.Quantity(1e-3, "rad2"),
+            solver_config=NewtonCGConfig(cg_maxiter=5),
+            n_boot=3,
+            rdfc_kernel=sp["kernel"],
+        )
+        assert isinstance(result.threshold, u.Quantity)
+        assert isinstance(result.threshold_low, u.Quantity)
+        assert isinstance(result.threshold_high, u.Quantity)
+        assert isinstance(result.threshold_draws, u.Quantity)
+        assert_quantity_compatible(result.threshold, "rad")
+        assert_quantity_compatible(result.threshold_low, "rad")
+        assert_quantity_compatible(result.threshold_high, "rad")
+        assert_allclose(array_value(result.threshold), threshold_value, atol=1e-12)
+        assert_allclose(array_value(result.threshold_low), 0.8 * threshold_value, atol=1e-12)
+        assert_allclose(array_value(result.threshold_high), 1.2 * threshold_value, atol=1e-12)
         assert result.magnetizations.shape[0] == 3
 
 

@@ -2,8 +2,9 @@
 
 Unit conventions
 ----------------
-All public functions in this module require ``unxt.Quantity`` inputs for
-physical parameters and return ``Quantity``-annotated outputs.
+Public functions in this module generally require ``unxt.Quantity`` inputs for
+physical parameters and return ``Quantity``-annotated outputs, unless a
+specific API explicitly documents scalar convenience inputs.
 
 * ``pixel_size`` — pixel side length as a ``unxt.Quantity`` with length units
   (e.g. ``Quantity(0.58, "nm")``).  Converted to nanometres internally.
@@ -29,18 +30,14 @@ from typing import Any, NamedTuple, Union, cast
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
-import optax
 import numpy as np
 import quaxed.numpy as qnp
 import unxt as u
 
 PHI_0 = u.Quantity(2067.83, "T nm2")  # magnetic flux quantum h/(2e)
 B_REF = u.Quantity(1.0, "T")  # reference magnetic induction
+MU_0 = u.Quantity(4e-7 * np.pi, "T m / A")  # vacuum permeability
 KERNEL_COEFF = B_REF / (2 * PHI_0)  # Quantity["1/nm2"]
-# Plain float for JIT internals — computed directly to avoid Quantity
-# arithmetic round-off in the hot path.
-_KERNEL_COEFF_FLOAT = 1.0 / (2 * 2067.83)  # == B_REF / (2 * PHI_0) in nm⁻²
-
 
 # ---------------------------------------------------------------------------
 # RampCoeffs — typed container for background ramp parameters
@@ -67,15 +64,65 @@ class RampCoeffs(NamedTuple):
     def zeros(cls, dtype=jnp.float64):
         """Create a zero-valued RampCoeffs."""
         return cls(
-            offset=u.Quantity(jnp.zeros((), dtype=dtype), "rad"),
-            slope_y=u.Quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
-            slope_x=u.Quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
+            offset=make_quantity(jnp.zeros((), dtype=dtype), "rad"),
+            slope_y=make_quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
+            slope_x=make_quantity(jnp.zeros((), dtype=dtype), "rad/nm"),
         )
 
 
 # ---------------------------------------------------------------------------
 # Unit conversion helpers
 # ---------------------------------------------------------------------------
+
+def make_quantity(value: Any, unit: str) -> u.Quantity:
+    """Construct a Quantity from scalar or array-like input.
+
+    This is a convenience constructor only. Semantic normalization and
+    validation still belong in the specialized ``_as_*`` helpers below.
+    """
+    return u.Quantity(jnp.asarray(value), unit)
+
+
+def add_units_to_inputs(
+    *,
+    phase: Any | None = None,
+    phase_unit: str = "rad",
+    pixel_size: Any | None = None,
+    pixel_size_unit: str = "nm",
+    thickness: Any | None = None,
+    thickness_unit: str = "nm",
+    lam: Any | None = None,
+    lam_unit: str = "rad2",
+    reference_induction: Any | None = None,
+    reference_induction_unit: str = "T",
+) -> dict[str, u.Quantity]:
+    """Build a dictionary of common MBIR input quantities in one call.
+
+    This is a user-facing convenience helper for notebook and scripting
+    workflows where several scalar-or-array inputs need units attached at
+    once. Structured inputs such as :class:`RampCoeffs` remain separate.
+
+    Only values that are provided are included in the returned dictionary.
+    Existing ``unxt.Quantity`` inputs are passed through unit conversion to
+    the requested target unit.
+    """
+    result: dict[str, u.Quantity] = {}
+
+    for key, value, unit in (
+        ("phase", phase, phase_unit),
+        ("pixel_size", pixel_size, pixel_size_unit),
+        ("thickness", thickness, thickness_unit),
+        ("lam", lam, lam_unit),
+        ("reference_induction", reference_induction, reference_induction_unit),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, u.Quantity):
+            result[key] = cast(u.Quantity, u.uconvert(unit, value))
+        else:
+            result[key] = make_quantity(value, unit)
+
+    return result
 
 def _to_nm(q: u.Quantity) -> u.Quantity:
     """Convert a length Quantity to nanometres."""
@@ -98,17 +145,18 @@ def _is_unit_convertible(value: u.Quantity, unit: str) -> bool:
 
 def _assert_quantity_compatible(value: Any, unit: str, name: str) -> None:
     """Assert that *value* is a Quantity compatible with *unit*."""
-    assert isinstance(value, u.Quantity), f"{name} must be a Quantity, got {type(value)}"
-    assert _is_unit_convertible(value, unit), (
-        f"{name} must be convertible to {unit!r}, got unit {value.unit!s}"
-    )
+    if not isinstance(value, u.Quantity):
+        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
+    if not _is_unit_convertible(value, unit):
+        raise ValueError(
+            f"{name} must be convertible to {unit!r}, got unit {value.unit!s}"
+        )
 
 
 def _assert_ramp_coeffs_units(ramp_coeffs: RampCoeffs, name: str = "ramp_coeffs") -> None:
     """Assert the canonical units for RampCoeffs."""
-    assert isinstance(ramp_coeffs, RampCoeffs), (
-        f"{name} must be a RampCoeffs instance, got {type(ramp_coeffs)}"
-    )
+    if not isinstance(ramp_coeffs, RampCoeffs):
+        raise TypeError(f"{name} must be a RampCoeffs instance, got {type(ramp_coeffs)}")
     _assert_quantity_compatible(ramp_coeffs.offset, "rad", f"{name}.offset")
     _assert_quantity_compatible(ramp_coeffs.slope_y, "rad / nm", f"{name}.slope_y")
     _assert_quantity_compatible(ramp_coeffs.slope_x, "rad / nm", f"{name}.slope_x")
@@ -146,49 +194,97 @@ def _ramp_coeffs_from_array(values: jax.Array) -> RampCoeffs:
     """Convert a plain ramp vector [offset, slope_y, slope_x] to typed coefficients."""
     values = jnp.asarray(values)
     return RampCoeffs(
-        offset=u.Quantity(values[0], "rad"),
-        slope_y=u.Quantity(values[1], "rad/nm"),
-        slope_x=u.Quantity(values[2], "rad/nm"),
+        offset=make_quantity(values[0], "rad"),
+        slope_y=make_quantity(values[1], "rad/nm"),
+        slope_x=make_quantity(values[2], "rad/nm"),
     )
 
 
-def _as_length_quantity(value) -> u.Quantity:
-    """Normalize a length-like input to a Quantity in nm."""
-    if isinstance(value, u.Quantity):
-        _assert_quantity_compatible(value, "nm", "pixel_size")
-        result = _to_nm(value)
-    else:
-        result = u.Quantity(jnp.asarray(value), "nm")
-    _assert_quantity_compatible(result, "nm", "pixel_size")
+def _as_length_quantity(value, name: str = "pixel_size") -> u.Quantity:
+    """Normalize a length Quantity to nanometres."""
+    if not isinstance(value, u.Quantity):
+        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
+    _assert_quantity_compatible(value, "nm", name)
+    result = _to_nm(value)
+    _assert_quantity_compatible(result, "nm", name)
     return result
 
 
 def _as_angle_quantity(value) -> u.Quantity:
-    """Normalize an angle-like input to a Quantity in rad.
+    """Normalize an angle Quantity to radians.
 
     Dimensionless intermediate phase values are re-labelled as radians by
     convention after the physical nm² cancellation in the forward model.
     """
-    if isinstance(value, u.Quantity):
-        if str(value.unit) == "":
-            result = u.Quantity(value.value, "rad")
-        else:
-            _assert_quantity_compatible(value, "rad", "phase")
-            result = _to_rad(value)
+    if not isinstance(value, u.Quantity):
+        raise TypeError(f"phase must be a unxt unitful Quantity, got {type(value)}")
+    if str(value.unit) == "":
+        result = make_quantity(value.value, "rad")
     else:
-        result = u.Quantity(jnp.asarray(value), "rad")
+        _assert_quantity_compatible(value, "rad", "phase")
+        result = _to_rad(value)
     _assert_quantity_compatible(result, "rad", "phase")
     return result
 
 
 def _as_dimensionless_quantity(value) -> u.Quantity:
-    """Normalize a dimensionless input to a Quantity with unit ''."""
-    if isinstance(value, u.Quantity):
-        _assert_quantity_compatible(value, "", "magnetization")
-        result = cast(u.Quantity, u.uconvert("", value))
-    else:
-        result = u.Quantity(jnp.asarray(value), "")
+    """Normalize a dimensionless Quantity to unit ''."""
+    if not isinstance(value, u.Quantity):
+        raise TypeError(
+            f"magnetization must be a unxt dimensionless unitful Quantity, got {type(value)}"
+        )
+    _assert_quantity_compatible(value, "", "magnetization")
+    result = cast(u.Quantity, u.uconvert("", value))
     _assert_quantity_compatible(result, "", "magnetization")
+    return result
+
+
+def _as_induction_quantity(value, name: str = "reference_induction") -> u.Quantity:
+    """Normalize a magnetic induction Quantity to tesla."""
+    if not isinstance(value, u.Quantity):
+        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
+    _assert_quantity_compatible(value, "T", name)
+    result = cast(u.Quantity, u.uconvert("T", value))
+    _assert_quantity_compatible(result, "T", name)
+    return result
+
+
+def _as_physical_magnetization_quantity(
+    value,
+    name: str = "projected_magnetization",
+) -> u.Quantity:
+    """Normalize a physical magnetization Quantity to A/m."""
+    if not isinstance(value, u.Quantity):
+        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
+    _assert_quantity_compatible(value, "A / m", name)
+    result = cast(u.Quantity, u.uconvert("A / m", value))
+    _assert_quantity_compatible(result, "A / m", name)
+    return result
+
+
+def _as_projected_induction_integral_quantity(
+    value,
+    name: str = "projected_induction_integral",
+) -> u.Quantity:
+    """Normalize a projected induction line integral to T nm."""
+    if not isinstance(value, u.Quantity):
+        raise ValueError(f"{name} must be a unxt.Quantity compatible with 'T nm', got {type(value)!r}")
+    _assert_quantity_compatible(value, "T nm", name)
+    result = cast(u.Quantity, u.uconvert("T nm", value))
+    _assert_quantity_compatible(result, "T nm", name)
+    return result
+
+
+def _as_projected_magnetization_integral_quantity(
+    value,
+    name: str = "projected_magnetization_integral",
+) -> u.Quantity:
+    """Normalize a projected magnetization line integral to ampere."""
+    if not isinstance(value, u.Quantity):
+        raise ValueError(f"{name} must be a unxt.Quantity compatible with 'A', got {type(value)!r}")
+    _assert_quantity_compatible(value, "A", name)
+    result = cast(u.Quantity, u.uconvert("A", value))
+    _assert_quantity_compatible(result, "A", name)
     return result
 
 
@@ -198,75 +294,29 @@ def _as_ramp_coeffs(value, *, dtype=jnp.float64) -> RampCoeffs:
         result = RampCoeffs.zeros(dtype=dtype)
         _assert_ramp_coeffs_units(result)
         return result
-    if isinstance(value, RampCoeffs):
-        result = RampCoeffs(
-            offset=_to_rad(value.offset),
-            slope_y=cast(u.Quantity, u.uconvert("rad / nm", value.slope_y)),
-            slope_x=cast(u.Quantity, u.uconvert("rad / nm", value.slope_x)),
-        )
-        _assert_ramp_coeffs_units(result)
-        return result
-    result = _ramp_coeffs_from_array(jnp.asarray(value))
+    if not isinstance(value, RampCoeffs):
+        raise TypeError(f"ramp_coeffs must be a RampCoeffs instance, got {type(value)}")
+    result = RampCoeffs(
+        offset=_to_rad(value.offset),
+        slope_y=cast(u.Quantity, u.uconvert("rad / nm", value.slope_y)),
+        slope_x=cast(u.Quantity, u.uconvert("rad / nm", value.slope_x)),
+    )
     _assert_ramp_coeffs_units(result)
     return result
 
 
-def _contains_quantity(value: Any) -> bool:
-    """Return True when the input already carries explicit unit information."""
+def _as_threshold_quantity(value) -> u.Quantity:
     if isinstance(value, u.Quantity):
-        return True
-    if isinstance(value, RampCoeffs):
-        return True
-    if isinstance(value, dict):
-        return any(_contains_quantity(item) for item in value.values())
-    if isinstance(value, (tuple, list)):
-        return any(_contains_quantity(item) for item in value)
-    return False
+        return cast(u.Quantity, u.uconvert("rad", value))
+    return make_quantity(value, "rad")
 
 
-def _maybe_strip_quantity(value, *inputs):
-    """Return raw JAX values when all inputs were unitless/raw arrays."""
-    if any(_contains_quantity(item) for item in inputs):
-        return value
-    if isinstance(value, u.Quantity):
-        return value.value
-    return value
-
-
-def _lambda_exchange_quantity(value) -> u.Quantity:
-    """Normalize the exchange weight to the loss unit rad².
-
-    The regularization norm is dimensionless for dimensionless magnetization,
-    so lambda_exchange must carry rad² for the total objective to be unit
-    consistent.
-    """
+def _to_lambda_exchange(value) -> u.Quantity:
+    """Convert a scalar-or-Quantity exchange weight to ``Quantity['rad2']``."""
     if isinstance(value, u.Quantity):
         _assert_quantity_compatible(value, "rad2", "lambda_exchange")
-        result = cast(u.Quantity, u.uconvert("rad2", value))
-    else:
-        result = u.Quantity(jnp.asarray(value), "rad2")
-    _assert_quantity_compatible(result, "rad2", "lambda_exchange")
-    return result
-
-
-def _rfft2_keep_unit(arr):
-    """Discrete FFT that preserves the input unit instead of inverting it.
-
-    unxt/quax currently labels FFT outputs with reciprocal units. For the
-    discrete, pixel-sum convention used here the transform should preserve the
-    array's unit. We therefore apply FFT to the raw value and reattach the
-    original unit explicitly.
-    """
-    if isinstance(arr, u.Quantity):
-        return u.Quantity(jnp.fft.rfft2(arr.value), str(arr.unit))
-    return jnp.fft.rfft2(arr)
-
-
-def _irfft2_keep_unit(arr, *, s):
-    """Inverse discrete FFT that preserves the input unit."""
-    if isinstance(arr, u.Quantity):
-        return u.Quantity(jnp.fft.irfft2(arr.value, s=s), str(arr.unit))
-    return jnp.fft.irfft2(arr, s=s)
+        return cast(u.Quantity, u.uconvert("rad2", value))
+    return make_quantity(value, "rad2")
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +334,25 @@ def _validate_positive(value, name):
         v = float(value) if np.ndim(value) == 0 else np.min(value)
     if v <= 0:
         raise ValueError(f"{name} must be positive, got {value}")
+
+
+def _validate_all_positive_quantity(value: u.Quantity, name: str) -> None:
+    """Raise ValueError if any element of *value* is not positive."""
+    values = np.asarray(value.value)
+    if np.any(values <= 0):
+        raise ValueError(f"{name} must be strictly positive everywhere, got {value}")
+
+
+def _broadcast_thickness_like(projected: u.Quantity, thickness: u.Quantity) -> u.Quantity:
+    """Append singleton axes so thickness maps broadcast against projected fields."""
+    projected_shape = projected.shape
+    thickness_shape = thickness.shape
+    if len(thickness_shape) >= len(projected_shape):
+        return thickness
+    if projected_shape[: len(thickness_shape)] != thickness_shape:
+        return thickness
+    extra_axes = (1,) * (len(projected_shape) - len(thickness_shape))
+    return u.Quantity(jnp.reshape(thickness.value, thickness_shape + extra_axes), str(thickness.unit))
 
 
 class SolverResult(NamedTuple):
@@ -365,29 +434,10 @@ class NewtonCGConfig:
     cg_tol: float = 1e-16
 
 
-@dataclasses.dataclass(frozen=True)
-class AdamConfig:
-    """Configuration for the Adam solver."""
-    num_steps: int = 2000
-    learning_rate: float = 1e-2
-    patience: int = 50
-    min_delta: float = 1e-6
-
-
-@dataclasses.dataclass(frozen=True)
-class LBFGSConfig:
-    """Configuration for the L-BFGS solver."""
-    num_steps: int = 500
-    patience: int = 50
-    min_delta: float = 1e-6
-
-
-SolverConfig = Union[NewtonCGConfig, AdamConfig, LBFGSConfig]
+SolverConfig = Union[NewtonCGConfig]
 
 _SOLVER_DEFAULTS = {
     "newton_cg": NewtonCGConfig,
-    "adam": AdamConfig,
-    "lbfgs": LBFGSConfig,
 }
 
 
@@ -476,8 +526,7 @@ def exchange_loss_fn(
     jax.Array
         Scalar exchange loss (L2 norm squared of finite differences).
     """
-    original_mag = mag
-    mag_q = cast(u.Quantity, _as_dimensionless_quantity(original_mag))
+    mag_q = cast(u.Quantity, _as_dimensionless_quantity(mag))
     mag_val = mag_q.value
     reg_mask = jnp.asarray(reg_mask)
     if reg_mask.shape != mag_q.shape[:2]:
@@ -532,62 +581,14 @@ def exchange_loss_fn(
 
     loss = jnp.sum(diff_y * diff_y) + jnp.sum(diff_x * diff_x)
 
-    if _contains_quantity(original_mag):
-        return u.Quantity(loss, "")
-    return loss
-
-
-def forward_diff_norm(
-    mag: jax.Array,
-    mask: jax.Array,
-) -> jax.Array:
-    r"""Forward-difference regularization norm matching Pyramid's convention.
-
-    Computes ``\|D x\|^2`` using forward differences, with no
-    per-pixel neighbor-count normalization.  This matches the
-    ``FirstOrderRegularisator`` from Pyramid (which uses
-    ``WeightedL2Square(D)`` with a sparse forward-diff operator),
-    but is implemented in pure JAX for autodiff compatibility.
-
-    Use this when comparing L-curve values with Pyramid's
-    ``LCurve`` output, since :func:`exchange_loss_fn` applies
-    adaptive central/one-sided differences with neighbor-count
-    normalization that produce numerically different values.
-
-    Parameters
-    ----------
-    mag
-        Magnetization array of shape ``(N, M, 2)``.
-    mask
-        Binary mask of shape ``(N, M)`` defining the active region.
-
-    Returns
-    -------
-    jax.Array
-        Scalar ``\|Dx\|^2`` (sum of squared forward differences
-        over y and x, both magnetization components).
-    """
-    original_mag = mag
-    mag_q = cast(u.Quantity, _as_dimensionless_quantity(original_mag))
-    mag_val = mag_q.value
-    mask = jnp.asarray(mask, dtype=bool)
-
-    valid_y = mask[:-1, :] & mask[1:, :]
-    dy = (mag_val[1:, :, :] - mag_val[:-1, :, :]) * valid_y[..., None]
-    valid_x = mask[:, :-1] & mask[:, 1:]
-    dx = (mag_val[:, 1:, :] - mag_val[:, :-1, :]) * valid_x[..., None]
-    loss = jnp.sum(dy ** 2) + jnp.sum(dx ** 2)
-
-    if _contains_quantity(original_mag):
-        return u.Quantity(loss, "")
-    return loss
+    return u.Quantity(loss, "")
 
 
 def get_freq_grid(
     height: int,
     width: int,
-    pixel_size: float,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    pixel_size: u.Quantity,
+) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
     """Build frequency grids for FFT-based phase propagation.
 
     Parameters
@@ -617,11 +618,7 @@ def get_freq_grid(
     f_x = u.Quantity(f_x_val, "1/nm")
     denom_val = f_x_val**2 + f_y_val**2
     denom = u.Quantity(jnp.where(denom_val == 0, 1.0, denom_val), "1/nm2")
-    return (
-        _maybe_strip_quantity(f_y, pixel_size),
-        _maybe_strip_quantity(f_x, pixel_size),
-        _maybe_strip_quantity(denom, pixel_size),
-    )
+    return f_y, f_x, denom
 
 
 def _rdfc_elementary_phase(
@@ -737,8 +734,8 @@ def build_rdfc_kernel(
     )
 
     result = {
-        "u_fft": _rfft2_keep_unit(u_pad),
-        "v_fft": _rfft2_keep_unit(v_pad),
+        "u_fft": u.Quantity(jnp.fft.rfft2(u_pad.value), kernel_unit),
+        "v_fft": u.Quantity(jnp.fft.rfft2(v_pad.value), kernel_unit),
         "dim_uv": dim_uv,
         "dim_pad": dim_pad,
     }
@@ -748,8 +745,8 @@ def build_rdfc_kernel(
 
 
 def phase_mapper_rdfc(
-    u_field: u.Quantity | jax.Array,
-    v_field: u.Quantity | jax.Array,
+    u_field: u.Quantity,
+    v_field: u.Quantity,
     rdfc_kernel: dict[str, Any],
 ) -> u.Quantity:
     """Map (u, v) magnetization components to a phase image via RDFC.
@@ -771,11 +768,8 @@ def phase_mapper_rdfc(
     jax.Array
         Magnetic phase-shift image of shape ``(H, W)``.
     """
-    original_u_field = u_field
-    original_v_field = v_field
-    return_quantity = _contains_quantity(original_u_field) or _contains_quantity(original_v_field)
-    u_field_q = cast(u.Quantity, _as_dimensionless_quantity(original_u_field))
-    v_field_q = cast(u.Quantity, _as_dimensionless_quantity(original_v_field))
+    u_field_q = cast(u.Quantity, _as_dimensionless_quantity(u_field))
+    v_field_q = cast(u.Quantity, _as_dimensionless_quantity(v_field))
     height, width = u_field_q.shape
     dim_pad = (2 * height, 2 * width)
 
@@ -796,11 +790,11 @@ def phase_mapper_rdfc(
         str(v_field_q.unit),
     )
 
-    u_fft = _rfft2_keep_unit(u_pad)
-    v_fft = _rfft2_keep_unit(v_pad)
+    u_fft = u.Quantity(jnp.fft.rfft2(u_pad.value), str(u_field_q.unit))
+    v_fft = u.Quantity(jnp.fft.rfft2(v_pad.value), str(v_field_q.unit))
 
     phase_fft = u_fft * rdfc_kernel["u_fft"] + v_fft * rdfc_kernel["v_fft"]
-    phase_pad = cast(u.Quantity, _irfft2_keep_unit(phase_fft, s=dim_pad))
+    phase_pad = u.Quantity(jnp.fft.irfft2(phase_fft.value, s=dim_pad), str(phase_fft.unit))
 
     phase = u.Quantity(
         jax.lax.dynamic_slice(
@@ -810,43 +804,33 @@ def phase_mapper_rdfc(
         ),
         str(phase_pad.unit),
     )
-    if return_quantity:
-        return phase
-    return phase.value
+    return phase
 
 
 def apply_ramp(ramp_coeffs, height, width, pixel_size):
     """Generate a first-order 2D polynomial background ramp.
 
-    Accepts either :class:`RampCoeffs` with ``unxt.Quantity`` fields
-    (returns a ``Quantity["angle"]``) or a plain JAX array of
-    ``[offset, slope_y, slope_x]`` with a float *pixel_size* in nm
-    (returns a plain JAX array).
+    Requires :class:`RampCoeffs` with ``unxt.Quantity`` fields and a
+    ``Quantity["length"]`` pixel size.
 
     Parameters
     ----------
-    ramp_coeffs : RampCoeffs or jax.Array
-        Background phase-ramp coefficients.  When a :class:`RampCoeffs`,
-        units are converted automatically; when a plain array, values
-        must already be in ``[rad, rad/nm, rad/nm]``.
+    ramp_coeffs : RampCoeffs
+        Background phase-ramp coefficients with Quantity fields.
     height : int
         Number of pixels along the y-axis.
     width : int
         Number of pixels along the x-axis.
-    pixel_size : Quantity["length"] or float
-        Pixel size.  ``Quantity`` is converted to nm; a plain float
-        is assumed to be in nanometres.
+    pixel_size : Quantity["length"]
+        Pixel size converted to nm internally.
 
     Returns
     -------
-    Quantity["angle"] or jax.Array
+    Quantity["angle"]
         Ramp image of shape ``(height, width)``.
     """
-    original_ramp_coeffs = ramp_coeffs
-    original_pixel_size = pixel_size
-    return_quantity = _contains_quantity(original_ramp_coeffs) or _contains_quantity(original_pixel_size)
-    pixel_size_q = _as_length_quantity(original_pixel_size)
-    ramp_coeffs_q = _as_ramp_coeffs(original_ramp_coeffs)
+    pixel_size_q = _as_length_quantity(pixel_size)
+    ramp_coeffs_q = _as_ramp_coeffs(ramp_coeffs)
 
     y, x = qnp.meshgrid(qnp.arange(height), qnp.arange(width), indexing="ij")
     ramp = ramp_coeffs_q.offset
@@ -855,16 +839,14 @@ def apply_ramp(ramp_coeffs, height, width, pixel_size):
 
     ramp = _as_angle_quantity(ramp)
     _assert_quantity_compatible(ramp, "rad", "ramp")
-    if return_quantity:
-        return ramp
-    return ramp.value
+    return ramp
 
 
 def forward_model_single_rdfc_2d(
-    magnetization: u.Quantity | jax.Array,
-    ramp_coeffs: RampCoeffs | jax.Array,
+    magnetization: u.Quantity,
+    ramp_coeffs: RampCoeffs,
     rdfc_kernel: dict[str, Any],
-    pixel_size: u.Quantity | float,
+    pixel_size: u.Quantity,
 ) -> u.Quantity:
     """RDFC forward model mapping projected magnetization to phase.
 
@@ -888,19 +870,12 @@ def forward_model_single_rdfc_2d(
     jax.Array
         Predicted phase image of shape ``(N, M)``.
     """
-    original_magnetization = magnetization
-    original_ramp_coeffs = ramp_coeffs
-    original_pixel_size = pixel_size
-    return_quantity = any(
-        _contains_quantity(item)
-        for item in (original_magnetization, original_ramp_coeffs, original_pixel_size)
-    )
-    magnetization_q = _as_dimensionless_quantity(original_magnetization)
+    magnetization_q = _as_dimensionless_quantity(magnetization)
     ramp_coeffs_q = _as_ramp_coeffs(
-        original_ramp_coeffs,
+        ramp_coeffs,
         dtype=magnetization_q.value.dtype,
     )
-    pixel_size_q = _as_length_quantity(original_pixel_size)
+    pixel_size_q = _as_length_quantity(pixel_size)
 
     height, width = magnetization_q.shape[:2]
 
@@ -914,17 +889,15 @@ def forward_model_single_rdfc_2d(
 
     phase_total = phase + ramp
     _assert_quantity_compatible(phase_total, "rad", "phase_total")
-    if return_quantity:
-        return phase_total
-    return phase_total.value
+    return phase_total
 
 
 def mbir_loss_2d(
-    params: tuple[u.Quantity | jax.Array, RampCoeffs | jax.Array],
+    params: tuple[u.Quantity, RampCoeffs],
     mask: jax.Array,
-    phase: u.Quantity | jax.Array,
+    phase: u.Quantity,
     rdfc_kernel: dict[str, Any],
-    pixel_size: u.Quantity | float,
+    pixel_size: u.Quantity,
     reg_config: dict[str, Any],
     reg_mask: jax.Array | None = None,
 ) -> u.Quantity:
@@ -964,10 +937,6 @@ def mbir_loss_2d(
     if reg_mask is None:
         reg_mask = mask
     magnetization, ramp_coeffs = params
-    return_quantity = any(
-        _contains_quantity(item)
-        for item in (params, phase, pixel_size, reg_config)
-    )
     mask = jnp.asarray(mask)
     reg_mask = jnp.asarray(reg_mask)
     phase_q = _as_angle_quantity(phase)
@@ -993,28 +962,28 @@ def mbir_loss_2d(
     residuals = predictions - phase_q
     loss = 0.5 * qnp.sum(residuals ** 2)
 
-    lambda_exchange = _lambda_exchange_quantity(reg_config.get("lambda_exchange", 0.0))
+    lambda_exchange = _to_lambda_exchange(
+        reg_config.get("lambda_exchange", 0.0)
+    )
 
     loss += lambda_exchange * exchange_loss_fn(magnetization_q, reg_mask)
     _assert_quantity_compatible(loss, "rad2", "loss")
 
-    if return_quantity:
-        return loss
-    return loss.value
+    return loss
 
 
 def _run_newton_cg_solver_2d(
-    phase: jax.Array,
-    init_mag: jax.Array,
+    phase: u.Quantity,
+    init_mag: u.Quantity,
     mask: jax.Array,
-    pixel_size: float,
+    pixel_size: u.Quantity,
     reg_config: dict[str, Any] | None = None,
     rdfc_kernel: dict[str, Any] | None = None,
     cg_tol: float = 1e-8,
     cg_maxiter: int = 10000,
-    init_ramp_coeffs: jax.Array | None = None,
+    init_ramp_coeffs: RampCoeffs | None = None,
     reg_mask: jax.Array | None = None,
-) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+) -> tuple[tuple[u.Quantity, RampCoeffs], u.Quantity]:
     """Minimize :func:`mbir_loss_2d` using a single Newton-CG solve.
 
     The MBIR objective is quadratic in the reconstruction
@@ -1052,9 +1021,9 @@ def _run_newton_cg_solver_2d(
 
     Returns
     -------
-    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
-        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
-    loss_history : jax.Array
+    (magnetization, ramp_coeffs) : tuple[Quantity[""], RampCoeffs]
+        Optimized magnetization ``(N, M, 2)`` and typed ramp coefficients.
+    loss_history : Quantity["rad2"]
         Length-1 array containing the loss after the Newton update.
     """
     phase_q = _as_angle_quantity(phase)
@@ -1096,318 +1065,11 @@ def _run_newton_cg_solver_2d(
         matvec_hvp, -grad_at_x0, tol=cg_tol, maxiter=cg_maxiter,
     )
     final_flat = x0_flat + delta
-    history = u.Quantity(jnp.expand_dims(objective_flat(final_flat), axis=0), "rad2")
+    history = make_quantity(jnp.expand_dims(objective_flat(final_flat), axis=0), "rad2")
 
     final_mag, final_ramp = unravel(final_flat)
 
     return (final_mag, final_ramp), history
-
-
-def _run_adam_solver_2d(
-    phase: jax.Array,
-    init_mag: jax.Array,
-    mask: jax.Array,
-    pixel_size: float,
-    reg_config: dict[str, Any] | None = None,
-    num_steps: int = 2000,
-    learning_rate: float = 1e-2,
-    rdfc_kernel: dict[str, Any] | None = None,
-    init_ramp_coeffs: jax.Array | None = None,
-    patience: int = 50,
-    min_delta: float = 1e-6,
-    reg_mask: jax.Array | None = None,
-) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
-    """Minimize :func:`mbir_loss_2d` using the Adam optimizer.
-
-    Includes early stopping: optimisation halts when the loss has
-    not improved by more than *min_delta* for *patience* consecutive
-    steps.
-
-    Parameters
-    ----------
-    phase
-        Observed phase image of shape ``(N, M)``.
-    init_mag
-        Initial magnetization of shape ``(N, M, 2)``.
-    mask
-        Binary mask of shape ``(N, M)`` applied to the
-        magnetization.
-    pixel_size
-        Pixel size in nanometres.
-    reg_config
-        Regularization configuration dictionary (see
-        :func:`mbir_loss_2d`), default ``{}``.
-    num_steps
-        Maximum number of optimisation steps, default 2000.
-    learning_rate
-        Adam learning rate, default 1e-2.
-    rdfc_kernel
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
-    init_ramp_coeffs
-        Initial ramp coefficients of shape ``(3,)``.  Defaults to
-        zeros.
-    patience
-        Number of steps without sufficient improvement before
-        stopping, default 50.
-    min_delta
-        Minimum loss decrease to qualify as an improvement,
-        default 1e-6.
-    reg_mask
-        Optional regularization mask of shape ``(N, M)``.
-        Defaults to *mask*.
-
-    Returns
-    -------
-    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
-        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
-    loss_history : jax.Array
-        Per-step loss values (truncated at the step where early
-        stopping triggered, if applicable).
-    """
-    phase_q = _as_angle_quantity(phase)
-    init_mag_q = _as_dimensionless_quantity(init_mag)
-    pixel_size_q = _as_length_quantity(pixel_size)
-    init_ramp_coeffs_q = _as_ramp_coeffs(
-        init_ramp_coeffs,
-        dtype=init_mag_q.value.dtype,
-    )
-    if reg_config is None:
-        reg_config = {}
-    if rdfc_kernel is None:
-        rdfc_kernel = build_rdfc_kernel(phase_q.shape)
-    kernel = cast(dict[str, Any], rdfc_kernel)
-
-    params = (init_mag_q, init_ramp_coeffs_q)
-    x0_flat, unravel = ravel_pytree(params)
-
-    def objective_flat(x_flat):
-        mag, ramp = unravel(x_flat)
-        return mbir_loss_2d(
-            (mag, ramp),
-            mask,
-            phase_q,
-            kernel,
-            pixel_size_q,
-            reg_config,
-            reg_mask=reg_mask,
-        ).value
-
-    # Initialize optax optimizer
-    optimizer = optax.adam(learning_rate)
-    opt_state = optimizer.init(x0_flat)
-    loss_and_grad = jax.value_and_grad(objective_flat)
-
-    # initial_loss needed for state initialization
-    init_loss = objective_flat(x0_flat)
-
-    # State: (params, opt_state, step_idx, loss_history_arr, best_loss, patience_counter, stop_flag)
-    # We allocate a fixed-size array for history because shapes must be static, but handle early exit via while_loop
-    loss_history = jnp.zeros(num_steps, dtype=jnp.asarray(init_loss).dtype)
-    loss_history = loss_history.at[0].set(init_loss)
-
-    init_state = (
-        x0_flat,
-        opt_state,
-        0,  # step index
-        loss_history,
-        init_loss,  # best_loss
-        0,  # patience counter
-        False,  # stop flag
-    )
-
-    def cond_fn(state):
-        _, _, step_i, _, _, _, stop_flag = state
-        return jnp.logical_and(step_i < num_steps, jnp.logical_not(stop_flag))
-
-    def body_fn(state):
-        curr_flat, curr_opt, i, history, best_loss, pat_count, _ = state
-
-        loss_val, grad_flat = loss_and_grad(curr_flat)
-
-        updates, next_opt = optimizer.update(grad_flat, curr_opt, curr_flat)
-        next_flat = optax.apply_updates(curr_flat, updates)
-
-        # Check early stopping
-        # Using a simple check: if current loss is not improving best_loss by min_delta
-        improved = loss_val < (best_loss - min_delta)
-        next_best_loss = jnp.where(improved, loss_val, best_loss)
-        next_pat_count = cast(jax.Array, jnp.where(improved, 0, pat_count + 1))
-        next_stop = next_pat_count >= patience
-
-        next_history = history.at[i].set(loss_val)
-
-        return (
-            next_flat,
-            next_opt,
-            i + 1,
-            next_history,
-            next_best_loss,
-            next_pat_count,
-            next_stop,
-        )
-
-    final_state = jax.lax.while_loop(cond_fn, body_fn, init_state)
-
-    final_flat, _, _steps_taken, final_history, _, _, _ = final_state
-    final_params = unravel(cast(jax.Array, final_flat))
-
-    # Return full history (may contain trailing zeros after early stopping).
-    return final_params, u.Quantity(final_history, "rad2")
-
-
-@jax.jit(static_argnames=("num_steps", "patience", "min_delta"))
-def _run_lbfgs_solver_2d(
-    phase: jax.Array,
-    init_mag: jax.Array,
-    mask: jax.Array,
-    pixel_size: float,
-    reg_config: dict[str, Any] | None = None,
-    num_steps: int = 500,
-    rdfc_kernel: dict[str, Any] | None = None,
-    init_ramp_coeffs: jax.Array | None = None,
-    patience: int = 50,
-    min_delta: float = 1e-6,
-    reg_mask: jax.Array | None = None,
-) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
-    """Minimize :func:`mbir_loss_2d` using L-BFGS with zoom line-search.
-
-    Uses the optax L-BFGS implementation with early stopping.
-    This function is JIT-compiled; *num_steps*, *patience*, and
-    *min_delta* are static arguments.
-
-    Parameters
-    ----------
-    phase
-        Observed phase image of shape ``(N, M)``.
-    init_mag
-        Initial magnetization of shape ``(N, M, 2)``.
-    mask
-        Binary mask of shape ``(N, M)`` applied to the
-        magnetization.
-    pixel_size
-        Pixel size in nanometres.
-    reg_config
-        Regularization configuration dictionary (see
-        :func:`mbir_loss_2d`), default ``{}``.
-    num_steps
-        Maximum number of optimisation steps, default 500.
-    rdfc_kernel
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
-    init_ramp_coeffs
-        Initial ramp coefficients of shape ``(3,)``.  Defaults to
-        zeros.
-    patience
-        Number of steps without sufficient improvement before
-        stopping, default 50.
-    min_delta
-        Minimum loss decrease to qualify as an improvement,
-        default 1e-6.
-    reg_mask
-        Optional regularization mask of shape ``(N, M)``.
-        Defaults to *mask*.
-
-    Returns
-    -------
-    (magnetization, ramp_coeffs) : tuple[jax.Array, jax.Array]
-        Optimized magnetization ``(N, M, 2)`` and ramp ``(3,)``.
-    loss_history : jax.Array
-        Per-step loss values (zero-filled after early stopping,
-        if applicable).
-    """
-    phase_q = _as_angle_quantity(phase)
-    init_mag_q = _as_dimensionless_quantity(init_mag)
-    pixel_size_q = _as_length_quantity(pixel_size)
-    init_ramp_coeffs_q = _as_ramp_coeffs(
-        init_ramp_coeffs,
-        dtype=init_mag_q.value.dtype,
-    )
-    if reg_config is None:
-        reg_config = {}
-    if rdfc_kernel is None:
-        rdfc_kernel = build_rdfc_kernel(phase_q.shape)
-    kernel = cast(dict[str, Any], rdfc_kernel)
-
-    params = (init_mag_q, init_ramp_coeffs_q)
-    x0_flat, unravel = ravel_pytree(params)
-
-    def objective_flat(x_flat):
-        mag, ramp = unravel(x_flat)
-        return mbir_loss_2d(
-            (mag, ramp),
-            mask,
-            phase_q,
-            kernel,
-            pixel_size_q,
-            reg_config,
-            reg_mask=reg_mask,
-        ).value
-
-    def value_fn(x_flat):
-        return objective_flat(x_flat)
-
-    ls_inst = optax.scale_by_zoom_linesearch(max_linesearch_steps=15)
-    solver = optax.lbfgs(linesearch=ls_inst)
-    opt_state = solver.init(x0_flat)
-
-    # Optax helper: lets us reuse value/grad stored in state (esp. with line-search)
-    value_and_grad = optax.value_and_grad_from_state(value_fn)
-
-    # Initial value for history dtype
-    init_value, _init_grad = value_and_grad(x0_flat, state=opt_state)
-    loss_history = jnp.zeros((num_steps,), dtype=jnp.asarray(init_value).dtype)
-
-    # State: (params, opt_state, step_idx, history, best_loss, patience_counter, stop_flag)
-    init_state = (
-        x0_flat,
-        opt_state,
-        0,
-        loss_history,
-        init_value,
-        0,
-        False,
-    )
-
-    def cond_fn(state):
-        _, _, i, _, _, _, stop_flag = state
-        return jnp.logical_and(i < num_steps, jnp.logical_not(stop_flag))
-
-    def body_fn(state):
-        curr_flat, curr_state, i, history, best_loss, pat_count, _ = state
-
-        value, grad = value_and_grad(curr_flat, state=curr_state)
-
-        updates, next_state = solver.update(
-            grad,                 # positional grads
-            curr_state,
-            curr_flat,
-            value=value,          # current value at curr_params
-            grad=grad,            # current grad at curr_params
-            value_fn=value_fn,    # scalar objective for line-search
-        )
-
-        next_flat = optax.apply_updates(curr_flat, updates)
-        history = history.at[i].set(value)
-
-        improved = value < (best_loss - min_delta)
-        next_best_loss = jnp.where(improved, value, best_loss)
-        next_pat_count = cast(jax.Array, jnp.where(improved, 0, pat_count + 1))
-        next_stop = next_pat_count >= patience
-
-        return (
-            next_flat,
-            next_state,
-            i + 1,
-            history,
-            next_best_loss,
-            next_pat_count,
-            next_stop,
-        )
-
-    final_flat, _final_opt_state, _, final_history, _, _, _ = jax.lax.while_loop(
-        cond_fn, body_fn, init_state
-    )
-
-    return unravel(cast(jax.Array, final_flat)), u.Quantity(final_history, "rad2")
 
 
 def solve_mbir_2d(
@@ -1433,13 +1095,11 @@ def solve_mbir_2d(
     mask : array_like
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
     solver : str or SolverConfig, optional
-        Which solver to use.  Pass a string (``"newton_cg"``, ``"adam"``,
-        ``"lbfgs"``) for default parameters, or a config object
-        (:class:`NewtonCGConfig`, :class:`AdamConfig`, :class:`LBFGSConfig`)
-        for full control.  Default is ``"newton_cg"``.
+        Solver selection. Pass ``"newton_cg"`` or a
+        :class:`NewtonCGConfig` for full control. Default is ``"newton_cg"``.
     reg_config : dict, optional
         Regularization configuration (e.g. ``{"lambda_exchange": 1.0}``).
     rdfc_kernel : dict, optional
@@ -1456,10 +1116,6 @@ def solve_mbir_2d(
         Named tuple with fields ``magnetization``, ``ramp_coeffs``, and
         ``loss_history``.
 
-        .. note::
-
-           For iterative solvers (Adam, L-BFGS) the ``loss_history`` array
-           may contain trailing zeros if the solver stopped early.
     """
     phase = _as_angle_quantity(phase)
     init_mag = _as_dimensionless_quantity(init_mag)
@@ -1477,7 +1133,7 @@ def solve_mbir_2d(
                 f"Choose from {list(_SOLVER_DEFAULTS)}"
             )
         config = _SOLVER_DEFAULTS[solver_name]()
-    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+    elif isinstance(solver, NewtonCGConfig):
         config = solver
     else:
         raise TypeError(
@@ -1500,21 +1156,6 @@ def solve_mbir_2d(
             **shared,
             cg_tol=config.cg_tol,
             cg_maxiter=config.cg_maxiter,
-        )
-    elif isinstance(config, AdamConfig):
-        (mag, ramp), loss_history = _run_adam_solver_2d(
-            **shared,
-            num_steps=config.num_steps,
-            learning_rate=config.learning_rate,
-            patience=config.patience,
-            min_delta=config.min_delta,
-        )
-    elif isinstance(config, LBFGSConfig):
-        (mag, ramp), loss_history = _run_lbfgs_solver_2d(
-            **shared,
-            num_steps=config.num_steps,
-            patience=config.patience,
-            min_delta=config.min_delta,
         )
     else:
         raise AssertionError(f"Unhandled solver config type: {type(config)}")
@@ -1550,15 +1191,14 @@ def reconstruct_2d(
     ----------
     phase : array_like
         Measured phase image of shape ``(N, M)`` in **radians**.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.  Must be positive.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     mask : array_like, optional
         Binary mask of shape ``(N, M)``.  Defaults to all ones.
-    lam : float, optional
-        Regularization weight (``lambda_exchange``), default 1e-3.
+    lam : Quantity["rad2"], optional
+        Regularization weight (``lambda_exchange``), default ``Quantity(1e-3, "rad2")``.
     solver : str or SolverConfig, optional
-        Solver selection string (``"newton_cg"``, ``"adam"``,
-        ``"lbfgs"``) or a :class:`SolverConfig` instance.
+        Solver selection string (``"newton_cg"``) or a :class:`SolverConfig` instance.
         Ignored when *solver_config* is provided.
         Default is ``"newton_cg"``.
     reg_mask : array_like, optional
@@ -1583,6 +1223,7 @@ def reconstruct_2d(
         and ``loss_history``.
     """
     pixel_size = _as_length_quantity(pixel_size)
+    lam = _to_lambda_exchange(lam)
     _validate_positive(pixel_size, "pixel_size")
 
     phase = _as_angle_quantity(phase)
@@ -1598,9 +1239,9 @@ def reconstruct_2d(
             prw_vec=prw_vec,
         )
 
-    init_mag = u.Quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
-    lam_q = _lambda_exchange_quantity(lam)
-    reg_config = {"lambda_exchange": lam_q.value}
+    init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
+    lam_q = _to_lambda_exchange(lam)
+    reg_config = {"lambda_exchange": lam_q}
 
     if solver_config is not None:
         solver = solver_config
@@ -1616,6 +1257,184 @@ def reconstruct_2d(
         reg_mask=reg_mask,
     )
     _assert_solver_result_units(result)
+    return result
+
+
+def to_magnetic_induction(
+    magnetization,
+    pixel_size: u.Quantity,
+    reference_induction: u.Quantity = B_REF,
+) -> u.Quantity:
+    """Compatibility alias for :func:`to_projected_induction_integral`.
+
+    The returned quantity is a projected induction line integral with units
+    of T nm, not a local induction map in tesla.
+    """
+    return to_projected_induction_integral(
+        magnetization,
+        pixel_size,
+        reference_induction=reference_induction,
+    )
+
+
+def to_projected_induction_integral(
+    magnetization,
+    pixel_size: u.Quantity,
+    reference_induction: u.Quantity = B_REF,
+) -> u.Quantity:
+    """Convert normalized projected magnetization to a projected induction integral.
+
+    Parameters
+    ----------
+    magnetization : Quantity["dimensionless"]
+        Normalized projected line-sum magnetization, typically the
+        ``result.magnetization`` output from :func:`reconstruct_2d`.
+    pixel_size : Quantity["length"]
+        Pixel size along the beam direction, equal to the slice thickness of
+        the implicit projection discretization.
+    reference_induction : Quantity["magnetic induction"], optional
+        Induction scale corresponding to unit normalized magnetization.
+        The default is the 1 T reference baked into the MBIR kernel.
+
+    Returns
+    -------
+    Quantity["magnetic induction * length"]
+        Projected induction line integral with the same shape as
+        ``magnetization`` in T nm.
+    """
+    magnetization = _as_dimensionless_quantity(magnetization)
+    pixel_size = _as_length_quantity(pixel_size)
+    reference_induction = _as_induction_quantity(reference_induction)
+    result = pixel_size * reference_induction * magnetization
+    _assert_quantity_compatible(result, "T nm", "projected_induction_integral")
+    return cast(u.Quantity, u.uconvert("T nm", result))
+
+
+def to_physical_magnetization(
+    magnetization,
+    pixel_size: u.Quantity,
+    reference_induction: u.Quantity = B_REF,
+) -> u.Quantity:
+    r"""Compatibility alias for :func:`to_projected_magnetization_integral`.
+
+    The returned quantity is a projected magnetization line integral with
+    units of A, not a local magnetization density in A/m.
+    """
+    return to_projected_magnetization_integral(
+        magnetization,
+        pixel_size,
+        reference_induction=reference_induction,
+    )
+
+
+def to_projected_magnetization_integral(
+    magnetization,
+    pixel_size: u.Quantity,
+    reference_induction: u.Quantity = B_REF,
+) -> u.Quantity:
+    r"""Convert normalized projected magnetization to a projected magnetization integral.
+
+    This applies the induction scale from
+    :func:`to_projected_induction_integral` and then uses
+    :math:`M = B / \mu_0` to express the projected line integral in amperes.
+
+    Parameters
+    ----------
+    magnetization : Quantity["dimensionless"]
+        Normalized projected line-sum magnetization, typically the
+        ``result.magnetization`` output from :func:`reconstruct_2d`.
+    pixel_size : Quantity["length"]
+        Pixel size along the beam direction, equal to the slice thickness of
+        the implicit projection discretization.
+    reference_induction : Quantity["magnetic induction"], optional
+        Induction scale corresponding to unit normalized magnetization.
+        Pass the appropriate physical induction scale if it differs from
+        the 1 T kernel reference.
+
+    Returns
+    -------
+    Quantity["current"]
+        Projected magnetization line integral in A.
+    """
+    induction = to_projected_induction_integral(
+        magnetization,
+        pixel_size,
+        reference_induction=reference_induction,
+    )
+    result = induction / MU_0
+    _assert_quantity_compatible(result, "A", "projected_magnetization_integral")
+    return cast(u.Quantity, u.uconvert("A", result))
+
+
+def to_local_induction(
+    projected_induction_integral,
+    thickness,
+) -> u.Quantity:
+    r"""Convert a projected induction line integral to local induction.
+
+    This divides a projected induction line integral by a physical thickness,
+    producing a thickness-averaged local induction in tesla.
+
+    Parameters
+    ----------
+    projected_induction_integral : Quantity["magnetic induction * length"]
+        Projected induction line integral, typically returned by
+        :func:`to_projected_induction_integral`.
+    thickness : Quantity["length"]
+        Physical thickness in length units. May be a scalar or an image that
+        broadcasts against *projected_induction_integral*.
+
+    Returns
+    -------
+    Quantity["magnetic induction"]
+        Thickness-averaged local induction in T.
+    """
+    projected_induction_integral = _as_projected_induction_integral_quantity(
+        projected_induction_integral,
+        name="projected_induction_integral",
+    )
+    thickness = _as_length_quantity(thickness, name="thickness")
+    _validate_all_positive_quantity(thickness, "thickness")
+    thickness = _broadcast_thickness_like(projected_induction_integral, thickness)
+    result = cast(u.Quantity, projected_induction_integral / thickness)
+    result = cast(u.Quantity, u.uconvert("T", result))
+    _assert_quantity_compatible(result, "T", "local_induction")
+    return result
+
+
+def to_local_magnetization(
+    projected_magnetization_integral,
+    thickness,
+) -> u.Quantity:
+    r"""Convert a projected magnetization line integral to local magnetization.
+
+    This divides a projected magnetization line integral by a physical
+    thickness, producing a thickness-averaged local magnetization in A/m.
+
+    Parameters
+    ----------
+    projected_magnetization_integral : Quantity["current"]
+        Projected magnetization line integral, typically returned by
+        :func:`to_projected_magnetization_integral`.
+    thickness : Quantity["length"]
+        Physical thickness in length units. May be a scalar or an image that
+        broadcasts against *projected_magnetization_integral*.
+
+    Returns
+    -------
+    Quantity["magnetization"]
+        Thickness-averaged local magnetization in A/m.
+    """
+    projected_magnetization_integral = _as_projected_magnetization_integral_quantity(
+        projected_magnetization_integral,
+        name="projected_magnetization_integral",
+    )
+    thickness = _as_length_quantity(thickness, name="thickness")
+    _validate_all_positive_quantity(thickness, "thickness")
+    thickness = _broadcast_thickness_like(projected_magnetization_integral, thickness)
+    result = cast(u.Quantity, projected_magnetization_integral / thickness)
+    result = cast(u.Quantity, u.uconvert("A / m", result))
+    _assert_quantity_compatible(result, "A / m", "local_magnetization")
     return result
 
 
@@ -1637,10 +1456,12 @@ def forward_model_2d(
     magnetization : array_like
         In-plane magnetization of shape ``(N, M, 2)`` where the
         last axis holds the (u, v) components. The input is assumed
-        to be the projected (thickness-integrated) magnetization
-        in units of **Tesla**.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.  Must be positive.
+        to be the projected normalized magnetization returned by
+        :func:`reconstruct_2d`, i.e. a dimensionless ``Quantity``.
+        Use :func:`to_projected_induction_integral` if you want the same field
+        expressed as a projected induction line integral.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     ramp_coeffs : array_like, optional
         Background ramp coefficients ``[offset, slope_y, slope_x]``
         in units of **[rad, rad/nm, rad/nm]**.
@@ -1704,13 +1525,13 @@ def reconstruct_2d_ensemble(
         Measured phase image of shape ``(H, W)`` in **radians**.
     masks : array_like
         Bootstrap mask ensemble of shape ``(N_boot, H, W)``.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.  Must be positive.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     lam : float, optional
         Regularization weight (``lambda_exchange``), default 1e-3.
     solver : str or SolverConfig, optional
-        Solver selection string (``"newton_cg"``, ``"adam"``,
-        ``"lbfgs"``) or a :class:`SolverConfig` instance.
+        Solver selection string (``"newton_cg"``) or a
+        :class:`NewtonCGConfig` instance.
         Ignored when *solver_config* is provided.
         Default is ``"newton_cg"``.
     reg_masks : array_like, optional
@@ -1734,11 +1555,6 @@ def reconstruct_2d_ensemble(
         Reconstructed magnetization ensemble of shape
         ``(N_boot, H, W, 2)``.
 
-    Notes
-    -----
-    For iterative solvers (Adam, L-BFGS) early stopping is
-    effectively disabled under ``vmap``; all bootstrap samples
-    run for the maximum number of steps.
     """
     pixel_size = _as_length_quantity(pixel_size)
     _validate_positive(pixel_size, "pixel_size")
@@ -1768,7 +1584,7 @@ def reconstruct_2d_ensemble(
                 f"Choose from {list(_SOLVER_DEFAULTS)}"
             )
         config = _SOLVER_DEFAULTS[solver_name]()
-    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+    elif isinstance(solver, (NewtonCGConfig)):
         config = solver
     else:
         raise TypeError(
@@ -1776,64 +1592,29 @@ def reconstruct_2d_ensemble(
             f"got {type(solver)}"
         )
 
-    init_mag = u.Quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
-    lam_q = _lambda_exchange_quantity(lam)
-    reg_config = {"lambda_exchange": lam_q.value}
+    init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
+    lam_q = _to_lambda_exchange(lam)
+    reg_config = {"lambda_exchange": lam_q}
 
     # Build a vmappable function for the chosen solver
-    if isinstance(config, NewtonCGConfig):
-        def _solve_single_newton(mask, reg_mask):
-            (mag, _ramp), _loss = _run_newton_cg_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                rdfc_kernel=rdfc_kernel,
-                cg_tol=config.cg_tol,
-                cg_maxiter=config.cg_maxiter,
-                reg_mask=reg_mask,
-            )
-            return cast(u.Quantity, mag).value
-        solve_single = _solve_single_newton
-    elif isinstance(config, AdamConfig):
-        def _solve_single_adam(mask, reg_mask):
-            (mag, _ramp), _loss = _run_adam_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                num_steps=config.num_steps,
-                learning_rate=config.learning_rate,
-                rdfc_kernel=rdfc_kernel,
-                patience=config.patience,
-                min_delta=config.min_delta,
-                reg_mask=reg_mask,
-            )
-            return cast(u.Quantity, mag).value
-        solve_single = _solve_single_adam
-    elif isinstance(config, LBFGSConfig):
-        def _solve_single_lbfgs(mask, reg_mask):
-            (mag, _ramp), _loss = _run_lbfgs_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                num_steps=config.num_steps,
-                rdfc_kernel=rdfc_kernel,
-                patience=config.patience,
-                min_delta=config.min_delta,
-                reg_mask=reg_mask,
-            )
-            return mag.value
-        solve_single = _solve_single_lbfgs
-    else:
-        raise AssertionError(f"Unhandled solver config type: {type(config)}")
+    def _solve_single_newton(mask, reg_mask):
+        (mag, _ramp), _loss = _run_newton_cg_solver_2d(
+            phase=phase,
+            init_mag=init_mag,
+            mask=mask,
+            pixel_size=pixel_size,
+            reg_config=reg_config,
+            rdfc_kernel=rdfc_kernel,
+            cg_tol=config.cg_tol,
+            cg_maxiter=config.cg_maxiter,
+            reg_mask=reg_mask,
+        )
+        return cast(u.Quantity, mag).value
+
+    solve_single = _solve_single_newton
 
     solve_batch = jax.jit(jax.vmap(solve_single, in_axes=(0, 0)))
-    return u.Quantity(solve_batch(masks, reg_masks), "")
+    return make_quantity(solve_batch(masks, reg_masks), "")
 
 
 # Mapping from projection axis to (sum_axis, coeff_matrix, need_transpose).
@@ -1886,23 +1667,22 @@ def project_3d(
         raise ValueError(f"axis must be 'x', 'y', or 'z'; got {axis!r}")
 
     cfg = _SIMPLE_PROJ[axis]
-    original_magnetization_3d = magnetization_3d
-    return_quantity = _contains_quantity(original_magnetization_3d)
-    magnetization_3d = _as_dimensionless_quantity(original_magnetization_3d)
+    magnetization_3d = _as_dimensionless_quantity(magnetization_3d)
 
     # Sum along projection direction: (Z, Y, X, 3) -> (*, *, 3)
     summed = cast(u.Quantity, qnp.sum(magnetization_3d, axis=cfg["sum_axis"]))
 
     # Mix (mx, my, mz) -> (u, v) via coefficient matrix
     coeff = jnp.array(cfg["coeff"], dtype=summed.value.dtype)  # (2, 3)
-    projected = qnp.einsum("...c,oc->...o", summed, coeff)  # (*, *, 2)
+    projected = cast(u.Quantity, qnp.einsum("...c,oc->...o", summed, coeff))  # (*, *, 2)
 
     if cfg["transpose"]:
-        projected = qnp.transpose(projected, (1, 0, 2))
+        projected = u.Quantity(
+            jnp.transpose(projected.value, (1, 0, 2)),
+            str(projected.unit),
+        )
 
-    if return_quantity:
-        return projected
-    return cast(u.Quantity, projected).value
+    return projected
 
 
 def forward_model_3d(
@@ -1925,8 +1705,8 @@ def forward_model_3d(
     magnetization_3d : array_like
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
-    pixel_size : Quantity["length"] or float
-        Voxel size in nanometres.
+    pixel_size : Quantity["length"]
+        Voxel size as a ``unxt.Quantity`` with length units.
     axis : {'z', 'y', 'x'}, optional
         Projection axis, default ``'z'``.
     ramp_coeffs : array_like, optional
@@ -1966,8 +1746,6 @@ def decompose_loss(
     reg_mask,
     rdfc_kernel,
     pixel_size,
-    *,
-    pyramid_compat=False,
 ) -> tuple[u.Quantity, u.Quantity]:
     """Decompose the MBIR loss into data-fidelity and regularization terms.
 
@@ -1977,11 +1755,11 @@ def decompose_loss(
 
     Parameters
     ----------
-    magnetization : array_like
+    magnetization : Quantity["dimensionless"]
         Reconstructed magnetization of shape ``(N, M, 2)``.
-    ramp_coeffs : array_like
+    ramp_coeffs : RampCoeffs
         Background ramp coefficients ``[offset, slope_y, slope_x]``.
-    phase : array_like
+    phase : Quantity["angle"]
         Observed phase image of shape ``(N, M)``.
     mask : array_like
         Binary mask of shape ``(N, M)`` applied to the
@@ -1991,15 +1769,8 @@ def decompose_loss(
         :func:`exchange_loss_fn`.
     rdfc_kernel : dict
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-    pixel_size : Quantity["length"] or float
-        Pixel size in nanometres.
-    pyramid_compat : bool, optional
-        If *True*, compute the regularization norm using
-        :func:`forward_diff_norm` (simple forward differences, no
-        per-pixel normalization), which matches Pyramid's
-        ``FirstOrderRegularisator`` convention.  Default *False*
-        uses :func:`exchange_loss_fn` (adaptive stencil with
-        neighbor-count normalization).
+    pixel_size : Quantity["length"]
+        Pixel size converted to nanometres internally.
 
     Returns
     -------
@@ -2009,9 +1780,7 @@ def decompose_loss(
         factor).
     exchange_norm : Quantity["dimensionless"]
         Unweighted exchange regularization norm (no lambda
-        multiplier).  When *pyramid_compat=True* this is
-        ``||Dx||²`` (forward differences); otherwise it uses the
-        adaptive stencil from :func:`exchange_loss_fn`.
+        multiplier) computed with :func:`exchange_loss_fn`.
     """
     pixel_size = _as_length_quantity(pixel_size)
     magnetization = _as_dimensionless_quantity(magnetization)
@@ -2033,10 +1802,7 @@ def decompose_loss(
     )
     residuals = predicted - phase
     data_misfit = qnp.sum(residuals ** 2)
-    if pyramid_compat:
-        exchange_norm = forward_diff_norm(masked_mag, reg_mask)
-    else:
-        exchange_norm = exchange_loss_fn(masked_mag, reg_mask)
+    exchange_norm = exchange_loss_fn(masked_mag, reg_mask)
 
     _assert_quantity_compatible(cast(u.Quantity, data_misfit), "rad2", "data_misfit")
     _assert_quantity_compatible(cast(u.Quantity, exchange_norm), "", "exchange_norm")
@@ -2073,23 +1839,25 @@ def bootstrap_threshold_uncertainty_2d(
         Observed phase image of shape ``(H, W)``.
     mip_phase
         MIP phase image used for thresholding, shape ``(H, W)``.
-    threshold
+    threshold : Quantity["angle"] or float
         Central threshold value around which the bootstrap draws are sampled.
-    pixel_size
-        Pixel size in nanometres.
+        Plain scalars are interpreted as radians.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
     lam : float, optional
         Regularization weight (``lambda_exchange``), default 1e-3.
     solver : str or SolverConfig, optional
-        Solver selection string or config object.  Ignored when
-        *solver_config* is provided.  Default ``"newton_cg"``.
+        Solver selection string (``"newton_cg"``) or a
+        :class:`NewtonCGConfig` instance. Ignored when
+        *solver_config* is provided. Default ``"newton_cg"``.
     n_boot : int, optional
         Number of threshold draws, default 50.
-    threshold_low : float, optional
+    threshold_low : Quantity["angle"] or float, optional
         Lower bound for the threshold draws.  Defaults to
-        ``threshold - 0.25``.
-    threshold_high : float, optional
+        ``threshold - 0.25 rad``. Plain scalars are interpreted as radians.
+    threshold_high : Quantity["angle"] or float, optional
         Upper bound for the threshold draws.  Defaults to
-        ``threshold + 0.25``.
+        ``threshold + 0.25 rad``. Plain scalars are interpreted as radians.
     rng_seed : int, optional
         Seed for the pseudo-random number generator, default 0.
     geometry : str, optional
@@ -2112,35 +1880,32 @@ def bootstrap_threshold_uncertainty_2d(
     phase = _as_angle_quantity(phase)
     mip_phase = _as_angle_quantity(mip_phase)
     pixel_size = _as_length_quantity(pixel_size)
+    threshold_q = _as_threshold_quantity(threshold)
     _validate_positive(pixel_size, "pixel_size")
-    threshold = _as_angle_quantity(threshold)
     if phase.shape != mip_phase.shape:
         raise ValueError(
             f"phase and mip_phase must have the same shape; got {phase.shape} and {mip_phase.shape}."
         )
 
     if threshold_low is None:
-        threshold_low = threshold - u.Quantity(0.25, "rad")
+        threshold_low_q = threshold_q - make_quantity(0.25, "rad")
     else:
-        threshold_low = _as_angle_quantity(threshold_low)
+        threshold_low_q = _as_threshold_quantity(threshold_low)
     if threshold_high is None:
-        threshold_high = threshold + u.Quantity(0.25, "rad")
+        threshold_high_q = threshold_q + make_quantity(0.25, "rad")
     else:
-        threshold_high = _as_angle_quantity(threshold_high)
+        threshold_high_q = _as_threshold_quantity(threshold_high)
 
-    threshold_low_q = cast(u.Quantity, u.uconvert("rad", threshold_low))
-    threshold_high_q = cast(u.Quantity, u.uconvert("rad", threshold_high))
-    threshold_q = cast(u.Quantity, u.uconvert("rad", threshold))
     threshold_low_value = float(np.asarray(threshold_low_q.value))
     threshold_high_value = float(np.asarray(threshold_high_q.value))
     threshold_value = float(np.asarray(threshold_q.value))
     if threshold_high_value <= threshold_low_value:
         raise ValueError(
-            f"threshold_high must be greater than threshold_low; got {threshold_low} and {threshold_high}."
+            f"threshold_high must be greater than threshold_low; got {threshold_high_q} and {threshold_low_q}."
         )
 
     rng = np.random.default_rng(rng_seed)
-    threshold_draws = u.Quantity(
+    threshold_draws = make_quantity(
         rng.uniform(
             low=threshold_low_value,
             high=threshold_high_value,
@@ -2182,24 +1947,24 @@ def bootstrap_threshold_uncertainty_2d(
     norm_samples = _as_dimensionless_quantity(
         qnp.sqrt(qnp.sum(bootstrap_mag ** 2, axis=-1))
     )
-    norm_low = u.Quantity(
+    norm_low = make_quantity(
         np.percentile(np.asarray(norm_samples.value), 2.5, axis=0),
         str(norm_samples.unit),
     )
-    norm_high = u.Quantity(
+    norm_high = make_quantity(
         np.percentile(np.asarray(norm_samples.value), 97.5, axis=0),
         str(norm_samples.unit),
     )
     norm_ci95 = norm_high - norm_low
     relative_ci95 = _as_dimensionless_quantity(
-        norm_ci95 / (mean_norm + u.Quantity(1e-12, ""))
+        norm_ci95 / (mean_norm + make_quantity(1e-12, ""))
     )
     mask_frequency = bootstrap_masks.mean(axis=0)
 
     return BootstrapThresholdResult(
-        threshold=threshold,
-        threshold_low=threshold_low,
-        threshold_high=threshold_high,
+        threshold=threshold_q,
+        threshold_low=threshold_low_q,
+        threshold_high=threshold_high_q,
         threshold_draws=threshold_draws,
         magnetizations=bootstrap_mag,
         mean_magnetization=mean_magnetization,
@@ -2384,7 +2149,6 @@ def lcurve_sweep(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    pyramid_compat=False,
 ) -> LCurveResult:
     """Sequential L-curve sweep over regularization weights.
 
@@ -2398,8 +2162,8 @@ def lcurve_sweep(
         Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.  Must be positive.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     lambdas : array_like
         1D array of ``lambda_exchange`` values to sweep.
     solver : str or SolverConfig, optional
@@ -2416,12 +2180,6 @@ def lcurve_sweep(
         Pre-built RDFC kernel.  Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration.
-    pyramid_compat : bool, optional
-        If *True*, compute the regularization norm using
-        :func:`forward_diff_norm` (simple forward differences)
-        instead of :func:`exchange_loss_fn`, to match Pyramid's
-        ``FirstOrderRegularisator`` convention.  Default *False*.
-
     Returns
     -------
     LCurveResult
@@ -2431,6 +2189,8 @@ def lcurve_sweep(
     """
     phase = _as_angle_quantity(phase)
     pixel_size = _as_length_quantity(pixel_size)
+    lambdas = _to_lambda_exchange(lambdas)
+
     _validate_positive(pixel_size, "pixel_size")
 
     mask = jnp.asarray(mask, dtype=bool)
@@ -2439,7 +2199,7 @@ def lcurve_sweep(
     else:
         reg_mask = jnp.asarray(reg_mask)
 
-    lambdas_q = _lambda_exchange_quantity(lambdas)
+    lambdas_q = _to_lambda_exchange(lambdas)
     lambdas = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
 
     if rdfc_kernel is None:
@@ -2456,10 +2216,10 @@ def lcurve_sweep(
     mag_list = []
     ramp_list = []
 
-    init_mag = u.Quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
+    init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
 
     for lam in lambdas:
-        reg_config = {"lambda_exchange": lam}
+        reg_config = {"lambda_exchange": make_quantity(lam, "rad2")}
 
         result = solve_mbir_2d(
             phase=phase,
@@ -2475,7 +2235,6 @@ def lcurve_sweep(
         dm, rn = decompose_loss(
             result.magnetization, result.ramp_coeffs,
             phase, mask, reg_mask, rdfc_kernel, pixel_size,
-            pyramid_compat=pyramid_compat,
         )
         data_misfits.append(float(dm.value))
         reg_norms.append(float(rn.value))
@@ -2494,14 +2253,14 @@ def lcurve_sweep(
     all_ramp = jnp.stack(ramp_list)
 
     result = LCurveResult(
-        lambdas=u.Quantity(lambdas, "rad2"),
-        data_misfits=u.Quantity(data_misfits, "rad2"),
-        reg_norms=u.Quantity(reg_norms, ""),
-        magnetizations=u.Quantity(all_mag, ""),
+        lambdas=make_quantity(lambdas, "rad2"),
+        data_misfits=make_quantity(data_misfits, "rad2"),
+        reg_norms=make_quantity(reg_norms, ""),
+        magnetizations=make_quantity(all_mag, ""),
         ramp_coeffs=RampCoeffs(
-            offset=u.Quantity(all_ramp[:, 0], "rad"),
-            slope_y=u.Quantity(all_ramp[:, 1], "rad/nm"),
-            slope_x=u.Quantity(all_ramp[:, 2], "rad/nm"),
+            offset=make_quantity(all_ramp[:, 0], "rad"),
+            slope_y=make_quantity(all_ramp[:, 1], "rad/nm"),
+            slope_x=make_quantity(all_ramp[:, 2], "rad/nm"),
         ),
         corner_index=corner_idx,
     )
@@ -2520,7 +2279,6 @@ def lcurve_sweep_vmap(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
-    pyramid_compat=False,
 ) -> LCurveResult:
     """Parallel L-curve sweep using ``jax.vmap`` over lambda values.
 
@@ -2534,8 +2292,8 @@ def lcurve_sweep_vmap(
         Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
-    pixel_size : Quantity["length"] or float
-        Pixel size as a ``unxt.Quantity`` with length units, or a float in nm.  Must be positive.
+    pixel_size : Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     lambdas : array_like
         1D array of ``lambda_exchange`` values to sweep.
     solver : str or SolverConfig, optional
@@ -2552,12 +2310,6 @@ def lcurve_sweep_vmap(
         Pre-built RDFC kernel.  Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration.
-    pyramid_compat : bool, optional
-        If *True*, compute the regularization norm using
-        :func:`forward_diff_norm` (simple forward differences)
-        instead of :func:`exchange_loss_fn`, to match Pyramid's
-        ``FirstOrderRegularisator`` convention.  Default *False*.
-
     Returns
     -------
     LCurveResult
@@ -2565,14 +2317,10 @@ def lcurve_sweep_vmap(
         ``reg_norms``, ``magnetizations``, ``ramp_coeffs``, and
         ``corner_index``.
 
-    Notes
-    -----
-    For iterative solvers (Adam, L-BFGS) early stopping is
-    effectively disabled under ``vmap``; all lambda values run for
-    the maximum number of steps.
     """
     phase = _as_angle_quantity(phase)
     pixel_size = _as_length_quantity(pixel_size)
+    lambdas = _to_lambda_exchange(lambdas)
     _validate_positive(pixel_size, "pixel_size")
 
     mask = jnp.asarray(mask, dtype=bool)
@@ -2581,7 +2329,7 @@ def lcurve_sweep_vmap(
     else:
         reg_mask = jnp.asarray(reg_mask)
 
-    lambdas_q = _lambda_exchange_quantity(lambdas)
+    lambdas_q = _to_lambda_exchange(lambdas)
     lambdas_np = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
     lambdas_jax = jnp.asarray(lambdas_np)
 
@@ -2602,7 +2350,7 @@ def lcurve_sweep_vmap(
                 f"Choose from {list(_SOLVER_DEFAULTS)}"
             )
         config = _SOLVER_DEFAULTS[solver_name]()
-    elif isinstance(solver, (NewtonCGConfig, AdamConfig, LBFGSConfig)):
+    elif isinstance(solver, (NewtonCGConfig)):
         config = solver
     else:
         raise TypeError(
@@ -2610,80 +2358,42 @@ def lcurve_sweep_vmap(
             f"got {type(solver)}"
         )
 
-    init_mag = u.Quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
+    init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
 
-    # Build a vmappable function for the chosen solver.
-    if isinstance(config, NewtonCGConfig):
-        def _solve_for_lam_newton(lam):
-            reg_config = {"lambda_exchange": lam}
-            (mag, ramp), _loss = _run_newton_cg_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                rdfc_kernel=rdfc_kernel,
-                cg_tol=config.cg_tol,
-                cg_maxiter=config.cg_maxiter,
-                reg_mask=reg_mask,
-            )
-            return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp))
-        solve_for_lam = _solve_for_lam_newton
-    elif isinstance(config, AdamConfig):
-        def _solve_for_lam_adam(lam):
-            reg_config = {"lambda_exchange": lam}
-            (mag, ramp), _loss = _run_adam_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                num_steps=config.num_steps,
-                learning_rate=config.learning_rate,
-                rdfc_kernel=rdfc_kernel,
-                patience=config.patience,
-                min_delta=config.min_delta,
-                reg_mask=reg_mask,
-            )
-            return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp))
-        solve_for_lam = _solve_for_lam_adam
-    elif isinstance(config, LBFGSConfig):
-        def _solve_for_lam_lbfgs(lam):
-            reg_config = {"lambda_exchange": lam}
-            (mag, ramp), _loss = _run_lbfgs_solver_2d(
-                phase=phase,
-                init_mag=init_mag,
-                mask=mask,
-                pixel_size=pixel_size,
-                reg_config=reg_config,
-                num_steps=config.num_steps,
-                rdfc_kernel=rdfc_kernel,
-                patience=config.patience,
-                min_delta=config.min_delta,
-                reg_mask=reg_mask,
-            )
-            return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp))
-        solve_for_lam = _solve_for_lam_lbfgs
-    else:
-        raise AssertionError(f"Unhandled solver config type: {type(config)}")
+    def _solve_for_lam_newton(lam):
+        reg_config = {"lambda_exchange": make_quantity(lam, "rad2")}
+        (mag, ramp), _loss = _run_newton_cg_solver_2d(
+            phase=phase,
+            init_mag=init_mag,
+            mask=mask,
+            pixel_size=pixel_size,
+            reg_config=reg_config,
+            rdfc_kernel=rdfc_kernel,
+            cg_tol=config.cg_tol,
+            cg_maxiter=config.cg_maxiter,
+            reg_mask=reg_mask,
+        )
+        return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp))
+
+    solve_for_lam = _solve_for_lam_newton
 
     solve_batch = jax.jit(jax.vmap(solve_for_lam))
     all_mag, all_ramp = solve_batch(lambdas_jax)
 
-    # Decompose losses (vmapped)
-    _norm_fn = forward_diff_norm if pyramid_compat else exchange_loss_fn
-
     def _decompose_single(mag, ramp):
-        masked_mag = _as_dimensionless_quantity(qnp.stack([
-            mag[..., 0] * mask,
-            mag[..., 1] * mask,
-        ], axis=-1))
+        masked_mag = u.Quantity(
+            jnp.stack([
+                mag[..., 0] * mask,
+                mag[..., 1] * mask,
+            ], axis=-1),
+            "",
+        )
         predicted = forward_model_single_rdfc_2d(
             masked_mag, _ramp_coeffs_from_array(ramp), rdfc_kernel, pixel_size,
         )
         residuals = predicted - phase
         dm = cast(u.Quantity, qnp.sum(residuals ** 2)).value
-        rn = cast(u.Quantity, _norm_fn(masked_mag, reg_mask)).value
+        rn = cast(u.Quantity, exchange_loss_fn(masked_mag, reg_mask)).value
         return dm, rn
 
     decompose_batch = jax.jit(jax.vmap(_decompose_single))
@@ -2694,14 +2404,14 @@ def lcurve_sweep_vmap(
     corner_idx, _ = kneedle_corner(data_misfits, reg_norms)
 
     result = LCurveResult(
-        lambdas=u.Quantity(lambdas_np, "rad2"),
-        data_misfits=u.Quantity(data_misfits, "rad2"),
-        reg_norms=u.Quantity(reg_norms, ""),
-        magnetizations=u.Quantity(all_mag, ""),
+        lambdas=make_quantity(lambdas_np, "rad2"),
+        data_misfits=make_quantity(data_misfits, "rad2"),
+        reg_norms=make_quantity(reg_norms, ""),
+        magnetizations=make_quantity(all_mag, ""),
         ramp_coeffs=RampCoeffs(
-            offset=u.Quantity(all_ramp[:, 0], "rad"),
-            slope_y=u.Quantity(all_ramp[:, 1], "rad/nm"),
-            slope_x=u.Quantity(all_ramp[:, 2], "rad/nm"),
+            offset=make_quantity(all_ramp[:, 0], "rad"),
+            slope_y=make_quantity(all_ramp[:, 1], "rad/nm"),
+            slope_x=make_quantity(all_ramp[:, 2], "rad/nm"),
         ),
         corner_index=corner_idx,
     )
