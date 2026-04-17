@@ -34,8 +34,8 @@ This is a package; the implementation is split across submodules:
 * :mod:`.lcurve` — L-curve sweeps.
 * :mod:`.plotting` — matplotlib helpers.
 
-All public names are re-exported from this package for backwards
-compatibility with ``from libertem_holo.base.mbir import ...``.
+All public names are re-exported from this package so users can import
+them directly from :mod:`libertem_holo.base.mbir`.
 """
 
 from __future__ import annotations

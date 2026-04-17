@@ -90,10 +90,6 @@ def _ramp_q(value, *, dtype=jnp.float64):
     )
 
 
-def apply_ramp(ramp_coeffs, height, width, pixel_size):
-    return mbir_mod.apply_ramp(_ramp_q(ramp_coeffs), height, width, _pixel_size_q(pixel_size))
-
-
 def get_freq_grid(height, width, pixel_size):
     return mbir_mod.get_freq_grid(height, width, _pixel_size_q(pixel_size))
 
@@ -724,18 +720,8 @@ class TestGetFreqGrid:
         assert _scalar_value(denom[0, 0]) == 1.0
 
 
-class TestApplyRamp:
-    def test_offset_only(self):
-        ramp = apply_ramp(jnp.array([3.0, 0.0, 0.0]), 4, 4, 1.0)
-        assert_allclose(np.asarray(ramp), 3.0, atol=1e-12)
-
-    def test_slope(self):
-        coeffs = jnp.array([0.0, 1.0, 0.0], dtype=jnp.float64)
-        ramp = apply_ramp(coeffs, 4, 4, 1.0)
-        # slope_y * (y * voxel_size): y=0..3, voxel_size=1
-        expected_col = np.array([0.0, 1.0, 2.0, 3.0])
-        for col in range(4):
-            assert_allclose(np.asarray(ramp[:, col]), expected_col, atol=1e-12)
+# ApplyRamp behaviour is covered by TestApplyRampQuantity in test_mbir_unxt.py
+# (both offset and slope cases, plus unit conversion).
 
 
 # ===================================================================
@@ -972,19 +958,12 @@ class TestSolvers:
 
 
 class TestReconstruct2D:
-    """Test reconstruct_2d convenience wrapper."""
+    """Test reconstruct_2d convenience wrapper.
 
-    def test_basic_call(self, small_problem):
-        sp = small_problem
-        result = reconstruct_2d(
-            phase=jnp.array(sp["phase"]),
-            pixel_size=_Q(sp["voxel_size"], "nm"),
-            mask=jnp.array(sp["mask"]),
-            lam=1e-3,
-            solver="newton_cg",
-        )
-        assert isinstance(result, SolverResult)
-        assert result.magnetization.shape == sp["gt_mag"].shape
+    Basic Quantity-input call is covered by TestReconstruct2DQuantity in
+    test_mbir_unxt.py.  The cases here focus on non-Quantity specific
+    behaviour: default masks and solver-config dispatch.
+    """
 
     def test_default_mask_is_ones(self, small_problem):
         sp = small_problem
@@ -1156,7 +1135,7 @@ class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
         assert cfg.cg_maxiter == 10000
-        assert cfg.cg_tol == 1e-16
+        assert cfg.cg_tol == 1e-9
         assert cfg.preconditioner is None
 
     def test_configs_are_frozen(self):

@@ -236,14 +236,6 @@ def _as_interaction_constant_quantity(
     return _as_quantity(value, "rad / (V m)", name)
 
 
-def _as_physical_magnetization_quantity(
-    value,
-    name: str = "projected_magnetization",
-) -> u.Quantity:
-    """Normalize a physical magnetization Quantity to A/m."""
-    return _as_quantity(value, "A / m", name)
-
-
 def _as_projected_induction_integral_quantity(
     value,
     name: str = "projected_induction_integral",

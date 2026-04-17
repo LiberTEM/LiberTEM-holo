@@ -10,7 +10,7 @@ preconditioners.
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal, NamedTuple, Union
+from typing import Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -146,7 +146,10 @@ class RegConfig:
     lambda_exchange: float | u.Quantity = 0.0
 
 
-SolverConfig = Union[NewtonCGConfig]
+# Type alias for solver configuration objects.  Currently only Newton-CG
+# is supported; this alias allows future solver configs to plug in without
+# changing public signatures.
+SolverConfig = NewtonCGConfig
 
 _SOLVER_DEFAULTS = {
     "newton_cg": NewtonCGConfig,
