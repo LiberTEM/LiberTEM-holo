@@ -19,27 +19,29 @@ import unxt as u  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
     RampCoeffs,
+    RegConfig,
     SolverResult,
     add_units_to_inputs,
     apply_ramp,
     bootstrap_threshold_uncertainty_2d,
     build_rdfc_kernel,
     decompose_loss,
+    estimate_mip_phase_from_thickness,
+    estimate_thickness_from_mip_phase,
     forward_model_2d,
     forward_model_3d,
     forward_model_single_rdfc_2d,
     lcurve_sweep,
     make_quantity,
     mbir_loss_2d,
+    plot_bootstrap_mask_summary,
     reconstruct_2d,
     solve_mbir_2d,
     NewtonCGConfig,
     to_local_induction,
     to_local_magnetization,
-    to_magnetic_induction,
     to_projected_induction_integral,
     to_projected_magnetization_integral,
-    to_physical_magnetization,
 )
 
 
@@ -69,22 +71,16 @@ def test_add_units_to_inputs_builds_common_quantity_dict():
         phase=np.array([[1.0, 2.0]]),
         pixel_size=0.58,
         thickness=125.0,
-        lam=1e-3,
-        reference_induction=0.6,
     )
 
     assert set(result) == {
         "phase",
         "pixel_size",
         "thickness",
-        "lam",
-        "reference_induction",
     }
     assert_quantity_compatible(result["phase"], "rad")
     assert_quantity_compatible(result["pixel_size"], "nm")
     assert_quantity_compatible(result["thickness"], "nm")
-    assert_quantity_compatible(result["lam"], "rad2")
-    assert_quantity_compatible(result["reference_induction"], "T")
 
 
 def test_add_units_to_inputs_converts_existing_quantities():
@@ -92,15 +88,82 @@ def test_add_units_to_inputs_converts_existing_quantities():
         phase=u.Quantity([180.0], "deg"),
         pixel_size=u.Quantity(0.007423, "um"),
         thickness=u.Quantity(0.125, "um"),
-        lam=u.Quantity(0.001, "rad2"),
-        reference_induction=u.Quantity(600.0, "mT"),
     )
 
     assert_allclose(array_value(result["phase"]), np.array([np.pi]), rtol=1e-12, atol=1e-12)
     assert_allclose(array_value(result["pixel_size"]), 7.423, rtol=1e-12, atol=1e-12)
     assert_allclose(array_value(result["thickness"]), 125.0, rtol=1e-12, atol=1e-12)
-    assert_allclose(array_value(result["lam"]), 0.001, rtol=1e-12, atol=1e-12)
-    assert_allclose(array_value(result["reference_induction"]), 0.6, rtol=1e-12, atol=1e-12)
+
+
+def test_add_units_to_inputs_accepts_explicit_phase_variants_with_shared_unit():
+    result = add_units_to_inputs(
+        mag_phase=u.Quantity([180.0], "deg"),
+        mip_phase=np.array([500.0]),
+        phase_unit="mrad",
+    )
+
+    assert set(result) == {"mag_phase", "mip_phase"}
+    assert_quantity_compatible(result["mag_phase"], "mrad")
+    assert_quantity_compatible(result["mip_phase"], "mrad")
+    assert_allclose(array_value(result["mag_phase"]), np.array([np.pi * 1000.0]), rtol=1e-12, atol=1e-12)
+    assert_allclose(array_value(result["mip_phase"]), np.array([500.0]), rtol=1e-12, atol=1e-12)
+
+
+def test_add_units_to_inputs_rejects_mixed_generic_and_explicit_phase_keys():
+    with pytest.raises(ValueError, match="Use either 'phase' or the explicit 'mag_phase'/'mip_phase' inputs"):
+        add_units_to_inputs(
+            phase=np.array([1.0]),
+            mip_phase=np.array([2.0]),
+        )
+
+
+def test_estimate_thickness_from_mip_phase_matches_reference_formula():
+    mip_phase = make_quantity(np.array([[10.0, -20.0], [40.0, 80.0]]), "rad")
+    mean_inner_potential = make_quantity(17.0, "V")
+
+    result = estimate_thickness_from_mip_phase(
+        mip_phase,
+        mean_inner_potential=mean_inner_potential,
+    )
+
+    expected = np.abs(np.array([[10.0, -20.0], [40.0, 80.0]])) / (17.0 * 6.53e6) * 1e9
+    assert_quantity_compatible(result, "nm")
+    assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+
+def test_estimate_mip_phase_from_thickness_matches_inverse_formula():
+    thickness = make_quantity(np.array([[10.0, 20.0], [40.0, 80.0]]), "nm")
+    mean_inner_potential = make_quantity(17.0, "V")
+
+    result = estimate_mip_phase_from_thickness(
+        thickness,
+        mean_inner_potential=mean_inner_potential,
+    )
+
+    expected = np.array([[10.0, 20.0], [40.0, 80.0]]) * 1e-9 * 17.0 * 6.53e6
+    assert_quantity_compatible(result, "rad")
+    assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+
+def test_phase_thickness_estimates_round_trip_for_positive_inputs():
+    mip_phase = make_quantity(np.array([[10.0, 20.0], [40.0, 80.0]]), "rad")
+    mean_inner_potential = make_quantity(17.0, "V")
+
+    thickness = estimate_thickness_from_mip_phase(
+        mip_phase,
+        mean_inner_potential=mean_inner_potential,
+    )
+    reconstructed_phase = estimate_mip_phase_from_thickness(
+        thickness,
+        mean_inner_potential=mean_inner_potential,
+    )
+
+    assert_allclose(
+        array_value(reconstructed_phase),
+        array_value(mip_phase),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +377,29 @@ class TestSolveMBIR2DQuantity:
             sp["mask"],
             pixel_size=sp["pixel_size"],
             solver=NewtonCGConfig(cg_maxiter=10),
-            reg_config={"lambda_exchange": u.Quantity(1e-3, "rad2")},
+            reg_config=RegConfig(lambda_exchange=u.Quantity(1e-3, "rad2")),
+            rdfc_kernel=sp["kernel"],
+        )
+        assert isinstance(result, SolverResult)
+        assert isinstance(result.magnetization, u.Quantity)
+        assert isinstance(result.ramp_coeffs, RampCoeffs)
+        assert isinstance(result.loss_history, u.Quantity)
+        assert_quantity_compatible(result.magnetization, "")
+        assert_quantity_compatible(result.ramp_coeffs.offset, "rad")
+        assert_quantity_compatible(result.ramp_coeffs.slope_y, "rad / nm")
+        assert_quantity_compatible(result.ramp_coeffs.slope_x, "rad / nm")
+        assert_quantity_compatible(result.loss_history, "rad2")
+        assert result.magnetization.shape == sp["gt_mag"].shape
+
+    def test_block_jacobi_preconditioner_preserves_quantity_contract(self, small_problem):
+        sp = small_problem
+        result = solve_mbir_2d(
+            sp["phase"],
+            u.Quantity(jnp.zeros_like(jnp.array(sp["gt_mag"])), ""),
+            sp["mask"],
+            pixel_size=sp["pixel_size"],
+            solver=NewtonCGConfig(cg_maxiter=10, preconditioner="block_jacobi"),
+            reg_config={"lambda_exchange": u.Quantity(1e-3, "rad2")},  # dict for backward compat
             rdfc_kernel=sp["kernel"],
         )
         assert isinstance(result, SolverResult)
@@ -423,12 +508,13 @@ class TestMagnetizationConversionHelpers:
         expected = 0.6 * (small_problem["voxel_size"] * 1e-9) * array_value(magnetization) / (4e-7 * np.pi)
         assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
 
-    def test_to_magnetic_induction_rejects_non_dimensionless_input(self, small_problem):
+    def test_to_projected_induction_integral_rejects_non_dimensionless_input(self, small_problem):
         with pytest.raises(ValueError, match="magnetization"):
-            to_magnetic_induction(
+            to_projected_induction_integral(
                 u.Quantity(array_value(small_problem["gt_mag_q"]), "T"),
                 pixel_size=small_problem["pixel_size"],
             )
+
 
     def test_to_local_induction_scales_by_scalar_thickness(self, small_problem):
         magnetization = small_problem["gt_mag_q"]
@@ -511,6 +597,43 @@ class TestMagnetizationConversionHelpers:
         with pytest.raises(ValueError, match="thickness"):
             to_local_induction(projected, thickness_map)
 
+    def test_to_local_induction_clamps_small_thickness_when_requested(self, small_problem):
+        projected = to_projected_induction_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        thickness_map = u.Quantity(jnp.array([[0.0, 100.0]]), "nm")
+        projected = projected[:1, :2, :]
+
+        result = to_local_induction(
+            projected,
+            thickness_map,
+            min_effective_thickness=u.Quantity(50.0, "nm"),
+        )
+
+        expected_divisor = np.array([[50.0, 100.0]])[..., None]
+        expected = array_value(projected) / expected_divisor
+        assert_allclose(array_value(result), expected, rtol=1e-12, atol=1e-12)
+
+    def test_to_local_induction_can_mark_small_thickness_invalid(self, small_problem):
+        projected = to_projected_induction_integral(
+            small_problem["gt_mag_q"],
+            pixel_size=small_problem["pixel_size"],
+        )
+        thickness_map = u.Quantity(jnp.array([[10.0, 100.0]]), "nm")
+        projected = projected[:1, :2, :]
+
+        result = to_local_induction(
+            projected,
+            thickness_map,
+            min_effective_thickness=u.Quantity(50.0, "nm"),
+            invalid_to_nan=True,
+        )
+
+        values = array_value(result)
+        assert np.isnan(values[0, 0]).all()
+        assert np.isfinite(values[0, 1]).all()
+
     def test_to_local_induction_rejects_non_length_thickness(self, small_problem):
         projected = to_projected_induction_integral(
             small_problem["gt_mag_q"],
@@ -527,28 +650,24 @@ class TestMagnetizationConversionHelpers:
         with pytest.raises(ValueError, match="projected_magnetization_integral"):
             to_local_magnetization(projected, u.Quantity(10.0, "nm"))
 
-    def test_compatibility_aliases_match_explicit_helpers(self, small_problem):
-        magnetization = small_problem["gt_mag_q"]
-        induction_alias = to_magnetic_induction(
-            magnetization,
+    def test_to_local_magnetization_can_mark_small_thickness_invalid(self, small_problem):
+        projected = to_projected_magnetization_integral(
+            small_problem["gt_mag_q"],
             pixel_size=small_problem["pixel_size"],
         )
-        induction_explicit = to_projected_induction_integral(
-            magnetization,
-            pixel_size=small_problem["pixel_size"],
-        )
-        magnetization_alias = to_physical_magnetization(
-            magnetization,
-            pixel_size=small_problem["pixel_size"],
-        )
-        magnetization_explicit = to_projected_magnetization_integral(
-            magnetization,
-            pixel_size=small_problem["pixel_size"],
+        thickness_map = u.Quantity(jnp.array([[10.0, 100.0]]), "nm")
+        projected = projected[:1, :2, :]
+
+        result = to_local_magnetization(
+            projected,
+            thickness_map,
+            min_effective_thickness=u.Quantity(50.0, "nm"),
+            invalid_to_nan=True,
         )
 
-        assert_allclose(array_value(induction_alias), array_value(induction_explicit), atol=1e-12)
-        assert_allclose(array_value(magnetization_alias), array_value(magnetization_explicit), atol=1e-12)
-
+        values = array_value(result)
+        assert np.isnan(values[0, 0]).all()
+        assert np.isfinite(values[0, 1]).all()
 
 # ===================================================================
 # mbir_loss_2d
@@ -666,35 +785,9 @@ class TestLCurveQuantity:
 # ===================================================================
 
 class TestBootstrapThresholdQuantity:
-    """bootstrap_threshold_uncertainty_2d keeps threshold/norm units."""
+    """bootstrap_threshold_uncertainty_2d uses plain scalar thresholds."""
 
-    def test_quantity_thresholds_and_outputs(self, small_problem):
-        sp = small_problem
-        mip_abs = np.abs(np.asarray(sp["phase"].value))
-        threshold_value = 0.5 * float(mip_abs.max())
-        result = bootstrap_threshold_uncertainty_2d(
-            phase=sp["phase"],
-            mip_phase=sp["phase"],
-            threshold=u.Quantity(threshold_value, "rad"),
-            threshold_low=u.Quantity(0.8 * threshold_value, "rad"),
-            threshold_high=u.Quantity(1.2 * threshold_value, "rad"),
-            pixel_size=sp["pixel_size"],
-            lam=u.Quantity(1e-3, "rad2"),
-            solver_config=NewtonCGConfig(cg_maxiter=5),
-            n_boot=3,
-            rdfc_kernel=sp["kernel"],
-        )
-        assert isinstance(result.threshold, u.Quantity)
-        assert isinstance(result.threshold_low, u.Quantity)
-        assert isinstance(result.threshold_high, u.Quantity)
-        assert isinstance(result.threshold_draws, u.Quantity)
-        assert isinstance(result.mean_norm, u.Quantity)
-        assert_quantity_compatible(result.threshold, "rad")
-        assert_quantity_compatible(result.threshold_low, "rad")
-        assert_quantity_compatible(result.threshold_high, "rad")
-        assert result.magnetizations.shape[0] == 3
-
-    def test_float_thresholds_are_interpreted_as_radians(self, small_problem):
+    def test_scalar_thresholds_and_outputs(self, small_problem):
         sp = small_problem
         mip_abs = np.abs(np.asarray(sp["phase"].value))
         threshold_value = 0.5 * float(mip_abs.max())
@@ -710,17 +803,208 @@ class TestBootstrapThresholdQuantity:
             n_boot=3,
             rdfc_kernel=sp["kernel"],
         )
-        assert isinstance(result.threshold, u.Quantity)
-        assert isinstance(result.threshold_low, u.Quantity)
-        assert isinstance(result.threshold_high, u.Quantity)
-        assert isinstance(result.threshold_draws, u.Quantity)
-        assert_quantity_compatible(result.threshold, "rad")
-        assert_quantity_compatible(result.threshold_low, "rad")
-        assert_quantity_compatible(result.threshold_high, "rad")
-        assert_allclose(array_value(result.threshold), threshold_value, atol=1e-12)
-        assert_allclose(array_value(result.threshold_low), 0.8 * threshold_value, atol=1e-12)
-        assert_allclose(array_value(result.threshold_high), 1.2 * threshold_value, atol=1e-12)
+        assert isinstance(result.threshold, float)
+        assert isinstance(result.threshold_low, float)
+        assert isinstance(result.threshold_high, float)
+        assert isinstance(result.threshold_draws, np.ndarray)
+        assert isinstance(result.mean_norm, u.Quantity)
+        assert_allclose(result.threshold, threshold_value, atol=1e-12)
+        assert_allclose(result.threshold_low, 0.8 * threshold_value, atol=1e-12)
+        assert_allclose(result.threshold_high, 1.2 * threshold_value, atol=1e-12)
         assert result.magnetizations.shape[0] == 3
+        assert result.local_induction_mean_samples is None
+        assert result.local_induction_mean is None
+        assert result.local_induction_mean_low is None
+        assert result.local_induction_mean_high is None
+        assert result.local_induction_mean_ci95 is None
+        assert result.local_induction_roi_pixels is None
+
+    def test_returns_local_induction_mean_summary_inside_each_bootstrap_mask(self, small_problem):
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        thickness = u.Quantity(np.full(sp["phase"].shape, 50.0), "nm")
+        result = bootstrap_threshold_uncertainty_2d(
+            phase=sp["phase"],
+            mip_phase=sp["phase"],
+            threshold=threshold_value,
+            threshold_low=0.8 * threshold_value,
+            threshold_high=1.2 * threshold_value,
+            pixel_size=sp["pixel_size"],
+            lam=u.Quantity(1e-3, "rad2"),
+            solver_config=NewtonCGConfig(cg_maxiter=5),
+            n_boot=4,
+            rng_seed=3,
+            rdfc_kernel=sp["kernel"],
+            thickness=thickness,
+            min_effective_thickness=u.Quantity(10.0, "nm"),
+            invalid_to_nan=True,
+        )
+
+        assert_quantity_compatible(cast(u.Quantity, result.local_induction_mean_samples), "T")
+        assert_quantity_compatible(cast(u.Quantity, result.local_induction_mean), "T")
+        assert_quantity_compatible(cast(u.Quantity, result.local_induction_mean_low), "T")
+        assert_quantity_compatible(cast(u.Quantity, result.local_induction_mean_high), "T")
+        assert_quantity_compatible(cast(u.Quantity, result.local_induction_mean_ci95), "T")
+        assert result.local_induction_roi_pixels is not None
+        assert result.local_induction_roi_pixels.shape == (4,)
+
+        manual_samples = []
+        manual_pixels = []
+        for draw_index, draw_threshold in enumerate(result.threshold_draws):
+            draw_mask = mip_abs > draw_threshold
+            projected_draw = to_projected_induction_integral(
+                result.magnetizations[draw_index],
+                sp["pixel_size"],
+            )
+            local_draw = to_local_induction(
+                projected_draw,
+                thickness,
+                min_effective_thickness=u.Quantity(10.0, "nm"),
+                invalid_to_nan=True,
+            )
+            local_norm = np.linalg.norm(np.asarray(local_draw.value), axis=-1)
+            roi_values = local_norm[draw_mask]
+            finite_roi_values = roi_values[np.isfinite(roi_values)]
+            manual_pixels.append(finite_roi_values.size)
+            manual_samples.append(finite_roi_values.mean())
+
+        manual_samples = np.asarray(manual_samples)
+        manual_pixels = np.asarray(manual_pixels)
+
+        assert_allclose(
+            np.asarray(cast(u.Quantity, result.local_induction_mean_samples).value),
+            manual_samples,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert_allclose(result.local_induction_roi_pixels, manual_pixels)
+        assert_allclose(
+            np.asarray(cast(u.Quantity, result.local_induction_mean).value),
+            np.nanmean(manual_samples),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert_allclose(
+            np.asarray(cast(u.Quantity, result.local_induction_mean_low).value),
+            np.nanpercentile(manual_samples, 2.5),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        assert_allclose(
+            np.asarray(cast(u.Quantity, result.local_induction_mean_high).value),
+            np.nanpercentile(manual_samples, 97.5),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_local_induction_summary_respects_invalid_thickness_pixels(self, small_problem):
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        thickness = u.Quantity(np.full(sp["phase"].shape, 50.0), "nm")
+        thickness_values = np.asarray(thickness.value).copy()
+        thickness_values[2:4, 2:4] = 5.0
+        thickness = u.Quantity(thickness_values, "nm")
+
+        result = bootstrap_threshold_uncertainty_2d(
+            phase=sp["phase"],
+            mip_phase=sp["phase"],
+            threshold=threshold_value,
+            threshold_low=0.9 * threshold_value,
+            threshold_high=1.1 * threshold_value,
+            pixel_size=sp["pixel_size"],
+            lam=u.Quantity(1e-3, "rad2"),
+            solver_config=NewtonCGConfig(cg_maxiter=5),
+            n_boot=3,
+            rng_seed=1,
+            rdfc_kernel=sp["kernel"],
+            thickness=thickness,
+            min_effective_thickness=u.Quantity(10.0, "nm"),
+            invalid_to_nan=True,
+        )
+
+        assert result.local_induction_roi_pixels is not None
+        assert np.all(result.local_induction_roi_pixels >= 0)
+        raw_bootstrap_pixels = np.array([
+            np.count_nonzero(mip_abs > draw_threshold)
+            for draw_threshold in result.threshold_draws
+        ])
+        assert np.all(result.local_induction_roi_pixels <= raw_bootstrap_pixels)
+        assert np.any(result.local_induction_roi_pixels < raw_bootstrap_pixels)
+        assert np.isfinite(np.asarray(cast(u.Quantity, result.local_induction_mean).value))
+
+    def test_unitful_thresholds_are_rejected(self, small_problem):
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        with pytest.raises(TypeError, match="threshold must be a plain scalar without units"):
+            bootstrap_threshold_uncertainty_2d(
+                phase=sp["phase"],
+                mip_phase=sp["phase"],
+                threshold=u.Quantity(threshold_value, "rad"),
+                threshold_low=0.8 * threshold_value,
+                threshold_high=1.2 * threshold_value,
+                pixel_size=sp["pixel_size"],
+                lam=u.Quantity(1e-3, "rad2"),
+                solver_config=NewtonCGConfig(cg_maxiter=5),
+                n_boot=3,
+                rdfc_kernel=sp["kernel"],
+            )
+
+
+class TestBootstrapMaskSummaryPlot:
+    """Plotting helper for aggregate bootstrap mask stability."""
+
+    def test_plot_bootstrap_mask_summary_returns_figure_axes_and_info(self, small_problem):
+        import matplotlib.pyplot as plt
+
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        result = bootstrap_threshold_uncertainty_2d(
+            phase=sp["phase"],
+            mip_phase=sp["phase"],
+            threshold=threshold_value,
+            threshold_low=0.8 * threshold_value,
+            threshold_high=1.2 * threshold_value,
+            pixel_size=sp["pixel_size"],
+            lam=u.Quantity(1e-3, "rad2"),
+            solver_config=NewtonCGConfig(cg_maxiter=5),
+            n_boot=4,
+            rng_seed=2,
+            rdfc_kernel=sp["kernel"],
+        )
+
+        fig, ax, info = plot_bootstrap_mask_summary(result)
+
+        assert fig is ax.figure
+        assert info["n_draws"] == 4
+        assert info["stable_frequency"] == 0.5
+        assert info["mask_frequency"].shape == sp["phase"].shape
+        assert info["stable_support"].dtype == bool
+        assert np.array_equal(info["stable_support"], info["mask_frequency"] >= 0.5)
+        assert "Bootstrap mask inclusion frequency" in ax.get_title()
+
+        plt.close(fig)
+
+    def test_plot_bootstrap_mask_summary_rejects_invalid_frequency(self, small_problem):
+        sp = small_problem
+        mip_abs = np.abs(np.asarray(sp["phase"].value))
+        threshold_value = 0.5 * float(mip_abs.max())
+        result = bootstrap_threshold_uncertainty_2d(
+            phase=sp["phase"],
+            mip_phase=sp["phase"],
+            threshold=threshold_value,
+            pixel_size=sp["pixel_size"],
+            lam=u.Quantity(1e-3, "rad2"),
+            solver_config=NewtonCGConfig(cg_maxiter=5),
+            n_boot=3,
+            rdfc_kernel=sp["kernel"],
+        )
+
+        with pytest.raises(ValueError, match="stable_frequency"):
+            plot_bootstrap_mask_summary(result, stable_frequency=1.5)
 
 
 # ===================================================================

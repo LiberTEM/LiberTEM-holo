@@ -1157,11 +1157,26 @@ class TestSolverConfigs:
         cfg = NewtonCGConfig()
         assert cfg.cg_maxiter == 10000
         assert cfg.cg_tol == 1e-16
+        assert cfg.preconditioner is None
 
     def test_configs_are_frozen(self):
         cfg = NewtonCGConfig()
         with pytest.raises(Exception):
             cast(Any, cfg).cg_maxiter = 100
+
+    def test_invalid_preconditioner_is_rejected(self, small_problem):
+        sp = small_problem
+        invalid_config = NewtonCGConfig(preconditioner="not-a-preconditioner")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="preconditioner"):
+            solve_mbir_2d(
+                sp["phase"],
+                jnp.zeros_like(jnp.array(sp["gt_mag"])),
+                sp["mask"],
+                pixel_size=sp["voxel_size"],
+                solver=invalid_config,
+                reg_config={"lambda_exchange": 1e-3},
+                rdfc_kernel=sp["kernel"],
+            )
 
 
 # ===================================================================
@@ -1212,10 +1227,12 @@ class TestResultTypes:
                 slope_x=_Q(0.0, "rad/nm"),
             ),
             loss_history=_Q(jnp.zeros(10), "rad2"),
+            converged=True,
         )
         assert r.magnetization.shape == (4, 4, 2)
         assert isinstance(r.ramp_coeffs, RampCoeffs)
         assert r.loss_history.shape == (10,)
+        assert r.converged is True
 
     def test_lcurve_result_fields(self):
         r = LCurveResult(
@@ -1232,6 +1249,48 @@ class TestResultTypes:
         )
         assert r.corner_index == 1
         assert len(r.lambdas) == 3
+
+
+# ===================================================================
+# 13b. Convergence reporting
+# ===================================================================
+
+
+class TestConvergenceReporting:
+    """Test that the CG convergence flag and warning work correctly."""
+
+    def test_converged_true_when_sufficient_iterations(self, small_problem):
+        sp = small_problem
+        result = solve_mbir_2d(
+            phase=_Q(jnp.array(sp["phase"]), "rad"),
+            init_mag=_Q(jnp.zeros_like(jnp.array(sp["gt_mag"])), ""),
+            mask=jnp.array(sp["mask"]),
+            pixel_size=_Q(sp["voxel_size"], "nm"),
+            solver=NewtonCGConfig(cg_maxiter=10000, cg_tol=1e-8),
+        )
+        assert result.converged is True
+
+    def test_converged_false_with_one_iteration(self, small_problem):
+        sp = small_problem
+        with pytest.warns(RuntimeWarning, match="CG solver did not converge"):
+            result = solve_mbir_2d(
+                phase=_Q(jnp.array(sp["phase"]), "rad"),
+                init_mag=_Q(jnp.zeros_like(jnp.array(sp["gt_mag"])), ""),
+                mask=jnp.array(sp["mask"]),
+                pixel_size=_Q(sp["voxel_size"], "nm"),
+                solver=NewtonCGConfig(cg_maxiter=1, cg_tol=1e-16),
+            )
+        assert result.converged is False
+
+    def test_reconstruct_2d_returns_converged(self, small_problem):
+        sp = small_problem
+        result = reconstruct_2d(
+            phase=jnp.array(sp["phase"]),
+            pixel_size=_Q(sp["voxel_size"], "nm"),
+            mask=jnp.array(sp["mask"]),
+            lam=1e-3,
+        )
+        assert isinstance(result.converged, bool)
 
 
 # ===================================================================

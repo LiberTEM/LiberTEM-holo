@@ -25,7 +25,8 @@ The reconstructed magnetization is **dimensionless** (normalised
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, NamedTuple, Union, cast
+import warnings
+from typing import Any, Literal, NamedTuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -36,9 +37,10 @@ import unxt as u
 
 PHI_0 = u.Quantity(2067.83, "T nm2")  # magnetic flux quantum h/(2e)
 B_REF = u.Quantity(1.0, "T")  # reference magnetic induction
-MU_0 = u.Quantity(4e-7 * np.pi, "T m / A")  # vacuum permeability
 KERNEL_COEFF = B_REF / (2 * PHI_0)  # Quantity["1/nm2"]
 
+MU_0 = u.Quantity(4e-7 * np.pi, "T m / A")  # vacuum permeability
+ELECTRON_INTERACTION_CONSTANT_300KV = u.Quantity(6.53e6, "rad / (V m)")
 # ---------------------------------------------------------------------------
 # RampCoeffs — typed container for background ramp parameters
 # ---------------------------------------------------------------------------
@@ -86,15 +88,13 @@ def make_quantity(value: Any, unit: str) -> u.Quantity:
 def add_units_to_inputs(
     *,
     phase: Any | None = None,
+    mag_phase: Any | None = None,
+    mip_phase: Any | None = None,
     phase_unit: str = "rad",
     pixel_size: Any | None = None,
     pixel_size_unit: str = "nm",
     thickness: Any | None = None,
     thickness_unit: str = "nm",
-    lam: Any | None = None,
-    lam_unit: str = "rad2",
-    reference_induction: Any | None = None,
-    reference_induction_unit: str = "T",
 ) -> dict[str, u.Quantity]:
     """Build a dictionary of common MBIR input quantities in one call.
 
@@ -102,18 +102,28 @@ def add_units_to_inputs(
     workflows where several scalar-or-array inputs need units attached at
     once. Structured inputs such as :class:`RampCoeffs` remain separate.
 
+    ``phase_unit`` is shared across all phase-like inputs. Use either the
+    generic ``phase`` key or the more explicit ``mag_phase`` / ``mip_phase``
+    keys, but do not mix ``phase`` with the specific phase variants in the
+    same call.
+
     Only values that are provided are included in the returned dictionary.
     Existing ``unxt.Quantity`` inputs are passed through unit conversion to
     the requested target unit.
     """
     result: dict[str, u.Quantity] = {}
 
+    if phase is not None and (mag_phase is not None or mip_phase is not None):
+        raise ValueError(
+            "Use either 'phase' or the explicit 'mag_phase'/'mip_phase' inputs, not both."
+        )
+
     for key, value, unit in (
         ("phase", phase, phase_unit),
+        ("mag_phase", mag_phase, phase_unit),
+        ("mip_phase", mip_phase, phase_unit),
         ("pixel_size", pixel_size, pixel_size_unit),
         ("thickness", thickness, thickness_unit),
-        ("lam", lam, lam_unit),
-        ("reference_induction", reference_induction, reference_induction_unit),
     ):
         if value is None:
             continue
@@ -200,14 +210,24 @@ def _ramp_coeffs_from_array(values: jax.Array) -> RampCoeffs:
     )
 
 
+def _as_quantity(value, unit: str, name: str) -> u.Quantity:
+    """Validate *value* is a Quantity convertible to *unit* and return it in *unit*.
+
+    This is the canonical normalizer. The specialized ``_as_*_quantity``
+    helpers below are thin wrappers that fix *unit* and *name* for
+    commonly-used physical quantities in the MBIR module.
+    """
+    if not isinstance(value, u.Quantity):
+        raise TypeError(
+            f"{name} must be a unxt.Quantity compatible with {unit!r}, got {type(value)}"
+        )
+    _assert_quantity_compatible(value, unit, name)
+    return cast(u.Quantity, u.uconvert(unit, value))
+
+
 def _as_length_quantity(value, name: str = "pixel_size") -> u.Quantity:
     """Normalize a length Quantity to nanometres."""
-    if not isinstance(value, u.Quantity):
-        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
-    _assert_quantity_compatible(value, "nm", name)
-    result = _to_nm(value)
-    _assert_quantity_compatible(result, "nm", name)
-    return result
+    return _as_quantity(value, "nm", name)
 
 
 def _as_angle_quantity(value) -> u.Quantity:
@@ -217,36 +237,33 @@ def _as_angle_quantity(value) -> u.Quantity:
     convention after the physical nm² cancellation in the forward model.
     """
     if not isinstance(value, u.Quantity):
-        raise TypeError(f"phase must be a unxt unitful Quantity, got {type(value)}")
+        raise TypeError(f"phase must be a unxt.Quantity, got {type(value)}")
     if str(value.unit) == "":
-        result = make_quantity(value.value, "rad")
-    else:
-        _assert_quantity_compatible(value, "rad", "phase")
-        result = _to_rad(value)
-    _assert_quantity_compatible(result, "rad", "phase")
-    return result
+        return make_quantity(value.value, "rad")
+    return _as_quantity(value, "rad", "phase")
 
 
 def _as_dimensionless_quantity(value) -> u.Quantity:
     """Normalize a dimensionless Quantity to unit ''."""
-    if not isinstance(value, u.Quantity):
-        raise TypeError(
-            f"magnetization must be a unxt dimensionless unitful Quantity, got {type(value)}"
-        )
-    _assert_quantity_compatible(value, "", "magnetization")
-    result = cast(u.Quantity, u.uconvert("", value))
-    _assert_quantity_compatible(result, "", "magnetization")
-    return result
+    return _as_quantity(value, "", "magnetization")
 
 
 def _as_induction_quantity(value, name: str = "reference_induction") -> u.Quantity:
     """Normalize a magnetic induction Quantity to tesla."""
-    if not isinstance(value, u.Quantity):
-        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
-    _assert_quantity_compatible(value, "T", name)
-    result = cast(u.Quantity, u.uconvert("T", value))
-    _assert_quantity_compatible(result, "T", name)
-    return result
+    return _as_quantity(value, "T", name)
+
+
+def _as_voltage_quantity(value, name: str = "mean_inner_potential") -> u.Quantity:
+    """Normalize an electric potential Quantity to volts."""
+    return _as_quantity(value, "V", name)
+
+
+def _as_interaction_constant_quantity(
+    value,
+    name: str = "interaction_constant",
+) -> u.Quantity:
+    """Normalize an electron interaction constant to rad / (V m)."""
+    return _as_quantity(value, "rad / (V m)", name)
 
 
 def _as_physical_magnetization_quantity(
@@ -254,12 +271,7 @@ def _as_physical_magnetization_quantity(
     name: str = "projected_magnetization",
 ) -> u.Quantity:
     """Normalize a physical magnetization Quantity to A/m."""
-    if not isinstance(value, u.Quantity):
-        raise TypeError(f"{name} must be a unxt unitful Quantity, got {type(value)}")
-    _assert_quantity_compatible(value, "A / m", name)
-    result = cast(u.Quantity, u.uconvert("A / m", value))
-    _assert_quantity_compatible(result, "A / m", name)
-    return result
+    return _as_quantity(value, "A / m", name)
 
 
 def _as_projected_induction_integral_quantity(
@@ -267,12 +279,7 @@ def _as_projected_induction_integral_quantity(
     name: str = "projected_induction_integral",
 ) -> u.Quantity:
     """Normalize a projected induction line integral to T nm."""
-    if not isinstance(value, u.Quantity):
-        raise ValueError(f"{name} must be a unxt.Quantity compatible with 'T nm', got {type(value)!r}")
-    _assert_quantity_compatible(value, "T nm", name)
-    result = cast(u.Quantity, u.uconvert("T nm", value))
-    _assert_quantity_compatible(result, "T nm", name)
-    return result
+    return _as_quantity(value, "T nm", name)
 
 
 def _as_projected_magnetization_integral_quantity(
@@ -280,12 +287,7 @@ def _as_projected_magnetization_integral_quantity(
     name: str = "projected_magnetization_integral",
 ) -> u.Quantity:
     """Normalize a projected magnetization line integral to ampere."""
-    if not isinstance(value, u.Quantity):
-        raise ValueError(f"{name} must be a unxt.Quantity compatible with 'A', got {type(value)!r}")
-    _assert_quantity_compatible(value, "A", name)
-    result = cast(u.Quantity, u.uconvert("A", value))
-    _assert_quantity_compatible(result, "A", name)
-    return result
+    return _as_quantity(value, "A", name)
 
 
 def _as_ramp_coeffs(value, *, dtype=jnp.float64) -> RampCoeffs:
@@ -305,10 +307,14 @@ def _as_ramp_coeffs(value, *, dtype=jnp.float64) -> RampCoeffs:
     return result
 
 
-def _as_threshold_quantity(value) -> u.Quantity:
+def _as_threshold_scalar(value, name: str = "threshold") -> float:
+    """Normalize a dimensionless threshold input to a plain scalar."""
     if isinstance(value, u.Quantity):
-        return cast(u.Quantity, u.uconvert("rad", value))
-    return make_quantity(value, "rad")
+        raise TypeError(f"{name} must be a plain scalar without units, got {type(value)}")
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise TypeError(f"{name} must be a scalar, got shape {array.shape}")
+    return float(array)
 
 
 def _to_lambda_exchange(value) -> u.Quantity:
@@ -368,10 +374,13 @@ class SolverResult(NamedTuple):
         Background phase-ramp coefficients with explicit units.
     loss_history : Quantity["rad2"]
         Per-step loss values.
+    converged : bool
+        Whether the CG solver converged within the iteration budget.
     """
     magnetization: u.Quantity
     ramp_coeffs: RampCoeffs
     loss_history: u.Quantity
+    converged: bool
 
 
 class LCurveResult(NamedTuple):
@@ -404,10 +413,10 @@ class LCurveResult(NamedTuple):
 
 class BootstrapThresholdResult(NamedTuple):
     """Result returned by :func:`bootstrap_threshold_uncertainty_2d`."""
-    threshold: u.Quantity
-    threshold_low: u.Quantity
-    threshold_high: u.Quantity
-    threshold_draws: u.Quantity
+    threshold: float
+    threshold_low: float
+    threshold_high: float
+    threshold_draws: np.ndarray
     magnetizations: u.Quantity  # Quantity["dimensionless"]
     mean_magnetization: u.Quantity  # Quantity["dimensionless"]
     mean_norm: u.Quantity  # Quantity["dimensionless"]
@@ -416,6 +425,12 @@ class BootstrapThresholdResult(NamedTuple):
     norm_ci95: u.Quantity  # Quantity["dimensionless"]
     relative_ci95: u.Quantity  # Quantity["dimensionless"]
     mask_frequency: np.ndarray
+    local_induction_mean_samples: u.Quantity | None  # Quantity["T"]
+    local_induction_mean: u.Quantity | None  # Quantity["T"]
+    local_induction_mean_low: u.Quantity | None  # Quantity["T"]
+    local_induction_mean_high: u.Quantity | None  # Quantity["T"]
+    local_induction_mean_ci95: u.Quantity | None  # Quantity["T"]
+    local_induction_roi_pixels: np.ndarray | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -429,9 +444,15 @@ class NewtonCGConfig:
         solve the Newton system ``H @ delta = -g``.
     cg_tol : float
         CG convergence tolerance (relative residual norm).
+    preconditioner : {None, "block_jacobi"}
+        Experimental inverse preconditioner for the Newton-CG linear
+        solve. ``"block_jacobi"`` uses one curvature scale for the
+        flattened magnetization block and individual curvature scales
+        for the three ramp parameters.
     """
     cg_maxiter: int = 10000
-    cg_tol: float = 1e-16
+    cg_tol: float = 1e-9
+    preconditioner: Literal["block_jacobi"] | None = None
 
 
 SolverConfig = Union[NewtonCGConfig]
@@ -439,6 +460,106 @@ SolverConfig = Union[NewtonCGConfig]
 _SOLVER_DEFAULTS = {
     "newton_cg": NewtonCGConfig,
 }
+
+
+def _resolve_solver_config(
+    solver: str | SolverConfig,
+    solver_config: SolverConfig | None = None,
+) -> SolverConfig:
+    """Resolve a solver string or config object (and optional override) to a SolverConfig.
+
+    When *solver_config* is provided it takes precedence over *solver*.
+    A string selects the default config for the named solver.
+    """
+    if solver_config is not None:
+        return solver_config
+    if isinstance(solver, str):
+        solver_name = solver.lower()
+        if solver_name not in _SOLVER_DEFAULTS:
+            raise ValueError(
+                f"Unknown solver {solver!r}. "
+                f"Choose from {list(_SOLVER_DEFAULTS)}"
+            )
+        return _SOLVER_DEFAULTS[solver_name]()
+    if isinstance(solver, NewtonCGConfig):
+        return solver
+    raise TypeError(
+        f"solver must be a string or a SolverConfig instance, got {type(solver)}"
+    )
+
+
+_NEWTON_CG_PRECONDITIONERS = {None, "block_jacobi"}
+
+
+def _validate_newton_cg_preconditioner(preconditioner: str | None) -> str | None:
+    """Validate the requested experimental Newton-CG preconditioner."""
+    if preconditioner not in _NEWTON_CG_PRECONDITIONERS:
+        raise ValueError(
+            f"Unknown Newton-CG preconditioner {preconditioner!r}. "
+            f"Choose from {sorted(name for name in _NEWTON_CG_PRECONDITIONERS if name is not None)} "
+            "or None."
+        )
+    return preconditioner
+
+
+def _make_block_jacobi_preconditioner(
+    x0_flat: jax.Array,
+    matvec_hvp,
+    magnetization_size: int,
+):
+    """Build a cheap block-diagonal inverse preconditioner in flat space."""
+    dtype = x0_flat.dtype
+    eps = jnp.sqrt(jnp.finfo(dtype).eps)
+    total_size = x0_flat.size
+    ramp_size = total_size - magnetization_size
+
+    if ramp_size != 3:
+        raise ValueError(
+            "Newton-CG block Jacobi preconditioner expects three ramp coefficients, "
+            f"got {ramp_size}."
+        )
+
+    mag_probe = jnp.concatenate([
+        jnp.ones((magnetization_size,), dtype=dtype),
+        jnp.zeros((ramp_size,), dtype=dtype),
+    ])
+    mag_curvature = jnp.vdot(mag_probe, matvec_hvp(mag_probe)).real / magnetization_size
+
+    ramp_curvatures = []
+    for ramp_index in range(ramp_size):
+        basis = jnp.zeros_like(x0_flat)
+        basis = basis.at[magnetization_size + ramp_index].set(1)
+        ramp_curvatures.append(matvec_hvp(basis)[magnetization_size + ramp_index].real)
+
+    diag = jnp.concatenate([
+        jnp.full((magnetization_size,), mag_curvature, dtype=dtype),
+        jnp.asarray(ramp_curvatures, dtype=dtype),
+    ])
+    diag = jnp.where(jnp.isfinite(diag) & (diag > eps), diag, jnp.ones_like(diag))
+
+    def inverse_preconditioner(v):
+        return v / diag
+
+    return inverse_preconditioner
+
+
+def _make_newton_cg_preconditioner(
+    preconditioner: str | None,
+    x0_flat: jax.Array,
+    matvec_hvp,
+    magnetization_size: int,
+):
+    """Create an experimental inverse preconditioner for JAX CG."""
+    preconditioner = _validate_newton_cg_preconditioner(preconditioner)
+    if preconditioner is None:
+        return None
+    if preconditioner == "block_jacobi":
+        return _make_block_jacobi_preconditioner(
+            x0_flat,
+            matvec_hvp,
+            magnetization_size,
+        )
+    raise AssertionError(f"Unhandled Newton-CG preconditioner: {preconditioner}")
 
 
 def exchange_loss_fn(
@@ -981,9 +1102,10 @@ def _run_newton_cg_solver_2d(
     rdfc_kernel: dict[str, Any] | None = None,
     cg_tol: float = 1e-8,
     cg_maxiter: int = 10000,
+    preconditioner: str | None = None,
     init_ramp_coeffs: RampCoeffs | None = None,
     reg_mask: jax.Array | None = None,
-) -> tuple[tuple[u.Quantity, RampCoeffs], u.Quantity]:
+) -> tuple[tuple[u.Quantity, RampCoeffs], u.Quantity, bool]:
     """Minimize :func:`mbir_loss_2d` using a single Newton-CG solve.
 
     The MBIR objective is quadratic in the reconstruction
@@ -1012,6 +1134,8 @@ def _run_newton_cg_solver_2d(
     cg_maxiter
         Maximum number of CG iterations for the Newton solve,
         default 10000.
+    preconditioner
+        Experimental inverse preconditioner for the CG solve.
     init_ramp_coeffs
         Initial ramp coefficients of shape ``(3,)``.  Defaults to
         zeros.
@@ -1025,6 +1149,8 @@ def _run_newton_cg_solver_2d(
         Optimized magnetization ``(N, M, 2)`` and typed ramp coefficients.
     loss_history : Quantity["rad2"]
         Length-1 array containing the loss after the Newton update.
+    converged : bool
+        Whether the CG solver converged within the iteration budget.
     """
     phase_q = _as_angle_quantity(phase)
     init_mag_q = _as_dimensionless_quantity(init_mag)
@@ -1061,15 +1187,34 @@ def _run_newton_cg_solver_2d(
     def matvec_hvp(v):
         return jax.jvp(loss_grad, (x0_flat,), (v,))[1]
 
-    delta, _info = jax.scipy.sparse.linalg.cg(
-        matvec_hvp, -grad_at_x0, tol=cg_tol, maxiter=cg_maxiter,
+    preconditioner_fn = _make_newton_cg_preconditioner(
+        preconditioner,
+        x0_flat,
+        matvec_hvp,
+        init_mag_q.value.size,
     )
+
+    delta, cg_info = jax.scipy.sparse.linalg.cg(
+        matvec_hvp,
+        -grad_at_x0,
+        tol=cg_tol,
+        maxiter=cg_maxiter,
+        M=preconditioner_fn,
+    )
+    # JAX's cg returns None for info; compute convergence from the residual.
+    # The system is: H @ delta = b where b = -grad_at_x0.
+    b = -grad_at_x0
+    residual = matvec_hvp(delta) - b
+    b_norm = jnp.linalg.norm(b)
+    residual_norm = jnp.linalg.norm(residual)
+    # CG convention: converged when ||r|| / ||b|| < tol (or b == 0).
+    converged = (b_norm == 0) | (residual_norm / (b_norm + 1e-30) < cg_tol)
     final_flat = x0_flat + delta
     history = make_quantity(jnp.expand_dims(objective_flat(final_flat), axis=0), "rad2")
 
     final_mag, final_ramp = unravel(final_flat)
 
-    return (final_mag, final_ramp), history
+    return (final_mag, final_ramp), history, converged
 
 
 def solve_mbir_2d(
@@ -1126,13 +1271,7 @@ def solve_mbir_2d(
             dtype=init_mag.value.dtype,
         )
     if isinstance(solver, str):
-        solver_name = solver.lower()
-        if solver_name not in _SOLVER_DEFAULTS:
-            raise ValueError(
-                f"Unknown solver {solver!r}. "
-                f"Choose from {list(_SOLVER_DEFAULTS)}"
-            )
-        config = _SOLVER_DEFAULTS[solver_name]()
+        config = _resolve_solver_config(solver)
     elif isinstance(solver, NewtonCGConfig):
         config = solver
     else:
@@ -1152,11 +1291,13 @@ def solve_mbir_2d(
     )
 
     if isinstance(config, NewtonCGConfig):
-        (mag, ramp), loss_history = _run_newton_cg_solver_2d(
+        (mag, ramp), loss_history, converged_jax = _run_newton_cg_solver_2d(
             **shared,
             cg_tol=config.cg_tol,
             cg_maxiter=config.cg_maxiter,
+            preconditioner=config.preconditioner,
         )
+        converged = bool(converged_jax)
     else:
         raise AssertionError(f"Unhandled solver config type: {type(config)}")
 
@@ -1164,15 +1305,24 @@ def solve_mbir_2d(
         magnetization=mag,
         ramp_coeffs=cast(RampCoeffs, ramp),
         loss_history=loss_history,
+        converged=converged,
     )
     _assert_solver_result_units(result)
+    if not result.converged:
+        warnings.warn(
+            f"CG solver did not converge within {config.cg_maxiter} iterations "
+            f"(tol={config.cg_tol}). Consider increasing cg_maxiter or "
+            f"relaxing cg_tol in NewtonCGConfig.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return result
 
 
 def reconstruct_2d(
     phase,
     pixel_size,
-    mask,
+    mask=None,
     lam=1e-3,
     solver: str | SolverConfig = "newton_cg",
     reg_mask=None,
@@ -1240,8 +1390,7 @@ def reconstruct_2d(
         )
 
     init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
-    lam_q = _to_lambda_exchange(lam)
-    reg_config = {"lambda_exchange": lam_q}
+    reg_config = {"lambda_exchange": lam}
 
     if solver_config is not None:
         solver = solver_config
@@ -1258,23 +1407,6 @@ def reconstruct_2d(
     )
     _assert_solver_result_units(result)
     return result
-
-
-def to_magnetic_induction(
-    magnetization,
-    pixel_size: u.Quantity,
-    reference_induction: u.Quantity = B_REF,
-) -> u.Quantity:
-    """Compatibility alias for :func:`to_projected_induction_integral`.
-
-    The returned quantity is a projected induction line integral with units
-    of T nm, not a local induction map in tesla.
-    """
-    return to_projected_induction_integral(
-        magnetization,
-        pixel_size,
-        reference_induction=reference_induction,
-    )
 
 
 def to_projected_induction_integral(
@@ -1308,23 +1440,6 @@ def to_projected_induction_integral(
     result = pixel_size * reference_induction * magnetization
     _assert_quantity_compatible(result, "T nm", "projected_induction_integral")
     return cast(u.Quantity, u.uconvert("T nm", result))
-
-
-def to_physical_magnetization(
-    magnetization,
-    pixel_size: u.Quantity,
-    reference_induction: u.Quantity = B_REF,
-) -> u.Quantity:
-    r"""Compatibility alias for :func:`to_projected_magnetization_integral`.
-
-    The returned quantity is a projected magnetization line integral with
-    units of A, not a local magnetization density in A/m.
-    """
-    return to_projected_magnetization_integral(
-        magnetization,
-        pixel_size,
-        reference_induction=reference_induction,
-    )
 
 
 def to_projected_magnetization_integral(
@@ -1366,9 +1481,71 @@ def to_projected_magnetization_integral(
     return cast(u.Quantity, u.uconvert("A", result))
 
 
+def estimate_thickness_from_mip_phase(
+    mip_phase,
+    mean_inner_potential: u.Quantity,
+    interaction_constant: u.Quantity = ELECTRON_INTERACTION_CONSTANT_300KV,
+    *,
+    use_abs: bool = True,
+) -> u.Quantity:
+    r"""Estimate a thickness map from a mean-inner-potential phase image.
+
+    Uses the standard relation
+
+    .. math::
+
+        \phi_E = C_E V_0 t
+
+    so that the thickness is
+
+    .. math::
+
+        t = \frac{\phi_E}{C_E V_0}.
+
+    Parameters
+    ----------
+    mip_phase : Quantity["angle"]
+        Mean-inner-potential phase image.
+    mean_inner_potential : Quantity["voltage"]
+        Mean inner potential :math:`V_0` of the material.
+    interaction_constant : Quantity["angle / (voltage * length)"], optional
+        Electron interaction constant :math:`C_E`. Defaults to the
+        300 kV value ``6.53e6 rad / (V m)``.
+    use_abs : bool, optional
+        If ``True`` (default), use ``abs(mip_phase)`` when estimating the
+        thickness map.
+
+    Returns
+    -------
+    Quantity["length"]
+        Estimated thickness map in nanometres.
+    """
+    mip_phase_q = _as_angle_quantity(mip_phase)
+    mean_inner_potential_q = _as_voltage_quantity(mean_inner_potential)
+    interaction_constant_q = _as_interaction_constant_quantity(interaction_constant)
+    _validate_positive(mean_inner_potential_q, "mean_inner_potential")
+    _validate_positive(interaction_constant_q, "interaction_constant")
+
+    phase_for_estimate = mip_phase_q
+    if use_abs:
+        phase_for_estimate = make_quantity(jnp.abs(mip_phase_q.value), str(mip_phase_q.unit))
+
+    result = cast(
+        u.Quantity,
+        phase_for_estimate / (interaction_constant_q * mean_inner_potential_q),
+    )
+    result = cast(u.Quantity, u.uconvert("nm", result))
+
+    _assert_quantity_compatible(result, "nm", "thickness")
+    return result
+
+
 def to_local_induction(
     projected_induction_integral,
     thickness,
+    *,
+    min_effective_thickness: u.Quantity | None = None,
+    invalid_to_nan: bool = False,
 ) -> u.Quantity:
     r"""Convert a projected induction line integral to local induction.
 
@@ -1383,6 +1560,14 @@ def to_local_induction(
     thickness : Quantity["length"]
         Physical thickness in length units. May be a scalar or an image that
         broadcasts against *projected_induction_integral*.
+    min_effective_thickness : Quantity["length"], optional
+        Positive minimum thickness used to stabilise the division. When
+        provided, pixels below this thickness are either clamped for the
+        division or marked invalid, depending on ``invalid_to_nan``.
+    invalid_to_nan : bool, optional
+        If ``True`` and ``min_effective_thickness`` is provided, pixels with
+        thickness below the threshold are returned as ``NaN`` instead of being
+        clamped.
 
     Returns
     -------
@@ -1394,10 +1579,30 @@ def to_local_induction(
         name="projected_induction_integral",
     )
     thickness = _as_length_quantity(thickness, name="thickness")
-    _validate_all_positive_quantity(thickness, "thickness")
     thickness = _broadcast_thickness_like(projected_induction_integral, thickness)
-    result = cast(u.Quantity, projected_induction_integral / thickness)
+    divisor = thickness
+    invalid_mask = None
+    if min_effective_thickness is None:
+        _validate_all_positive_quantity(thickness, "thickness")
+    else:
+        min_effective_thickness_q = _as_length_quantity(
+            min_effective_thickness,
+            name="min_effective_thickness",
+        )
+        _validate_positive(min_effective_thickness_q, "min_effective_thickness")
+        invalid_mask = np.asarray(thickness.value) < float(np.asarray(min_effective_thickness_q.value))
+        divisor = make_quantity(
+            jnp.maximum(thickness.value, min_effective_thickness_q.value),
+            str(thickness.unit),
+        )
+
+    result = cast(u.Quantity, projected_induction_integral / divisor)
     result = cast(u.Quantity, u.uconvert("T", result))
+    if invalid_mask is not None and invalid_to_nan:
+        result = make_quantity(
+            jnp.where(invalid_mask, jnp.nan, result.value),
+            "T",
+        )
     _assert_quantity_compatible(result, "T", "local_induction")
     return result
 
@@ -1405,6 +1610,9 @@ def to_local_induction(
 def to_local_magnetization(
     projected_magnetization_integral,
     thickness,
+    *,
+    min_effective_thickness: u.Quantity | None = None,
+    invalid_to_nan: bool = False,
 ) -> u.Quantity:
     r"""Convert a projected magnetization line integral to local magnetization.
 
@@ -1419,6 +1627,14 @@ def to_local_magnetization(
     thickness : Quantity["length"]
         Physical thickness in length units. May be a scalar or an image that
         broadcasts against *projected_magnetization_integral*.
+    min_effective_thickness : Quantity["length"], optional
+        Positive minimum thickness used to stabilise the division. When
+        provided, pixels below this thickness are either clamped for the
+        division or marked invalid, depending on ``invalid_to_nan``.
+    invalid_to_nan : bool, optional
+        If ``True`` and ``min_effective_thickness`` is provided, pixels with
+        thickness below the threshold are returned as ``NaN`` instead of being
+        clamped.
 
     Returns
     -------
@@ -1430,10 +1646,30 @@ def to_local_magnetization(
         name="projected_magnetization_integral",
     )
     thickness = _as_length_quantity(thickness, name="thickness")
-    _validate_all_positive_quantity(thickness, "thickness")
     thickness = _broadcast_thickness_like(projected_magnetization_integral, thickness)
-    result = cast(u.Quantity, projected_magnetization_integral / thickness)
+    divisor = thickness
+    invalid_mask = None
+    if min_effective_thickness is None:
+        _validate_all_positive_quantity(thickness, "thickness")
+    else:
+        min_effective_thickness_q = _as_length_quantity(
+            min_effective_thickness,
+            name="min_effective_thickness",
+        )
+        _validate_positive(min_effective_thickness_q, "min_effective_thickness")
+        invalid_mask = np.asarray(thickness.value) < float(np.asarray(min_effective_thickness_q.value))
+        divisor = make_quantity(
+            jnp.maximum(thickness.value, min_effective_thickness_q.value),
+            str(thickness.unit),
+        )
+
+    result = cast(u.Quantity, projected_magnetization_integral / divisor)
     result = cast(u.Quantity, u.uconvert("A / m", result))
+    if invalid_mask is not None and invalid_to_nan:
+        result = make_quantity(
+            jnp.where(invalid_mask, jnp.nan, result.value),
+            "A / m",
+        )
     _assert_quantity_compatible(result, "A / m", "local_magnetization")
     return result
 
@@ -1574,31 +1810,14 @@ def reconstruct_2d_ensemble(
         )
 
     # Resolve solver config once (Python-level dispatch, outside vmap)
-    if solver_config is not None:
-        config = solver_config
-    elif isinstance(solver, str):
-        solver_name = solver.lower()
-        if solver_name not in _SOLVER_DEFAULTS:
-            raise ValueError(
-                f"Unknown solver {solver!r}. "
-                f"Choose from {list(_SOLVER_DEFAULTS)}"
-            )
-        config = _SOLVER_DEFAULTS[solver_name]()
-    elif isinstance(solver, (NewtonCGConfig)):
-        config = solver
-    else:
-        raise TypeError(
-            f"solver must be a string or a SolverConfig instance, "
-            f"got {type(solver)}"
-        )
+    config = _resolve_solver_config(solver, solver_config)
 
     init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
-    lam_q = _to_lambda_exchange(lam)
-    reg_config = {"lambda_exchange": lam_q}
+    reg_config = {"lambda_exchange": _to_lambda_exchange(lam)}
 
     # Build a vmappable function for the chosen solver
     def _solve_single_newton(mask, reg_mask):
-        (mag, _ramp), _loss = _run_newton_cg_solver_2d(
+        (mag, _ramp), _loss, converged = _run_newton_cg_solver_2d(
             phase=phase,
             init_mag=init_mag,
             mask=mask,
@@ -1609,12 +1828,25 @@ def reconstruct_2d_ensemble(
             cg_maxiter=config.cg_maxiter,
             reg_mask=reg_mask,
         )
-        return cast(u.Quantity, mag).value
+        return cast(u.Quantity, mag).value, converged
 
     solve_single = _solve_single_newton
 
     solve_batch = jax.jit(jax.vmap(solve_single, in_axes=(0, 0)))
-    return make_quantity(solve_batch(masks, reg_masks), "")
+    all_mag, all_converged = solve_batch(masks, reg_masks)
+
+    converged_arr = np.asarray(all_converged)
+    if not np.all(converged_arr):
+        n_failed = int(np.sum(~converged_arr))
+        warnings.warn(
+            f"CG solver did not converge for {n_failed} of {len(converged_arr)} "
+            f"ensemble member(s). Consider increasing cg_maxiter or "
+            f"relaxing cg_tol in NewtonCGConfig.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return make_quantity(all_mag, "")
 
 
 # Mapping from projection axis to (sum_axis, coeff_matrix, need_transpose).
@@ -1824,6 +2056,10 @@ def bootstrap_threshold_uncertainty_2d(
     prw_vec=None,
     rdfc_kernel=None,
     solver_config=None,
+    thickness: u.Quantity | None = None,
+    reference_induction: u.Quantity = B_REF,
+    min_effective_thickness: u.Quantity | None = None,
+    invalid_to_nan: bool = False,
 ) -> BootstrapThresholdResult:
     """Bootstrap a thresholded mask ensemble and summarize the uncertainty.
 
@@ -1839,9 +2075,10 @@ def bootstrap_threshold_uncertainty_2d(
         Observed phase image of shape ``(H, W)``.
     mip_phase
         MIP phase image used for thresholding, shape ``(H, W)``.
-    threshold : Quantity["angle"] or float
+    threshold : float
         Central threshold value around which the bootstrap draws are sampled.
-        Plain scalars are interpreted as radians.
+        This is a plain scalar applied to ``abs(mip_phase.value)`` after the
+        MIP phase has been converted to radians.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units.
     lam : float, optional
@@ -1852,12 +2089,10 @@ def bootstrap_threshold_uncertainty_2d(
         *solver_config* is provided. Default ``"newton_cg"``.
     n_boot : int, optional
         Number of threshold draws, default 50.
-    threshold_low : Quantity["angle"] or float, optional
-        Lower bound for the threshold draws.  Defaults to
-        ``threshold - 0.25 rad``. Plain scalars are interpreted as radians.
-    threshold_high : Quantity["angle"] or float, optional
-        Upper bound for the threshold draws.  Defaults to
-        ``threshold + 0.25 rad``. Plain scalars are interpreted as radians.
+    threshold_low : float, optional
+        Lower bound for the threshold draws. Defaults to ``threshold - 0.25``.
+    threshold_high : float, optional
+        Upper bound for the threshold draws. Defaults to ``threshold + 0.25``.
     rng_seed : int, optional
         Seed for the pseudo-random number generator, default 0.
     geometry : str, optional
@@ -1869,18 +2104,34 @@ def bootstrap_threshold_uncertainty_2d(
         Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration object.
+    thickness : Quantity["length"], optional
+        Physical thickness map or scalar thickness used to convert the
+        reconstructed projected induction to local induction. When provided,
+        the result also includes per-draw mean ``|B_local|`` values inside
+        each draw's bootstrap mask and their 95% bootstrap interval.
+    reference_induction : Quantity["magnetic induction"], optional
+        Physical induction scale corresponding to unit normalized
+        magnetization. Default is the module-level 1 T reference.
+    min_effective_thickness : Quantity["length"], optional
+        Positive lower bound passed to :func:`to_local_induction` to stabilize
+        the local-induction conversion.
+    invalid_to_nan : bool, optional
+        Forwarded to :func:`to_local_induction`. When ``True``, pixels below
+        ``min_effective_thickness`` are excluded from the per-draw mean.
 
     Returns
     -------
     BootstrapThresholdResult
         Summary object containing the threshold draws, reconstructed
         magnetizations, 2.5th and 97.5th percentile maps, their 95% width,
-        the relative 95% width, and the mask inclusion frequency.
+        the relative 95% width, the mask inclusion frequency, and optionally
+        the mean local-induction magnitude inside each draw's segmented
+        object plus its 95% bootstrap interval.
     """
     phase = _as_angle_quantity(phase)
     mip_phase = _as_angle_quantity(mip_phase)
     pixel_size = _as_length_quantity(pixel_size)
-    threshold_q = _as_threshold_quantity(threshold)
+    threshold_value = _as_threshold_scalar(threshold, "threshold")
     _validate_positive(pixel_size, "pixel_size")
     if phase.shape != mip_phase.shape:
         raise ValueError(
@@ -1888,37 +2139,32 @@ def bootstrap_threshold_uncertainty_2d(
         )
 
     if threshold_low is None:
-        threshold_low_q = threshold_q - make_quantity(0.25, "rad")
+        threshold_low_value = threshold_value - 0.25
     else:
-        threshold_low_q = _as_threshold_quantity(threshold_low)
+        threshold_low_value = _as_threshold_scalar(threshold_low, "threshold_low")
     if threshold_high is None:
-        threshold_high_q = threshold_q + make_quantity(0.25, "rad")
+        threshold_high_value = threshold_value + 0.25
     else:
-        threshold_high_q = _as_threshold_quantity(threshold_high)
+        threshold_high_value = _as_threshold_scalar(threshold_high, "threshold_high")
 
-    threshold_low_value = float(np.asarray(threshold_low_q.value))
-    threshold_high_value = float(np.asarray(threshold_high_q.value))
-    threshold_value = float(np.asarray(threshold_q.value))
     if threshold_high_value <= threshold_low_value:
         raise ValueError(
-            f"threshold_high must be greater than threshold_low; got {threshold_high_q} and {threshold_low_q}."
+            "threshold_high must be greater than threshold_low; "
+            f"got {threshold_high_value} and {threshold_low_value}."
         )
 
     rng = np.random.default_rng(rng_seed)
-    threshold_draws = make_quantity(
-        rng.uniform(
-            low=threshold_low_value,
-            high=threshold_high_value,
-            size=n_boot,
-        ),
-        "rad",
+    threshold_draws = rng.uniform(
+        low=threshold_low_value,
+        high=threshold_high_value,
+        size=n_boot,
     )
 
     mip_phase_q = cast(u.Quantity, u.uconvert("rad", mip_phase))
     mip_abs = np.abs(np.asarray(mip_phase_q.value))
     reference_mask = (mip_abs > threshold_value).astype(np.float64)
     bootstrap_masks = (
-        mip_abs[None, ...] > np.asarray(threshold_draws.value)[:, None, None]
+        mip_abs[None, ...] > threshold_draws[:, None, None]
     ).astype(np.float64)
 
     for draw_index in range(n_boot):
@@ -1961,10 +2207,53 @@ def bootstrap_threshold_uncertainty_2d(
     )
     mask_frequency = bootstrap_masks.mean(axis=0)
 
+    local_induction_mean_samples = None
+    local_induction_mean = None
+    local_induction_mean_low = None
+    local_induction_mean_high = None
+    local_induction_mean_ci95 = None
+    local_induction_roi_pixels = None
+
+    if thickness is not None:
+        thickness_q = _as_length_quantity(thickness, name="thickness")
+        reference_induction_q = _as_induction_quantity(reference_induction)
+        draw_means = np.empty(n_boot, dtype=np.float64)
+        draw_pixels = np.zeros(n_boot, dtype=np.int64)
+        bootstrap_mag_values = np.asarray(bootstrap_mag.value)
+        bootstrap_mag_unit = str(bootstrap_mag.unit)
+
+        for draw_index in range(n_boot):
+            mag_draw = make_quantity(bootstrap_mag_values[draw_index], bootstrap_mag_unit)
+            projected_draw = to_projected_induction_integral(
+                mag_draw,
+                pixel_size,
+                reference_induction=reference_induction_q,
+            )
+            local_draw = to_local_induction(
+                projected_draw,
+                thickness_q,
+                min_effective_thickness=min_effective_thickness,
+                invalid_to_nan=invalid_to_nan,
+            )
+            local_draw_norm = np.linalg.norm(np.asarray(local_draw.value), axis=-1)
+            roi_values = local_draw_norm[np.asarray(bootstrap_masks[draw_index], dtype=bool)]
+            finite_roi_values = roi_values[np.isfinite(roi_values)]
+            draw_pixels[draw_index] = finite_roi_values.size
+            draw_means[draw_index] = (
+                float(finite_roi_values.mean()) if finite_roi_values.size > 0 else np.nan
+            )
+
+        local_induction_mean_samples = make_quantity(draw_means, "T")
+        local_induction_mean = make_quantity(np.nanmean(draw_means), "T")
+        local_induction_mean_low = make_quantity(np.nanpercentile(draw_means, 2.5), "T")
+        local_induction_mean_high = make_quantity(np.nanpercentile(draw_means, 97.5), "T")
+        local_induction_mean_ci95 = local_induction_mean_high - local_induction_mean_low
+        local_induction_roi_pixels = draw_pixels
+
     return BootstrapThresholdResult(
-        threshold=threshold_q,
-        threshold_low=threshold_low_q,
-        threshold_high=threshold_high_q,
+        threshold=threshold_value,
+        threshold_low=threshold_low_value,
+        threshold_high=threshold_high_value,
         threshold_draws=threshold_draws,
         magnetizations=bootstrap_mag,
         mean_magnetization=mean_magnetization,
@@ -1974,115 +2263,355 @@ def bootstrap_threshold_uncertainty_2d(
         norm_ci95=norm_ci95,
         relative_ci95=relative_ci95,
         mask_frequency=mask_frequency,
+        local_induction_mean_samples=local_induction_mean_samples,
+        local_induction_mean=local_induction_mean,
+        local_induction_mean_low=local_induction_mean_low,
+        local_induction_mean_high=local_induction_mean_high,
+        local_induction_mean_ci95=local_induction_mean_ci95,
+        local_induction_roi_pixels=local_induction_roi_pixels,
     )
 
 
-def plot_bootstrap_threshold_uncertainty(result: BootstrapThresholdResult):
-    """Plot the summary produced by :func:`bootstrap_threshold_uncertainty_2d`."""
+def plot_bootstrap_mask_summary(
+    result: BootstrapThresholdResult,
+    *,
+    ax=None,
+    stable_frequency: float = 0.5,
+    cmap: str = "gray",
+):
+    """Plot the aggregate bootstrap support mask frequency.
+
+    This is a compact view of how often each pixel was included in the
+    threshold-defined support across all bootstrap draws. The red contour
+    marks the default ``stable_frequency`` boundary.
+
+    Parameters
+    ----------
+    result
+        Bootstrap summary returned by :func:`bootstrap_threshold_uncertainty_2d`.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw into. When omitted, a new figure and axes are created.
+    stable_frequency : float, optional
+        Contour level used to mark the stable-support boundary. Must lie in
+        the closed interval ``[0, 1]``. Default is ``0.5``.
+    cmap : str, optional
+        Matplotlib colormap for the inclusion-frequency image.
+
+    Returns
+    -------
+    fig, ax, info
+        Figure, axes, and a dictionary with the rendered mask-frequency array,
+        stable-support mask, draw count, and threshold metadata.
+    """
     import matplotlib.pyplot as plt
 
-    fig, axs = plt.subplots(2, 3, figsize=(16, 11), constrained_layout=True)
+    if not 0.0 <= stable_frequency <= 1.0:
+        raise ValueError(
+            f"stable_frequency must lie in [0, 1], got {stable_frequency}."
+        )
+
+    mask_frequency = np.asarray(result.mask_frequency)
+    if mask_frequency.ndim != 2:
+        raise ValueError(
+            "result.mask_frequency must be a 2D image; "
+            f"got shape {mask_frequency.shape}."
+        )
+
+    created_figure = ax is None
+    if created_figure:
+        fig, ax = plt.subplots(figsize=(6.5, 5.5), constrained_layout=True)
+    else:
+        fig = ax.figure
+
+    image = ax.imshow(mask_frequency, cmap=cmap, origin="lower", vmin=0, vmax=1)
+    stable_support = mask_frequency >= stable_frequency
+    if np.any(mask_frequency > 0) and np.any(mask_frequency < 1):
+        ax.contour(
+            mask_frequency,
+            levels=[stable_frequency],
+            colors="tab:red",
+            linewidths=1.0,
+        )
+
+    n_draws = len(result.threshold_draws)
+    ax.set_title(
+        "Bootstrap mask inclusion frequency\n"
+        f"{n_draws} draws in [{result.threshold_low:.3f}, {result.threshold_high:.3f}]",
+        fontsize=10,
+    )
+    ax.set_xlabel(
+        f"Stable support at frequency >= {stable_frequency:.2f}: "
+        f"{int(np.count_nonzero(stable_support))} pixels"
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.colorbar(image, ax=ax, fraction=0.046, label="Inclusion frequency")
+
+    info = {
+        "mask_frequency": mask_frequency,
+        "stable_support": stable_support,
+        "stable_frequency": stable_frequency,
+        "n_draws": n_draws,
+        "threshold": result.threshold,
+        "threshold_low": result.threshold_low,
+        "threshold_high": result.threshold_high,
+    }
+    return fig, ax, info
+
+
+def plot_physical_bootstrap_uncertainty(
+    result: BootstrapThresholdResult,
+    magnetization,
+    pixel_size,
+    thickness,
+    *,
+    support_mask=None,
+    min_effective_thickness: u.Quantity | None = None,
+    invalid_to_nan: bool = False,
+    max_relative_ci_for_display: float = 1.0,
+    min_mask_frequency_for_display: float = 0.5,
+):
+    """Plot physical-unit maps weighted by bootstrap stability.
+
+    The reconstruction is converted to projected and local physical units.
+    Bootstrap uncertainty is then used only as a display weight,
+
+    ``alpha = clip(1 - relative_ci / max_relative_ci_for_display, 0, 1) * mask_frequency``
+
+    so pixels with wide intervals or unstable threshold support fade out.
+
+    Parameters
+    ----------
+    result
+        Bootstrap summary returned by :func:`bootstrap_threshold_uncertainty_2d`.
+    magnetization
+        Final reconstructed magnetization field of shape ``(H, W, 2)``.
+    pixel_size : Quantity["length"]
+        Pixel size used for the physical conversion.
+    thickness : Quantity["length"]
+        Thickness map or scalar thickness for the local-unit conversion.
+    support_mask : array_like, optional
+        Boolean mask that defines the displayed reconstruction support.
+        Defaults to all pixels.
+    min_effective_thickness : Quantity["length"], optional
+        Lower bound passed to :func:`to_local_induction` and
+        :func:`to_local_magnetization`.
+    invalid_to_nan : bool, optional
+        Forwarded to the local conversion helpers.
+    max_relative_ci_for_display : float, optional
+        Relative 95% CI width where display certainty reaches zero.
+    min_mask_frequency_for_display : float, optional
+        Minimum threshold-inclusion frequency for the ``reliable_support``
+        summary mask returned in the info dictionary.
+
+    Returns
+    -------
+    fig, axs, info
+        Matplotlib figure and axes plus a dictionary containing the derived
+        physical quantities, display masks, and summary scalars.
+    """
+    import matplotlib.pyplot as plt
 
     def as_array(value):
         if isinstance(value, u.Quantity):
             return np.asarray(value.value)
         return np.asarray(value)
 
-    def set_panel_title(ax, title, subtitle):
-        ax.set_title(f"{title}\n{subtitle}", fontsize=10)
+    magnetization = _as_dimensionless_quantity(magnetization)
+    pixel_size = _as_length_quantity(pixel_size)
+    thickness = _as_length_quantity(thickness, name="thickness")
 
-    mean_norm = as_array(result.mean_norm)
-    norm_low = as_array(result.norm_low)
-    norm_high = as_array(result.norm_high)
-    norm_ci95 = as_array(result.norm_ci95)
-    relative_ci95 = as_array(result.relative_ci95)
+    image_shape = magnetization.shape[:-1]
+    if support_mask is None:
+        support_mask_arr = np.ones(image_shape, dtype=bool)
+    else:
+        support_mask_arr = np.asarray(support_mask, dtype=bool)
+        if support_mask_arr.shape != image_shape:
+            raise ValueError(
+                "support_mask must match the spatial shape of magnetization; "
+                f"got {support_mask_arr.shape} and {image_shape}."
+            )
+
+    relative_ci_map = as_array(result.relative_ci95)
     mask_frequency = as_array(result.mask_frequency)
+    if relative_ci_map.shape != image_shape:
+        raise ValueError(
+            "result.relative_ci95 must match the spatial shape of magnetization; "
+            f"got {relative_ci_map.shape} and {image_shape}."
+        )
+    if mask_frequency.shape != image_shape:
+        raise ValueError(
+            "result.mask_frequency must match the spatial shape of magnetization; "
+            f"got {mask_frequency.shape} and {image_shape}."
+        )
 
-    display_mask = mask_frequency > 0.5
-    if not np.any(display_mask):
-        display_mask = np.ones_like(mean_norm, dtype=bool)
+    projected_induction_integral = to_projected_induction_integral(
+        magnetization,
+        pixel_size,
+    )
+    projected_magnetization_integral = to_projected_magnetization_integral(
+        magnetization,
+        pixel_size,
+    )
+    local_induction = to_local_induction(
+        projected_induction_integral,
+        thickness,
+        min_effective_thickness=min_effective_thickness,
+        invalid_to_nan=invalid_to_nan,
+    )
+    local_magnetization = to_local_magnetization(
+        projected_magnetization_integral,
+        thickness,
+        min_effective_thickness=min_effective_thickness,
+        invalid_to_nan=invalid_to_nan,
+    )
 
-    mean_region = mean_norm[display_mask]
-    low_region = norm_low[display_mask]
-    high_region = norm_high[display_mask]
-    ci_region = norm_ci95[display_mask]
-    rel_region = 100.0 * relative_ci95[display_mask]
+    projected_induction_integral_norm = np.linalg.norm(
+        as_array(projected_induction_integral),
+        axis=-1,
+    )
+    projected_magnetization_integral_norm = np.linalg.norm(
+        as_array(projected_magnetization_integral),
+        axis=-1,
+    )
+    local_induction_norm = np.linalg.norm(as_array(local_induction), axis=-1)
+    local_magnetization_norm = np.linalg.norm(as_array(local_magnetization), axis=-1)
 
-    vmax_mean = float(np.percentile(mean_region, 99))
-    vmax_low = float(np.percentile(low_region, 99))
-    vmax_high = float(np.percentile(high_region, 99))
-    vmax_ci = float(np.percentile(ci_region, 99))
-    vmax_rel = float(np.percentile(rel_region, 99))
+    masked_projected_induction = np.where(
+        support_mask_arr,
+        projected_induction_integral_norm,
+        np.nan,
+    )
+    masked_projected_magnetization = np.where(
+        support_mask_arr,
+        projected_magnetization_integral_norm,
+        np.nan,
+    )
 
-    im = axs[0, 0].imshow(
-        mean_norm, cmap="viridis", origin="lower", vmin=0, vmax=vmax_mean
+    certainty_alpha = np.clip(
+        1.0 - relative_ci_map / max_relative_ci_for_display,
+        0.0,
+        1.0,
     )
-    set_panel_title(
-        axs[0, 0],
-        "Bootstrap mean |M|",
-        "Typical magnitude across draws.",
-    )
-    plt.colorbar(im, ax=axs[0, 0], fraction=0.046)
+    certainty_alpha *= mask_frequency
+    certainty_alpha = np.where(support_mask_arr, certainty_alpha, 0.0)
 
-    im = axs[0, 1].imshow(
-        norm_low, cmap="viridis", origin="lower", vmin=0, vmax=vmax_low
+    display_local_induction = np.where(
+        support_mask_arr & np.isfinite(local_induction_norm),
+        local_induction_norm * certainty_alpha,
+        np.nan,
     )
-    set_panel_title(
-        axs[0, 1],
-        "2.5% percentile of |M|",
-        "Lower 95% interval bound.",
+    display_local_magnetization = np.where(
+        support_mask_arr & np.isfinite(local_magnetization_norm),
+        local_magnetization_norm * certainty_alpha,
+        np.nan,
     )
-    plt.colorbar(im, ax=axs[0, 1], fraction=0.046)
 
-    im = axs[0, 2].imshow(
-        norm_high, cmap="viridis", origin="lower", vmin=0, vmax=vmax_high
+    reliable_support = (
+        support_mask_arr
+        & np.isfinite(local_induction_norm)
+        & np.isfinite(local_magnetization_norm)
+        & (relative_ci_map <= max_relative_ci_for_display)
+        & (mask_frequency >= min_mask_frequency_for_display)
     )
-    set_panel_title(
-        axs[0, 2],
-        "97.5% percentile of |M|",
-        "Upper 95% interval bound.",
+    masked_relative_ci_percent = np.where(
+        support_mask_arr,
+        100.0 * relative_ci_map,
+        np.nan,
     )
-    plt.colorbar(im, ax=axs[0, 2], fraction=0.046)
+    masked_certainty = np.where(support_mask_arr, certainty_alpha, np.nan)
 
-    im = axs[1, 0].imshow(
-        norm_ci95, cmap="magma", origin="lower", vmin=0, vmax=vmax_ci
+    weighted_support = (
+        support_mask_arr
+        & np.isfinite(local_induction_norm)
+        & np.isfinite(local_magnetization_norm)
     )
-    set_panel_title(
-        axs[1, 0],
-        "95% CI width of |M|",
-        "Larger values mean more spread.",
-    )
-    plt.colorbar(im, ax=axs[1, 0], fraction=0.046)
+    certainty_weights = np.where(weighted_support, certainty_alpha, 0.0)
+    weight_sum = float(np.sum(certainty_weights))
+    if weight_sum > 0:
+        normalized_weights = certainty_weights / weight_sum
+        certainty_weighted_mean_local_induction = float(
+            np.sum(
+                normalized_weights
+                * np.where(weighted_support, local_induction_norm, 0.0)
+            )
+        )
+        certainty_weighted_mean_local_magnetization = float(
+            np.sum(
+                normalized_weights
+                * np.where(weighted_support, local_magnetization_norm, 0.0)
+            )
+        )
+        certainty_weighted_mean_thickness = float(
+            np.sum(
+                normalized_weights
+                * np.where(weighted_support, as_array(thickness), 0.0)
+            )
+        )
+    else:
+        normalized_weights = np.zeros_like(certainty_weights)
+        certainty_weighted_mean_local_induction = np.nan
+        certainty_weighted_mean_local_magnetization = np.nan
+        certainty_weighted_mean_thickness = np.nan
 
-    im = axs[1, 1].imshow(
-        100.0 * relative_ci95,
-        cmap="cividis",
-        origin="lower",
-        vmin=0,
-        vmax=vmax_rel,
+    mean_certainty_inside_support = (
+        float(np.mean(certainty_alpha[support_mask_arr]))
+        if np.any(support_mask_arr)
+        else np.nan
     )
-    set_panel_title(
-        axs[1, 1],
-        "Relative 95% CI width of |M| (%)",
-        "Width divided by the local mean.",
-    )
-    plt.colorbar(im, ax=axs[1, 1], fraction=0.046)
 
-    im = axs[1, 2].imshow(
-        mask_frequency, cmap="gray", origin="lower", vmin=0, vmax=1
-    )
-    set_panel_title(
-        axs[1, 2],
-        "Threshold inclusion frequency",
-        "Near 1 is stable; near 0 is rare.",
-    )
-    plt.colorbar(im, ax=axs[1, 2], fraction=0.046)
+    fig, axs = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
 
-    for ax in axs.flat:
-        ax.set_xticks([])
-        ax.set_yticks([])
+    im = axs[0, 0].imshow(masked_projected_induction, cmap="magma", origin="lower")
+    axs[0, 0].set_title(rf"Projected $|B|$ integral ({projected_induction_integral.unit})")
+    plt.colorbar(im, ax=axs[0, 0], fraction=0.046, label=projected_induction_integral.unit)
 
-    return fig, axs
+    im = axs[0, 1].imshow(masked_projected_magnetization, cmap="cividis", origin="lower")
+    axs[0, 1].set_title(rf"Projected $|M|$ integral ({projected_magnetization_integral.unit})")
+    plt.colorbar(im, ax=axs[0, 1], fraction=0.046, label=projected_magnetization_integral.unit)
+
+    im = axs[0, 2].imshow(masked_relative_ci_percent, cmap="magma_r", origin="lower")
+    axs[0, 2].set_title("Relative 95% CI width of |M| (%)")
+    plt.colorbar(im, ax=axs[0, 2], fraction=0.046, label="%")
+
+    im = axs[1, 0].imshow(display_local_induction, cmap="magma", origin="lower")
+    axs[1, 0].set_title(rf"Certainty-weighted local $|B|$ ({local_induction.unit})")
+    plt.colorbar(im, ax=axs[1, 0], fraction=0.046, label=local_induction.unit)
+
+    im = axs[1, 1].imshow(display_local_magnetization, cmap="cividis", origin="lower")
+    axs[1, 1].set_title(rf"Certainty-weighted local $|M|$ ({local_magnetization.unit})")
+    plt.colorbar(im, ax=axs[1, 1], fraction=0.046, label=local_magnetization.unit)
+
+    im = axs[1, 2].imshow(masked_certainty, cmap="gray", origin="lower", vmin=0, vmax=1)
+    axs[1, 2].set_title("Display certainty / alpha")
+    plt.colorbar(im, ax=axs[1, 2], fraction=0.046, label="alpha")
+
+    fig.suptitle(
+        "Physical-unit maps with bootstrap uncertainty used to suppress unstable edge pixels",
+        fontsize=13,
+    )
+
+    info = {
+        "projected_induction_integral": projected_induction_integral,
+        "projected_magnetization_integral": projected_magnetization_integral,
+        "local_induction": local_induction,
+        "local_magnetization": local_magnetization,
+        "masked_projected_induction": masked_projected_induction,
+        "masked_projected_magnetization": masked_projected_magnetization,
+        "masked_relative_ci_percent": masked_relative_ci_percent,
+        "masked_certainty": masked_certainty,
+        "certainty_alpha": certainty_alpha,
+        "reliable_support": reliable_support,
+        "normalized_weights": normalized_weights,
+        "certainty_weighted_mean_local_induction": certainty_weighted_mean_local_induction,
+        "certainty_weighted_mean_local_magnetization": certainty_weighted_mean_local_magnetization,
+        "certainty_weighted_mean_thickness": certainty_weighted_mean_thickness,
+        "mean_certainty_inside_support": mean_certainty_inside_support,
+        "equivalent_fully_certain_pixels": weight_sum,
+        "max_relative_ci_for_display": max_relative_ci_for_display,
+        "min_mask_frequency_for_display": min_mask_frequency_for_display,
+    }
+    return fig, axs, info
 
 
 def kneedle_corner(data_misfits, reg_norms):
@@ -2189,7 +2718,8 @@ def lcurve_sweep(
     """
     phase = _as_angle_quantity(phase)
     pixel_size = _as_length_quantity(pixel_size)
-    lambdas = _to_lambda_exchange(lambdas)
+    lambdas_q = _to_lambda_exchange(lambdas)
+    lambdas = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
 
     _validate_positive(pixel_size, "pixel_size")
 
@@ -2198,9 +2728,6 @@ def lcurve_sweep(
         reg_mask = mask
     else:
         reg_mask = jnp.asarray(reg_mask)
-
-    lambdas_q = _to_lambda_exchange(lambdas)
-    lambdas = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
 
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
@@ -2320,7 +2847,9 @@ def lcurve_sweep_vmap(
     """
     phase = _as_angle_quantity(phase)
     pixel_size = _as_length_quantity(pixel_size)
-    lambdas = _to_lambda_exchange(lambdas)
+    lambdas_q = _to_lambda_exchange(lambdas)
+    lambdas_np = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
+    lambdas_jax = jnp.asarray(lambdas_np)
     _validate_positive(pixel_size, "pixel_size")
 
     mask = jnp.asarray(mask, dtype=bool)
@@ -2329,10 +2858,6 @@ def lcurve_sweep_vmap(
     else:
         reg_mask = jnp.asarray(reg_mask)
 
-    lambdas_q = _to_lambda_exchange(lambdas)
-    lambdas_np = np.atleast_1d(np.asarray(lambdas_q.value, dtype=np.float64))
-    lambdas_jax = jnp.asarray(lambdas_np)
-
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
@@ -2340,29 +2865,13 @@ def lcurve_sweep_vmap(
             prw_vec=prw_vec,
         )
 
-    if solver_config is not None:
-        config = solver_config
-    elif isinstance(solver, str):
-        solver_name = solver.lower()
-        if solver_name not in _SOLVER_DEFAULTS:
-            raise ValueError(
-                f"Unknown solver {solver!r}. "
-                f"Choose from {list(_SOLVER_DEFAULTS)}"
-            )
-        config = _SOLVER_DEFAULTS[solver_name]()
-    elif isinstance(solver, (NewtonCGConfig)):
-        config = solver
-    else:
-        raise TypeError(
-            f"solver must be a string or a SolverConfig instance, "
-            f"got {type(solver)}"
-        )
+    config = _resolve_solver_config(solver, solver_config)
 
     init_mag = make_quantity(jnp.zeros((*phase.shape, 2), dtype=jnp.float64), "")
 
     def _solve_for_lam_newton(lam):
         reg_config = {"lambda_exchange": make_quantity(lam, "rad2")}
-        (mag, ramp), _loss = _run_newton_cg_solver_2d(
+        (mag, ramp), _loss, converged = _run_newton_cg_solver_2d(
             phase=phase,
             init_mag=init_mag,
             mask=mask,
@@ -2373,12 +2882,24 @@ def lcurve_sweep_vmap(
             cg_maxiter=config.cg_maxiter,
             reg_mask=reg_mask,
         )
-        return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp))
+        return cast(u.Quantity, mag).value, _ramp_coeffs_to_array(cast(RampCoeffs, ramp)), converged
 
     solve_for_lam = _solve_for_lam_newton
 
     solve_batch = jax.jit(jax.vmap(solve_for_lam))
-    all_mag, all_ramp = solve_batch(lambdas_jax)
+    all_mag, all_ramp, all_converged = solve_batch(lambdas_jax)
+
+    converged_arr = np.asarray(all_converged)
+    if not np.all(converged_arr):
+        failed = np.where(~converged_arr)[0]
+        failed_lams = lambdas_np[failed]
+        warnings.warn(
+            f"CG solver did not converge for {len(failed)} of {len(lambdas_np)} "
+            f"lambda value(s): {failed_lams.tolist()}. Consider increasing "
+            f"cg_maxiter or relaxing cg_tol in NewtonCGConfig.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     def _decompose_single(mag, ramp):
         masked_mag = u.Quantity(
