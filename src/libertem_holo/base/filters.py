@@ -274,13 +274,13 @@ def central_line_filter(
     orig_shape,
     length_ratio=0.9,
     width=20,
-    crop_to_out_shape=False,
+    crop_to_out_shape=True,
 ):
     """
     Return a line filter for the central band, that can be applied
     by multiplying it with the aperture.
     """
-    # we are working in npn-fft-shifted space, meaning with the zero
+    # we are working in non-fft-shifted space, meaning with the zero
     # frequency at the center of the image. we work in original shape,
     # and crop at the end.
     dest = np.zeros(orig_shape, dtype=bool)
