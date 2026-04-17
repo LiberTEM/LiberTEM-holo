@@ -190,7 +190,7 @@ man_pages = [
 #  dir menu entry, description, category)
 texinfo_documents = [
     (master_doc, 'LiberTEM-holo', 'LiberTEM-holo Documentation',
-     author, 'LiberTEM-holo', 'One line description of project.',
+     author, 'LiberTEM-holo', 'Open-source electron holography reconstruction.',
      'Miscellaneous'),
 ]
 
@@ -206,6 +206,16 @@ issues_github_path = "LiberTEM/LiberTEM-holo"
 # docstrings in API reference, leading to failures because the test environment
 # is not set up correctly
 doctest_test_doctest_blocks = ''
+
+doctest_global_setup = '''
+import os
+import pathlib
+base_path = os.environ.get('TESTDATA_BASE_PATH')
+if base_path is None or len(base_path) == 0:
+    path_to_data = None
+else:
+    path_to_data = pathlib.Path(base_path) / 'dm' / '3D' / 'alpha-50_obj.dm3'
+'''
 
 # -- Options for todo extension ----------------------------------------------
 

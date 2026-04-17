@@ -375,13 +375,14 @@ def reconstruct_bf(
     Please use :func:`libertem_holo.base.filter.central_line_filter` to
     filter out fresnel fringes as appropriate.
     """
+    aperture += aperture[::-1, ::-1]
     frame = xp.array(frame)
     fft_frame = xp.fft.fft2(frame)
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
     fft_frame = fft_frame * xp.array(aperture)
 
-    return xp.fft.ifft2(fft_frame)
+    return xp.abs(xp.fft.ifft2(fft_frame))
 
 
 def phase_offset_correction(

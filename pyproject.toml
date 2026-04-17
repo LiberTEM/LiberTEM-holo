@@ -23,6 +23,7 @@ dependencies = [
     # otherwise, version resolution might try to install an ancient version
     # that isn't constrained properly:
     "numba>=0.61;python_version >= '3.15'",  
+    "ncempy",
     "scipy",
     "sparse",
     "sparseconverter",
@@ -58,6 +59,14 @@ authors = [
 [project.urls]
 Repository = "https://github.com/LiberTEM/LiberTEM-holo"
 Documentation = "https://libertem.github.io/LiberTEM-holo"
+
+[project.optional-dependencies]
+gpu = [
+    # numba-cuda now lives in an external package so we can
+    # install a more recent version than the one that comes
+    # with core numba:
+    "numba-cuda",  
+]
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 "content-type" = "text/x-rst"
