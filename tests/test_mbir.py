@@ -10,6 +10,7 @@ original pyramid HDF5 test fixtures.
 """
 
 import os
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -20,31 +21,183 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+import libertem_holo.base.mbir as mbir_mod  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
-    PHI_0_T_NM2,
-    AdamConfig,
-    LBFGSConfig,
     LCurveResult,
     NewtonCGConfig,
+    RampCoeffs,
     SolverResult,
     _rdfc_elementary_phase,
-    apply_ramp,
     build_rdfc_kernel,
-    decompose_loss,
-    exchange_loss_fn,
-    forward_model_2d,
-    forward_model_3d,
-    forward_model_single_rdfc_2d,
-    get_freq_grid,
     kneedle_corner,
-    lcurve_sweep,
     mbir_loss_2d,
-    phase_mapper_rdfc,
-    project_3d,
-    reconstruct_2d,
-    solve_mbir_2d,
 )
+import unxt as u
+
+_Q = u.Quantity  # shorthand for test readability
+_KERNEL_COEFF_FLOAT = 1.0 / (2 * 2067.83)
+
+
+def _ramp_array(rc):
+    return jnp.array([rc.offset.value, rc.slope_y.value, rc.slope_x.value])
+
+
+def _shape2d(array) -> tuple[int, int]:
+    return cast(tuple[int, int], array.shape)
+
+
+def _scalar_value(value) -> float:
+    if isinstance(value, u.Quantity):
+        return float(np.asarray(value.value))
+    return float(value)
+
+
+def _mag_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "")
+
+
+def _phase_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "rad")
+
+
+def _pixel_size_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(value, "nm")
+
+
+def _lambda_q(value):
+    if isinstance(value, u.Quantity):
+        return value
+    return _Q(jnp.asarray(value), "rad2")
+
+
+def _ramp_q(value, *, dtype=jnp.float64):
+    if value is None:
+        return RampCoeffs.zeros(dtype=dtype)
+    if isinstance(value, RampCoeffs):
+        return value
+    values = jnp.asarray(value)
+    return RampCoeffs(
+        offset=_Q(values[0], "rad"),
+        slope_y=_Q(values[1], "rad/nm"),
+        slope_x=_Q(values[2], "rad/nm"),
+    )
+
+
+def get_freq_grid(height, width, pixel_size):
+    return mbir_mod.get_freq_grid(height, width, _pixel_size_q(pixel_size))
+
+
+def phase_mapper_rdfc(u_field, v_field, rdfc_kernel):
+    return mbir_mod.phase_mapper_rdfc(_mag_q(u_field), _mag_q(v_field), rdfc_kernel)
+
+
+def project_3d(magnetization_3d, axis="z"):
+    return mbir_mod.project_3d(_mag_q(magnetization_3d), axis=axis)
+
+
+def forward_model_single_rdfc_2d(magnetization, ramp_coeffs, rdfc_kernel, pixel_size):
+    return mbir_mod.forward_model_single_rdfc_2d(
+        _mag_q(magnetization),
+        _ramp_q(ramp_coeffs),
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+    )
+
+
+def forward_model_2d(magnetization, pixel_size, ramp_coeffs=None, **kwargs):
+    return mbir_mod.forward_model_2d(
+        _mag_q(magnetization),
+        _pixel_size_q(pixel_size),
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def forward_model_3d(magnetization_3d, pixel_size, axis="z", ramp_coeffs=None, **kwargs):
+    return mbir_mod.forward_model_3d(
+        _mag_q(magnetization_3d),
+        _pixel_size_q(pixel_size),
+        axis=axis,
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def exchange_loss_fn(mag, mask):
+    return mbir_mod.exchange_loss_fn(_mag_q(mag), mask)
+
+
+def decompose_loss(magnetization, ramp_coeffs, phase, mask, reg_mask, rdfc_kernel, pixel_size, **kwargs):
+    return mbir_mod.decompose_loss(
+        _mag_q(magnetization),
+        _ramp_q(ramp_coeffs),
+        _phase_q(phase),
+        mask,
+        reg_mask,
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+        **kwargs,
+    )
+
+
+def mbir_loss_2d(params, mask, phase, rdfc_kernel, pixel_size, reg_config, reg_mask=None):
+    magnetization, ramp_coeffs = params
+    reg_config_q = dict(reg_config)
+    if "lambda_exchange" in reg_config_q:
+        reg_config_q["lambda_exchange"] = _lambda_q(reg_config_q["lambda_exchange"])
+    return mbir_mod.mbir_loss_2d(
+        (_mag_q(magnetization), _ramp_q(ramp_coeffs)),
+        mask,
+        _phase_q(phase),
+        rdfc_kernel,
+        _pixel_size_q(pixel_size),
+        reg_config_q,
+        reg_mask,
+    )
+
+
+def solve_mbir_2d(phase, init_mag, mask, pixel_size, solver: str | NewtonCGConfig = "newton_cg", reg_config=None, rdfc_kernel=None, init_ramp_coeffs=None, reg_mask=None):
+    reg_config_q = None if reg_config is None else dict(reg_config)
+    if reg_config_q is not None and "lambda_exchange" in reg_config_q:
+        reg_config_q["lambda_exchange"] = _lambda_q(reg_config_q["lambda_exchange"])
+    return mbir_mod.solve_mbir_2d(
+        _phase_q(phase),
+        _mag_q(init_mag),
+        mask,
+        _pixel_size_q(pixel_size),
+        solver=solver,
+        reg_config=reg_config_q,
+        rdfc_kernel=rdfc_kernel,
+        init_ramp_coeffs=_ramp_q(init_ramp_coeffs),
+        reg_mask=reg_mask,
+    )
+
+
+def reconstruct_2d(phase, pixel_size, mask, lam=_Q(1e-3, "rad2"), **kwargs):
+    return mbir_mod.reconstruct_2d(
+        _phase_q(phase),
+        _pixel_size_q(pixel_size),
+        mask,
+        lam=_lambda_q(lam),
+        **kwargs,
+    )
+
+
+def lcurve_sweep(phase, mask, pixel_size, lambdas, **kwargs):
+    return mbir_mod.lcurve_sweep(
+        _phase_q(phase),
+        mask,
+        _pixel_size_q(pixel_size),
+        _lambda_q(lambdas),
+        **kwargs,
+    )
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data")
 UPSTREAM_DIR = os.path.join(os.path.dirname(__file__), "test_mbir_data", "upstream")
@@ -95,7 +248,7 @@ def small_problem():
     gt_mag[..., 0] = mask.astype(np.float64)  # u-component
     gt_mag[..., 1] = 0.5 * mask.astype(np.float64)  # v-component
 
-    kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
+    kernel = build_rdfc_kernel((H, W), geometry="disc")
 
     ramp = jnp.zeros(3, dtype=jnp.float64)
     phase = forward_model_single_rdfc_2d(
@@ -125,7 +278,7 @@ class TestBuildRDFCKernel:
     """Verify build_rdfc_kernel against pyramid's Kernel class."""
 
     def test_kernel_u_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), geometry="disc")
         assert_allclose(
             np.asarray(kernel["u_fft"]),
             kernel_ref["ref_u_fft"],
@@ -134,7 +287,7 @@ class TestBuildRDFCKernel:
         )
 
     def test_kernel_v_fft_matches_pyramid(self, kernel_ref):
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), geometry="disc")
         assert_allclose(
             np.asarray(kernel["v_fft"]),
             kernel_ref["ref_v_fft"],
@@ -148,7 +301,7 @@ class TestBuildRDFCKernel:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        coeff = _KERNEL_COEFF_FLOAT
         u_kernel = coeff * _rdfc_elementary_phase("disc", uu, vv)
         assert_allclose(
             np.asarray(u_kernel),
@@ -162,7 +315,7 @@ class TestBuildRDFCKernel:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        coeff = _KERNEL_COEFF_FLOAT
         v_kernel = -coeff * _rdfc_elementary_phase("disc", vv, uu)
         assert_allclose(
             np.asarray(v_kernel),
@@ -195,16 +348,6 @@ class TestBuildRDFCKernel:
         with pytest.raises(ValueError, match="Unknown geometry"):
             build_rdfc_kernel((4, 4), geometry="cube")
 
-    def test_kernel_b0_scaling(self):
-        k1 = build_rdfc_kernel((4, 4), b0_tesla=1.0)
-        k2 = build_rdfc_kernel((4, 4), b0_tesla=2.0)
-        assert_allclose(
-            np.asarray(k2["u_fft"]),
-            2.0 * np.asarray(k1["u_fft"]),
-            atol=1e-12,
-            err_msg="Kernel should scale linearly with b0",
-        )
-
 
 # ===================================================================
 # 2. Phase mapper RDFC  (cf. pyramid test_phasemapper.py TestCasePhaseMapperRDFC)
@@ -221,7 +364,7 @@ class TestPhaseMapperRDFC:
         phase_ref = phasemapper_ref["phase_ref"]
         voxel_size = float(phasemapper_ref["voxel_size"])
 
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), geometry="disc")
         phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
 
         assert_allclose(
@@ -235,7 +378,7 @@ class TestPhaseMapperRDFC:
         """RDFC mapper should be linear: f(a*u) = a*f(u)."""
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(_shape2d(u))
 
         phase1 = phase_mapper_rdfc(u, v, kernel)
         phase2 = phase_mapper_rdfc(2.0 * u, 2.0 * v, kernel)
@@ -268,7 +411,7 @@ class TestPhaseMapperRDFC:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(_shape2d(u))
 
         # Direct phase
         phase_direct = np.asarray(voxel_size**2 * phase_mapper_rdfc(u, v, kernel)).ravel()
@@ -318,7 +461,7 @@ class TestPhaseMapperRDFC:
 
         u_shape = (4, 4)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u_shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(u_shape)
 
         H, W = u_shape
         n = 2 * H * W
@@ -357,7 +500,7 @@ class TestPhaseMapperRDFC:
         H, W = 4, 4
         n = 2 * H * W
 
-        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+        kernel = build_rdfc_kernel((H, W))
 
         def phase_from_mag_vec(mag_vec):
             u_vec = mag_vec[: H * W].reshape(H, W)
@@ -452,7 +595,7 @@ class TestProject3D:
             mag_comp_first = vec_flat.reshape(3, Z, Y, X)
             mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
             proj = project_3d(mag_ours, axis=axis)
-            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+            return jnp.transpose(proj.value, (2, 0, 1)).reshape(-1)
 
         jac = np.asarray(jax.jacfwd(project_from_vec)(jnp.zeros((n,), dtype=jnp.float64)))
 
@@ -477,7 +620,7 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(_shape2d(u))
 
         phase_mapper = voxel_size**2 * phase_mapper_rdfc(u, v, kernel)
 
@@ -496,7 +639,7 @@ class TestForwardModels:
         u = jnp.array(phasemapper_ref["u_field"], dtype=jnp.float64)
         v = jnp.array(phasemapper_ref["v_field"], dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
-        kernel = build_rdfc_kernel(u.shape, b0_tesla=1.0)
+        kernel = build_rdfc_kernel(_shape2d(u))
 
         mag = jnp.stack([u, v], axis=-1)
         ramp_zero = jnp.zeros(3, dtype=jnp.float64)
@@ -520,7 +663,7 @@ class TestForwardModels:
         voxel_size = float(phasemapper_ref["voxel_size"])
 
         mag = jnp.stack([jnp.array(u), jnp.array(v)], axis=-1)
-        phase = forward_model_2d(mag, voxel_size, b0_tesla=1.0, geometry="disc")
+        phase = forward_model_2d(mag, _Q(voxel_size, "nm"), geometry="disc")
 
         assert_allclose(
             np.asarray(phase),
@@ -535,7 +678,7 @@ class TestForwardModels:
         mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
         voxel_size = float(phasemapper_ref["voxel_size"])
 
-        phase = forward_model_3d(mag_3d, voxel_size, b0_tesla=1.0, axis="z")
+        phase = forward_model_3d(mag_3d, _Q(voxel_size, "nm"), axis="z")
         # Should produce a (5, 4) phase image
         assert phase.shape == (5, 4)
         # Not all zeros (the magdata is non-trivial)
@@ -549,8 +692,8 @@ class TestForwardModels:
 
         for axis in ["z", "y", "x"]:
             projected = project_3d(mag_3d, axis=axis)
-            phase_2step = forward_model_2d(projected, voxel_size, b0_tesla=1.0)
-            phase_direct = forward_model_3d(mag_3d, voxel_size, b0_tesla=1.0, axis=axis)
+            phase_2step = forward_model_2d(projected, _Q(voxel_size, "nm"))
+            phase_direct = forward_model_3d(mag_3d, _Q(voxel_size, "nm"), axis=axis)
 
             assert_allclose(
                 np.asarray(phase_direct),
@@ -574,21 +717,11 @@ class TestGetFreqGrid:
 
     def test_dc_bin_is_one(self):
         _, _, denom = get_freq_grid(8, 8, 1.0)
-        assert float(denom[0, 0]) == 1.0
+        assert _scalar_value(denom[0, 0]) == 1.0
 
 
-class TestApplyRamp:
-    def test_offset_only(self):
-        ramp = apply_ramp(jnp.array([3.0, 0.0, 0.0]), 4, 4, 1.0)
-        assert_allclose(np.asarray(ramp), 3.0, atol=1e-12)
-
-    def test_slope(self):
-        coeffs = jnp.array([0.0, 1.0, 0.0], dtype=jnp.float64)
-        ramp = apply_ramp(coeffs, 4, 4, 1.0)
-        # slope_y * (y * voxel_size): y=0..3, voxel_size=1
-        expected_col = np.array([0.0, 1.0, 2.0, 3.0])
-        for col in range(4):
-            assert_allclose(np.asarray(ramp[:, col]), expected_col, atol=1e-12)
+# ApplyRamp behaviour is covered by TestApplyRampQuantity in test_mbir_unxt.py
+# (both offset and slope cases, plus unit conversion).
 
 
 # ===================================================================
@@ -610,13 +743,13 @@ class TestExchangeLossFn:
         mask = jnp.ones((6, 6), dtype=bool)
         mag = jnp.ones((6, 6, 2), dtype=jnp.float64) * 3.14
         loss = exchange_loss_fn(mag, mask)
-        assert_allclose(float(loss), 0.0, atol=1e-12)
+        assert_allclose(_scalar_value(loss), 0.0, atol=1e-12)
 
     def test_zero_field_zero_loss(self):
         mask = jnp.ones((6, 6), dtype=bool)
         mag = jnp.zeros((6, 6, 2), dtype=jnp.float64)
         loss = exchange_loss_fn(mag, mask)
-        assert_allclose(float(loss), 0.0, atol=1e-15)
+        assert_allclose(_scalar_value(loss), 0.0, atol=1e-15)
 
     def test_non_uniform_positive_loss(self):
         """A non-uniform field should produce positive exchange loss."""
@@ -624,7 +757,7 @@ class TestExchangeLossFn:
         rng = np.random.default_rng(42)
         mag = jnp.array(rng.standard_normal((6, 6, 2)))
         loss = exchange_loss_fn(mag, mask)
-        assert float(loss) > 0
+        assert _scalar_value(loss) > 0
 
     def test_mask_limits_region(self):
         """Variation outside the mask should not contribute to the loss."""
@@ -638,8 +771,8 @@ class TestExchangeLossFn:
         # Mask everything
         mask_full = jnp.ones((8, 8), dtype=bool)
 
-        loss_center = float(exchange_loss_fn(full_mag, mask_center))
-        loss_full = float(exchange_loss_fn(full_mag, mask_full))
+        loss_center = _scalar_value(exchange_loss_fn(full_mag, mask_center))
+        loss_full = _scalar_value(exchange_loss_fn(full_mag, mask_full))
 
         # Center loss should be less than full loss
         assert loss_center < loss_full
@@ -649,7 +782,7 @@ class TestExchangeLossFn:
         mask = jnp.ones((4, 4), dtype=bool)
         mag = jnp.ones((4, 4, 2), dtype=jnp.float64)
 
-        grad_fn = jax.grad(lambda m: exchange_loss_fn(m, mask))
+        grad_fn = jax.grad(lambda m: cast(Any, exchange_loss_fn(m, mask)).value)
         grad = grad_fn(mag)
         # Uniform field: gradient should be zero
         assert_allclose(np.asarray(grad), 0.0, atol=1e-12)
@@ -681,7 +814,7 @@ class TestMBIRLoss:
             reg_config={"lambda_exchange": 0.0},
         )
         # With lambda=0 and perfect forward model, loss should be ~0
-        assert float(loss) < 1e-10
+        assert _scalar_value(loss) < 1e-10
 
     def test_positive_loss_with_wrong_params(self, small_problem):
         """Loss should be positive when params don't match observed phase."""
@@ -695,7 +828,7 @@ class TestMBIRLoss:
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 0.0},
         )
-        assert float(loss) > 0
+        assert _scalar_value(loss) > 0
 
     def test_regularization_increases_loss(self, small_problem):
         """Adding regularization should increase (or not decrease) loss."""
@@ -706,11 +839,11 @@ class TestMBIRLoss:
         mask = jnp.array(sp["mask"])
         phase = jnp.array(sp["phase"])
 
-        loss_noreg = float(mbir_loss_2d(
+        loss_noreg = _scalar_value(mbir_loss_2d(
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 0.0},
         ))
-        loss_reg = float(mbir_loss_2d(
+        loss_reg = _scalar_value(mbir_loss_2d(
             params, mask, phase, sp["kernel"], sp["voxel_size"],
             reg_config={"lambda_exchange": 1.0},
         ))
@@ -727,7 +860,7 @@ class TestMBIRLoss:
             lambda p: mbir_loss_2d(
                 p, mask, phase, sp["kernel"], sp["voxel_size"],
                 reg_config={"lambda_exchange": 1e-3},
-            ),
+            ).value,
         )
         grad = grad_fn(params)
         assert grad[0].shape == sp["gt_mag"].shape
@@ -753,7 +886,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             solver=NewtonCGConfig(cg_maxiter=200, cg_tol=1e-8),
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=kernel,
@@ -761,76 +894,16 @@ class TestSolvers:
 
         assert isinstance(result, SolverResult)
         assert result.magnetization.shape == sp["gt_mag"].shape
-        assert result.ramp_coeffs.shape == (3,)
+        assert isinstance(result.ramp_coeffs, RampCoeffs)
         assert result.loss_history.shape == (1,)
 
         # Final loss should be significantly less than initial
-        final_loss = float(mbir_loss_2d(
-            (result.magnetization, result.ramp_coeffs),
+        final_loss = _scalar_value(mbir_loss_2d(
+            (result.magnetization.value, _ramp_array(result.ramp_coeffs)),
             mask, phase, kernel, sp["voxel_size"],
             reg_config={"lambda_exchange": 1e-4},
         ))
-        init_loss = float(mbir_loss_2d(
-            (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        assert final_loss < init_loss
-
-    @pytest.mark.slow
-    def test_adam_reduces_loss(self, small_problem):
-        sp = small_problem
-        mask = jnp.array(sp["mask"])
-        phase = jnp.array(sp["phase"])
-        init_mag = jnp.zeros_like(jnp.array(sp["gt_mag"]))
-        kernel = sp["kernel"]
-
-        result = solve_mbir_2d(
-            phase=phase,
-            init_mag=init_mag,
-            mask=mask,
-            pixel_size_nm=sp["voxel_size"],
-            solver=AdamConfig(num_steps=200, learning_rate=1e-2, patience=50),
-            reg_config={"lambda_exchange": 1e-4},
-            rdfc_kernel=kernel,
-        )
-
-        assert isinstance(result, SolverResult)
-        final_loss = float(mbir_loss_2d(
-            (result.magnetization, result.ramp_coeffs),
-            mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        init_loss = float(mbir_loss_2d(
-            (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        assert final_loss < init_loss
-
-    @pytest.mark.slow
-    def test_lbfgs_reduces_loss(self, small_problem):
-        sp = small_problem
-        mask = jnp.array(sp["mask"])
-        phase = jnp.array(sp["phase"])
-        init_mag = jnp.zeros_like(jnp.array(sp["gt_mag"]))
-        kernel = sp["kernel"]
-
-        result = solve_mbir_2d(
-            phase=phase,
-            init_mag=init_mag,
-            mask=mask,
-            pixel_size_nm=sp["voxel_size"],
-            solver=LBFGSConfig(num_steps=100, patience=30),
-            reg_config={"lambda_exchange": 1e-4},
-            rdfc_kernel=kernel,
-        )
-
-        assert isinstance(result, SolverResult)
-        final_loss = float(mbir_loss_2d(
-            (result.magnetization, result.ramp_coeffs),
-            mask, phase, kernel, sp["voxel_size"],
-            reg_config={"lambda_exchange": 1e-4},
-        ))
-        init_loss = float(mbir_loss_2d(
+        init_loss = _scalar_value(mbir_loss_2d(
             (init_mag, jnp.zeros(3)), mask, phase, kernel, sp["voxel_size"],
             reg_config={"lambda_exchange": 1e-4},
         ))
@@ -847,7 +920,7 @@ class TestSolvers:
             phase=phase,
             init_mag=init_mag,
             mask=mask,
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             solver="newton_cg",
             reg_config={"lambda_exchange": 1e-4},
             rdfc_kernel=sp["kernel"],
@@ -861,7 +934,7 @@ class TestSolvers:
                 phase=jnp.array(sp["phase"]),
                 init_mag=jnp.zeros_like(jnp.array(sp["gt_mag"])),
                 mask=jnp.array(sp["mask"]),
-                pixel_size_nm=sp["voxel_size"],
+                pixel_size=_Q(sp["voxel_size"], "nm"),
                 solver="bogus",
                 rdfc_kernel=sp["kernel"],
             )
@@ -873,8 +946,8 @@ class TestSolvers:
                 phase=jnp.array(sp["phase"]),
                 init_mag=jnp.zeros_like(jnp.array(sp["gt_mag"])),
                 mask=jnp.array(sp["mask"]),
-                pixel_size_nm=sp["voxel_size"],
-                solver=42,
+                pixel_size=_Q(sp["voxel_size"], "nm"),
+                solver=cast(Any, 42),
                 rdfc_kernel=sp["kernel"],
             )
 
@@ -885,27 +958,18 @@ class TestSolvers:
 
 
 class TestReconstruct2D:
-    """Test reconstruct_2d convenience wrapper."""
+    """Test reconstruct_2d convenience wrapper.
 
-    def test_basic_call(self, small_problem):
-        sp = small_problem
-        result = reconstruct_2d(
-            phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
-            mask=jnp.array(sp["mask"]),
-            lam=1e-3,
-            solver="newton_cg",
-        )
-        assert isinstance(result, SolverResult)
-        assert result.magnetization.shape == sp["gt_mag"].shape
+    Basic Quantity-input call is covered by TestReconstruct2DQuantity in
+    test_mbir_unxt.py.  The cases here focus on non-Quantity specific
+    behaviour: default masks and solver-config dispatch.
+    """
 
     def test_default_mask_is_ones(self, small_problem):
         sp = small_problem
         result = reconstruct_2d(
             phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             mask=None,
         )
         assert isinstance(result, SolverResult)
@@ -914,10 +978,9 @@ class TestReconstruct2D:
         sp = small_problem
         result = reconstruct_2d(
             phase=jnp.array(sp["phase"]),
-            pixel_size_nm=sp["voxel_size"],
-            b0_tesla=sp["b0"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             mask=jnp.array(sp["mask"]),
-            solver="adam",  # this should be overridden
+            solver="newton_cg",
             solver_config=NewtonCGConfig(cg_maxiter=200),
         )
         assert isinstance(result, SolverResult)
@@ -940,9 +1003,9 @@ class TestDecomposeLoss:
         kernel = sp["kernel"]
 
         dm, rn = decompose_loss(
-            mag, ramp, phase, mask, mask, kernel, sp["voxel_size"],
+            mag, ramp, phase, mask, mask, kernel, _Q(sp["voxel_size"], "nm"),
         )
-        assert dm < 1e-10, f"Data misfit should be ~0, got {dm}"
+        assert float(dm.value) < 1e-10, f"Data misfit should be ~0, got {dm}"
 
     def test_exchange_norm_zero_for_uniform(self, small_problem):
         sp = small_problem
@@ -954,9 +1017,9 @@ class TestDecomposeLoss:
         kernel = sp["kernel"]
 
         _, rn = decompose_loss(
-            uniform_mag, ramp, phase, mask, mask, kernel, sp["voxel_size"],
+            uniform_mag, ramp, phase, mask, mask, kernel, _Q(sp["voxel_size"], "nm"),
         )
-        assert_allclose(rn, 0.0, atol=1e-12)
+        assert_allclose(rn.value, 0.0, atol=1e-12)
 
     def test_returns_two_floats(self, small_problem):
         sp = small_problem
@@ -967,10 +1030,10 @@ class TestDecomposeLoss:
             jnp.array(sp["mask"]),
             jnp.array(sp["mask"]),
             sp["kernel"],
-            sp["voxel_size"],
+            _Q(sp["voxel_size"], "nm"),
         )
-        assert isinstance(dm, float)
-        assert isinstance(rn, float)
+        assert isinstance(dm, u.Quantity)
+        assert isinstance(rn, u.Quantity)
 
 
 class TestKneedleCorner:
@@ -1020,9 +1083,8 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
             solver="newton_cg",
             rdfc_kernel=sp["kernel"],
         )
@@ -1030,7 +1092,7 @@ class TestLCurveSweep:
         assert len(result.data_misfits) == 3
         assert len(result.reg_norms) == 3
         assert result.magnetizations.shape[0] == 3
-        assert result.ramp_coeffs.shape[0] == 3
+        assert result.ramp_coeffs.offset.shape[0] == 3
 
     @pytest.mark.slow
     def test_warm_start_sorts_lambdas(self, small_problem):
@@ -1039,9 +1101,8 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
             rdfc_kernel=sp["kernel"],
         )
         # Should be sorted
@@ -1055,9 +1116,8 @@ class TestLCurveSweep:
         result = lcurve_sweep(
             phase=jnp.array(sp["phase"]),
             mask=jnp.array(sp["mask"]),
-            pixel_size_nm=sp["voxel_size"],
+            pixel_size=_Q(sp["voxel_size"], "nm"),
             lambdas=lambdas,
-            b0_tesla=sp["b0"],
             rdfc_kernel=sp["kernel"],
         )
         assert np.all(np.isfinite(result.data_misfits))
@@ -1074,24 +1134,28 @@ class TestLCurveSweep:
 class TestSolverConfigs:
     def test_newton_cg_defaults(self):
         cfg = NewtonCGConfig()
-        assert cfg.cg_maxiter == 1000
-        assert cfg.cg_tol == 1e-10
-
-    def test_adam_defaults(self):
-        cfg = AdamConfig()
-        assert cfg.num_steps == 2000
-        assert cfg.learning_rate == 1e-2
-        assert cfg.patience == 50
-
-    def test_lbfgs_defaults(self):
-        cfg = LBFGSConfig()
-        assert cfg.num_steps == 500
-        assert cfg.patience == 50
+        assert cfg.cg_maxiter == 10000
+        assert cfg.cg_tol == 1e-9
+        assert cfg.preconditioner is None
 
     def test_configs_are_frozen(self):
         cfg = NewtonCGConfig()
         with pytest.raises(Exception):
-            cfg.cg_maxiter = 100
+            cast(Any, cfg).cg_maxiter = 100
+
+    def test_invalid_preconditioner_is_rejected(self, small_problem):
+        sp = small_problem
+        invalid_config = NewtonCGConfig(preconditioner="not-a-preconditioner")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="preconditioner"):
+            solve_mbir_2d(
+                sp["phase"],
+                jnp.zeros_like(jnp.array(sp["gt_mag"])),
+                sp["mask"],
+                pixel_size=sp["voxel_size"],
+                solver=invalid_config,
+                reg_config={"lambda_exchange": 1e-3},
+                rdfc_kernel=sp["kernel"],
+            )
 
 
 # ===================================================================
@@ -1135,25 +1199,77 @@ class TestElementaryPhase:
 class TestResultTypes:
     def test_solver_result_fields(self):
         r = SolverResult(
-            magnetization=jnp.zeros((4, 4, 2)),
-            ramp_coeffs=jnp.zeros(3),
-            loss_history=jnp.zeros(10),
+            magnetization=_Q(jnp.zeros((4, 4, 2)), ""),
+            ramp_coeffs=RampCoeffs(
+                offset=_Q(0.0, "rad"),
+                slope_y=_Q(0.0, "rad/nm"),
+                slope_x=_Q(0.0, "rad/nm"),
+            ),
+            loss_history=_Q(jnp.zeros(10), "rad2"),
+            converged=True,
         )
         assert r.magnetization.shape == (4, 4, 2)
-        assert r.ramp_coeffs.shape == (3,)
+        assert isinstance(r.ramp_coeffs, RampCoeffs)
         assert r.loss_history.shape == (10,)
+        assert r.converged is True
 
     def test_lcurve_result_fields(self):
         r = LCurveResult(
             lambdas=np.zeros(3),
-            data_misfits=np.zeros(3),
-            reg_norms=np.zeros(3),
-            magnetizations=jnp.zeros((3, 4, 4, 2)),
-            ramp_coeffs=jnp.zeros((3, 3)),
+            data_misfits=_Q(np.zeros(3), "rad2"),
+            reg_norms=_Q(np.zeros(3), "rad2"),
+            magnetizations=_Q(jnp.zeros((3, 4, 4, 2)), ""),
+            ramp_coeffs=RampCoeffs(
+                offset=_Q(np.zeros(3), "rad"),
+                slope_y=_Q(np.zeros(3), "rad/nm"),
+                slope_x=_Q(np.zeros(3), "rad/nm"),
+            ),
             corner_index=1,
         )
         assert r.corner_index == 1
         assert len(r.lambdas) == 3
+
+
+# ===================================================================
+# 13b. Convergence reporting
+# ===================================================================
+
+
+class TestConvergenceReporting:
+    """Test that the CG convergence flag and warning work correctly."""
+
+    def test_converged_true_when_sufficient_iterations(self, small_problem):
+        sp = small_problem
+        result = solve_mbir_2d(
+            phase=_Q(jnp.array(sp["phase"]), "rad"),
+            init_mag=_Q(jnp.zeros_like(jnp.array(sp["gt_mag"])), ""),
+            mask=jnp.array(sp["mask"]),
+            pixel_size=_Q(sp["voxel_size"], "nm"),
+            solver=NewtonCGConfig(cg_maxiter=10000, cg_tol=1e-8),
+        )
+        assert result.converged is True
+
+    def test_converged_false_with_one_iteration(self, small_problem):
+        sp = small_problem
+        with pytest.warns(RuntimeWarning, match="CG solver did not converge"):
+            result = solve_mbir_2d(
+                phase=_Q(jnp.array(sp["phase"]), "rad"),
+                init_mag=_Q(jnp.zeros_like(jnp.array(sp["gt_mag"])), ""),
+                mask=jnp.array(sp["mask"]),
+                pixel_size=_Q(sp["voxel_size"], "nm"),
+                solver=NewtonCGConfig(cg_maxiter=1, cg_tol=1e-16),
+            )
+        assert result.converged is False
+
+    def test_reconstruct_2d_returns_converged(self, small_problem):
+        sp = small_problem
+        result = reconstruct_2d(
+            phase=jnp.array(sp["phase"]),
+            pixel_size=_Q(sp["voxel_size"], "nm"),
+            mask=jnp.array(sp["mask"]),
+            lam=1e-3,
+        )
+        assert isinstance(result.converged, bool)
 
 
 # ===================================================================
@@ -1165,17 +1281,17 @@ class TestResultTypes:
 try:
     import h5py as _h5py
 
-    def _load_hdf5_field(path):
+    def _load_hdf5_field(path: str) -> np.ndarray:
         """Load the main data array from a pyramid HDF5 file."""
         with _h5py.File(path, "r") as h:
-            return h["Experiments/__unnamed__/data"][:]
+            dataset = cast(Any, h["Experiments/__unnamed__/data"])
+            return np.asarray(dataset[:])
 
-    def _load_hdf5_scale(path, axis_idx=2):
+    def _load_hdf5_scale(path: str, axis_idx: int = 2) -> float:
         """Load the voxel-size scale from a pyramid HDF5 axis attribute."""
         with _h5py.File(path, "r") as h:
-            return float(
-                h[f"Experiments/__unnamed__/axis-{axis_idx}"].attrs["scale"]
-            )
+            axis = cast(Any, h[f"Experiments/__unnamed__/axis-{axis_idx}"])
+            return float(cast(Any, axis.attrs["scale"]))
 
     HAS_H5PY = True
 except ImportError:
@@ -1192,7 +1308,7 @@ class TestUpstreamKernelNpy:
 
     def test_u_fft_matches_upstream_npy(self):
         ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_u_fft.npy"))
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), geometry="disc")
         assert_allclose(
             np.asarray(kernel["u_fft"]), ref, atol=1e-7,
             err_msg="u_fft does not match upstream test_kernel/ref_u_fft.npy",
@@ -1200,7 +1316,7 @@ class TestUpstreamKernelNpy:
 
     def test_v_fft_matches_upstream_npy(self):
         ref = np.load(os.path.join(PYRAMID_KERNEL_DIR, "ref_v_fft.npy"))
-        kernel = build_rdfc_kernel((4, 4), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((4, 4), geometry="disc")
         assert_allclose(
             np.asarray(kernel["v_fft"]), ref, atol=1e-7,
             err_msg="v_fft does not match upstream test_kernel/ref_v_fft.npy",
@@ -1211,7 +1327,7 @@ class TestUpstreamKernelNpy:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        coeff = _KERNEL_COEFF_FLOAT
         u_kernel = coeff * _rdfc_elementary_phase("disc", uu, vv)
         assert_allclose(
             np.asarray(u_kernel), ref, atol=1e-7,
@@ -1223,7 +1339,7 @@ class TestUpstreamKernelNpy:
         u_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         v_coords = jnp.linspace(-3, 3, num=7, dtype=jnp.float64)
         uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
-        coeff = 1.0 / (2 * PHI_0_T_NM2)
+        coeff = _KERNEL_COEFF_FLOAT
         v_kernel = -coeff * _rdfc_elementary_phase("disc", vv, uu)
         assert_allclose(
             np.asarray(v_kernel), ref, atol=1e-7,
@@ -1249,7 +1365,7 @@ class TestUpstreamPhaseMapperHDF5:
 
         u_field = jnp.array(mag_field[0, 0], dtype=jnp.float64)
         v_field = jnp.array(mag_field[1, 0], dtype=jnp.float64)
-        kernel = build_rdfc_kernel(u_field.shape, b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel(_shape2d(u_field), geometry="disc")
         phase = voxel_size**2 * phase_mapper_rdfc(u_field, v_field, kernel)
 
         assert_allclose(
@@ -1273,7 +1389,7 @@ class TestUpstreamPhaseMapperHDF5:
         u = jnp.array(mag_field[0, 0], dtype=jnp.float64)
         v = jnp.array(mag_field[1, 0], dtype=jnp.float64)
         mag = jnp.stack([u, v], axis=-1)
-        phase = forward_model_2d(mag, voxel_size, b0_tesla=1.0, geometry="disc")
+        phase = forward_model_2d(mag, _Q(voxel_size, "nm"), geometry="disc")
 
         assert_allclose(
             np.asarray(phase), phase_ref, atol=1e-7,
@@ -1289,7 +1405,7 @@ class TestUpstreamPhaseMapperHDF5:
         )
         H, W = 4, 4
         n = 2 * H * W
-        kernel = build_rdfc_kernel((H, W), b0_tesla=1.0)
+        kernel = build_rdfc_kernel((H, W))
 
         def phase_from_mag_vec(mag_vec):
             u = mag_vec[:H * W].reshape(H, W)
@@ -1349,7 +1465,7 @@ class TestUpstreamProjectorHDF5:
             mag_comp_first = vec_flat.reshape(3, Z, Y, X)
             mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
             proj = project_3d(mag_ours, axis=axis)
-            return jnp.transpose(proj, (2, 0, 1)).reshape(-1)
+            return jnp.transpose(proj.value, (2, 0, 1)).reshape(-1)
 
         jac = np.asarray(
             jax.jacfwd(project_from_vec)(jnp.zeros(n, dtype=jnp.float64))
@@ -1389,7 +1505,7 @@ class TestUpstreamForwardModelChain:
         n = 3 * n_masked  # 72
 
         voxel_size = 10.0
-        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((Y, X), geometry="disc")
 
         # Indices of masked voxels for scatter
         mask_flat = mask_3d.ravel()
@@ -1454,7 +1570,7 @@ class TestUpstreamForwardModelChain:
         n_masked = int(mask_3d.sum())
 
         voxel_size = 10.0
-        kernel = build_rdfc_kernel((Y, X), b0_tesla=1.0, geometry="disc")
+        kernel = build_rdfc_kernel((Y, X), geometry="disc")
         masked_indices = np.where(mask_3d.ravel())[0]
 
         # ones vector (like costfunction test: self.cost(np.ones(self.cost.n)) ≈ 0)
@@ -1713,7 +1829,7 @@ def slab_roundtrip():
     gt_proj_mag[..., 1] = mask_2d * depth * np.sin(phi)
 
     kernel = build_rdfc_kernel(
-        (y_dim, x_dim), b0_tesla=b_0, geometry="slab",
+        (y_dim, x_dim), geometry="slab",
     )
 
     analytic_phase = _analytic_phase_slab(
@@ -1721,8 +1837,8 @@ def slab_roundtrip():
     )
 
     fwd_phase = np.asarray(forward_model_2d(
-        jnp.array(gt_proj_mag), a,
-        b0_tesla=b_0, geometry="slab", rdfc_kernel=kernel,
+        jnp.array(gt_proj_mag), _Q(a, "nm"),
+        geometry="slab", rdfc_kernel=kernel,
     ))
 
     return {
@@ -1789,8 +1905,7 @@ class TestMBIRAnalyticRoundTrip:
         s = slab_roundtrip
         result = reconstruct_2d(
             phase=jnp.array(s["fwd_phase"]),
-            pixel_size_nm=s["a"],
-            b0_tesla=s["b_0"],
+            pixel_size=_Q(s["a"], "nm"),
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1851,8 +1966,7 @@ class TestMBIRAnalyticRoundTrip:
         s = slab_roundtrip
         result = reconstruct_2d(
             phase=jnp.array(s["analytic_phase"]),
-            pixel_size_nm=s["a"],
-            b0_tesla=s["b_0"],
+            pixel_size=_Q(s["a"], "nm"),
             mask=jnp.array(s["mask_2d"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1928,8 +2042,8 @@ class TestMBIRAnalyticRoundTrip:
         mag_3d[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi, 1] = np.sin(s["phi"])
 
         phase_3d = np.asarray(forward_model_3d(
-            jnp.array(mag_3d), s["a"],
-            b0_tesla=s["b_0"], axis="z", geometry="slab",
+            jnp.array(mag_3d), _Q(s["a"], "nm"),
+            axis="z", geometry="slab",
         ))
 
         ana = s["analytic_phase"]
@@ -1945,13 +2059,13 @@ class TestMBIRAnalyticRoundTrip:
         )
 
     @pytest.mark.parametrize("b0", [0.5, 0.6, 1.5, 2.0])
-    def test_mbir_recovers_magnetization_nonunity_b0(self, b0):
-        """MBIR recovery must be correct for non-unity b0 values.
+    def test_mbir_recovers_projected_mag_in_tesla(self, b0):
+        """Recovery in Tesla = b0 * M_dimensionless.
 
-        A wrong b0 scaling in either the kernel or the forward model
-        would show up as a systematic factor in the recovered
-        magnetization.  This test is parametrized over several b0
-        values to catch any hidden ``b0 == 1`` special-casing.
+        The kernel is now b0-independent (dimensionless), so the
+        recovered magnetization is dimensionless.  The analytic phase
+        depends on b0, so the reconstructed M should scale as
+        b0 * depth * cos/sin(phi).
         """
         dim = (4, 16, 16)
         a = 10.0
@@ -1969,12 +2083,9 @@ class TestMBIRAnalyticRoundTrip:
         mask_2d[y_lo:y_hi, x_lo:x_hi] = True
 
         depth = width[0]
-        gt_proj_mag = np.zeros((y_dim, x_dim, 2), dtype=np.float64)
-        gt_proj_mag[..., 0] = mask_2d * depth * np.cos(phi)
-        gt_proj_mag[..., 1] = mask_2d * depth * np.sin(phi)
 
         kernel = build_rdfc_kernel(
-            (y_dim, x_dim), b0_tesla=b0, geometry="slab",
+            (y_dim, x_dim), geometry="slab",
         )
 
         # Use analytic phase (independent code path) at this b0
@@ -1984,8 +2095,7 @@ class TestMBIRAnalyticRoundTrip:
 
         result = reconstruct_2d(
             phase=jnp.array(analytic_phase),
-            pixel_size_nm=a,
-            b0_tesla=b0,
+            pixel_size=_Q(a, "nm"),
             mask=jnp.array(mask_2d),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -1994,8 +2104,8 @@ class TestMBIRAnalyticRoundTrip:
         )
 
         rec = np.asarray(result.magnetization)
-        expected_mu = depth * np.cos(phi)
-        expected_mv = depth * np.sin(phi)
+        expected_mu = b0 * depth * np.cos(phi)
+        expected_mv = b0 * depth * np.sin(phi)
 
         rec_u_mean = rec[mask_2d, 0].mean()
         rec_v_mean = rec[mask_2d, 1].mean()
@@ -2016,10 +2126,10 @@ class TestMBIRAnalyticRoundTrip:
             ),
         )
         assert_allclose(
-            rec_norm_mean, float(depth), rtol=0.05,
+            rec_norm_mean, b0 * float(depth), rtol=0.05,
             err_msg=(
                 f"b0={b0}: Mean recovered |M| = {rec_norm_mean:.6f}, "
-                f"expected {float(depth):.6f}"
+                f"expected {b0 * float(depth):.6f}"
             ),
         )
 
@@ -2059,12 +2169,12 @@ class TestMBIRRoundTripNotebookParams:
         gt_mag[..., 0] = mask * gt_norm * np.cos(phi)
         gt_mag[..., 1] = mask * gt_norm * np.sin(phi)
 
-        kernel = build_rdfc_kernel((H, W), b0_tesla=b0, geometry="disc")
+        kernel = build_rdfc_kernel((H, W), geometry="disc")
 
         # Generate phase from the forward model
         fwd_phase = np.asarray(forward_model_2d(
-            jnp.array(gt_mag), a,
-            b0_tesla=b0, geometry="disc", rdfc_kernel=kernel,
+            jnp.array(gt_mag), _Q(a, "nm"),
+            geometry="disc", rdfc_kernel=kernel,
         ))
 
         return {
@@ -2078,8 +2188,7 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
+            pixel_size=_Q(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2122,8 +2231,7 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
+            pixel_size=_Q(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2144,8 +2252,7 @@ class TestMBIRRoundTripNotebookParams:
         p = notebook_problem
         result = reconstruct_2d(
             phase=jnp.array(p["fwd_phase"]),
-            pixel_size_nm=p["a"],
-            b0_tesla=p["b0"],
+            pixel_size=_Q(p["a"], "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2165,14 +2272,20 @@ class TestMBIRRoundTripNotebookParams:
 # ---------------------------------------------------------------------------
 # 18. Cross-validation against pyramid (requires ``pyramid`` package)
 # ---------------------------------------------------------------------------
-pyramid = pytest.importorskip("pyramid")
+_has_pyramid = pytest.importorskip is not None  # placeholder
+try:
+    import pyramid as _pyramid  # noqa: F401
+    _has_pyramid = True
+except ImportError:
+    _has_pyramid = False
 
 
+@pytest.mark.skipif(not _has_pyramid, reason="pyramid not installed")
 class TestPyramidCrossValidation:
     """Compare forward model and reconstruction with pyramid (live)."""
 
     A = 0.58          # nm
-    B0 = 0.6          # T
+    B0 = 1.0          # T, matches the explicit 1 T reference baked into MBIR
     NY, NX = 64, 64
     M_AMP = 30.0
     LAM = 1e-3
@@ -2200,7 +2313,7 @@ class TestPyramidCrossValidation:
 
         # libertem_holo forward model
         kern_lt = build_rdfc_kernel(
-            (self.NY, self.NX), b0_tesla=self.B0, geometry="disc",
+            (self.NY, self.NX), geometry="disc",
         )
         mag_lt = jnp.stack([jnp.array(Mx), jnp.array(My)], axis=-1)
         phase_lt = np.asarray(
@@ -2236,8 +2349,7 @@ class TestPyramidCrossValidation:
         # libertem_holo reconstruction
         result_lt = reconstruct_2d(
             phase=jnp.array(phase),
-            pixel_size_nm=self.A,
-            b0_tesla=self.B0,
+            pixel_size=_Q(self.A, "nm"),
             mask=jnp.array(mask),
             lam=self.LAM,
             solver="newton_cg",
@@ -2249,7 +2361,7 @@ class TestPyramidCrossValidation:
         # pyramid reconstruction
         pm = PhaseMap(a=self.A, phase=phase, mask=mask.astype(bool))
         md_rec, _ = reconstruction_2d_from_phasemap(
-            pm, b_0=self.B0, lam=self.LAM, max_iter=100, verbose=False,
+            pm, b_0=cast(Any, self.B0), lam=self.LAM, max_iter=100, verbose=False,
         )
         abs_pyr = np.sqrt(md_rec.field[0, 0] ** 2 + md_rec.field[1, 0] ** 2)
 
@@ -2271,12 +2383,12 @@ class TestPyramidCrossValidation:
 # ---------------------------------------------------------------------------
 # 19. Projected-magnetization normalization (3D → 2D round-trip)
 # ---------------------------------------------------------------------------
-pyramid = pytest.importorskip("pyramid")
 
 
+@pytest.mark.skipif(not _has_pyramid, reason="pyramid not installed")
 class TestProjectedMagnetizationNormalization:
-    """Verify that MBIR recovers the projected magnetization,
-    and that dividing by the number of voxels along z
+    """Verify that MBIR recovers the *projected* (thickness-integrated)
+    magnetization, and that dividing by the number of thickness voxels
     gives back the per-voxel magnetization.
 
     The synthetic workflow is:
@@ -2294,9 +2406,9 @@ class TestProjectedMagnetizationNormalization:
 
     N = 32
     R = 10
-    H = 10          # disc height in voxels
+    H = 10          # disc thickness in voxels
     PX = 1.0        # voxel size in nm
-    B0 = 1.25       # Tesla
+    B0 = 1.0        # Tesla, matches the explicit 1 T reference baked into MBIR
     PHI = np.pi / 2  # magnetization along y
 
     @pytest.fixture(scope="class")
@@ -2332,19 +2444,19 @@ class TestProjectedMagnetizationNormalization:
         phase_rdfc = mapper_rdfc(VectorData(self.PX, field_2d)).phase
 
         # Phase via FDFC (what the notebook uses — periodic convolution)
-        mapper_fdfc = PhaseMapperFDFC(self.PX, projector.dim_uv, b_0=self.B0)
+        mapper_fdfc = PhaseMapperFDFC(self.PX, projector.dim_uv, b_0=cast(Any, self.B0))
         phase_fdfc = mapper_fdfc(field_proj).phase
 
         # Phase via MBIR forward model
         kern_lt = build_rdfc_kernel(
-            (N, N), b0_tesla=self.B0, geometry="disc",
+            (N, N), geometry="disc",
         )
         mag_2d = np.zeros((N, N, 2))
         mag_2d[..., 0] = projected_u
         mag_2d[..., 1] = projected_v
         phase_mbir = np.asarray(forward_model_2d(
-            jnp.array(mag_2d), self.PX,
-            b0_tesla=self.B0, rdfc_kernel=kern_lt,
+            jnp.array(mag_2d), _Q(self.PX, "nm"),
+            rdfc_kernel=kern_lt,
         ))
 
         return {
@@ -2389,8 +2501,7 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
+            pixel_size=_Q(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2412,13 +2523,12 @@ class TestProjectedMagnetizationNormalization:
         assert_allclose(rec_norm, float(self.H), rtol=1e-3,
                         err_msg=f"|M| should match projected value {self.H}")
 
-    def test_projected_magnetization_divided_by_height_recovers_per_voxel(self, disc_3d):
-        """Dividing the projected M by the disc height recovers per-voxel M = 1."""
+    def test_per_voxel_magnetization_via_thickness(self, disc_3d):
+        """Dividing the projected M by thickness recovers per-voxel M = 1."""
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_rdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
+            pixel_size=_Q(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
@@ -2433,6 +2543,27 @@ class TestProjectedMagnetizationNormalization:
         assert_allclose(per_voxel, 1.0, rtol=1e-3,
                         err_msg="projected |M| / H should give per-voxel M = 1")
 
+    def test_forward_model_roundtrip(self, disc_3d):
+        """forward_model_2d round-trips with reconstruct_2d."""
+        p = disc_3d
+        result = reconstruct_2d(
+            phase=jnp.array(p["phase_rdfc"]),
+            pixel_size=_Q(self.PX, "nm"),
+            mask=jnp.array(p["mask"]),
+            lam=1e-10,
+            solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),
+            geometry="disc",
+            rdfc_kernel=p["kern_lt"],
+        )
+        pred_phase = forward_model_2d(
+            result.magnetization, self.PX,
+            rdfc_kernel=p["kern_lt"],
+        )
+        assert_allclose(
+            np.asarray(pred_phase), p["phase_rdfc"], atol=1e-3,
+            err_msg="forward_model_2d(projected_M) should match projected phase",
+        )
+
     def test_fdfc_phase_gives_wrong_magnetization(self, disc_3d):
         """Using FDFC-generated phase with RDFC reconstruction is wrong.
 
@@ -2444,8 +2575,7 @@ class TestProjectedMagnetizationNormalization:
         p = disc_3d
         result = reconstruct_2d(
             phase=jnp.array(p["phase_fdfc"]),
-            pixel_size_nm=self.PX,
-            b0_tesla=self.B0,
+            pixel_size=_Q(self.PX, "nm"),
             mask=jnp.array(p["mask"]),
             lam=1e-10,
             solver_config=NewtonCGConfig(cg_maxiter=5000, cg_tol=1e-12),

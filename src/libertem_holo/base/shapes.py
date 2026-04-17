@@ -6,8 +6,37 @@ produce shapes with the exact requested voxel count along each axis.
 """
 
 from math import pi
+from typing import cast
 
 import numpy as np
+import unxt as u
+
+
+def _is_quantity(value):
+    return isinstance(value, u.Quantity)
+
+
+def _as_pixel_radius(radius):
+    if _is_quantity(radius):
+        radius = cast(u.Quantity, u.uconvert("pix", radius))
+        return float(np.asarray(radius.value))
+    return float(radius)
+
+
+def _as_voxel_height(height):
+    if _is_quantity(height):
+        height = cast(u.Quantity, u.uconvert("pix", height))
+        height_value = float(np.asarray(height.value))
+    else:
+        height_value = float(height)
+
+    height_voxels = int(round(height_value))
+    if not np.isclose(height_value, height_voxels):
+        raise ValueError(
+            "height must be an integer voxel count in pixels; "
+            f"got {height_value}"
+        )
+    return height_voxels
 
 
 def disc(dim, center, radius, height, axis='z'):
@@ -23,9 +52,9 @@ def disc(dim, center, radius, height, axis='z'):
         Grid dimensions ``(z, y, x)``.
     center : tuple (N=3)
         Centre of the disc in pixel coordinates ``(z, y, x)``.
-    radius : float
+    radius : float or Quantity["pix"]
         Radius of the disc in pixel coordinates.
-    height : int
+    height : int or Quantity["pix"]
         Height (thickness) of the disc in voxels along *axis*.
     axis : {'z', 'y', 'x'}, optional
         Orientation of the disc axis.  Default ``'z'``.
@@ -41,6 +70,8 @@ def disc(dim, center, radius, height, axis='z'):
         raise ValueError("dim must have length 3")
     if len(center) != 3:
         raise ValueError("center must have length 3")
+    radius = _as_pixel_radius(radius)
+    height = _as_voxel_height(height)
     if radius <= 0:
         raise ValueError("radius must be positive")
     if height <= 0:
