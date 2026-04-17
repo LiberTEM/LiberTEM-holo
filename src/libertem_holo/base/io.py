@@ -69,6 +69,41 @@ class Results:
     brightfield: np.ndarray | None = None
     metadata: dict[str, Any] | None = None
 
+    def __init__(
+        self,
+        complex_wave: np.ndarray[tuple[int, ...], np.complexfloating],
+        unwrapped_phase: np.ndarray | None = None,
+        brightfield: np.ndarray | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Results:
+        """Make a new Results object.
+
+        The object will not be saved immediately, but you can call `save()` on it later.
+
+        Parameters
+        ----------
+        complex_wave
+            The (averaged) complex wave as 2D numpy array
+            (dtype complex64 or complex128)
+        unwrapped_phase
+            Optional 2D numpy array of unwrapped phase (dtype float32 or float64)
+        brightfield
+            Optional 2D numpy array of a brightfield reconstruction from
+            the centerband (dtype float32 or float64)
+        metadata
+            Optional dictionary of custom metadata. The values have to be
+            json-serializable (roughly numbers, strings, lists or dicts of these)
+
+        """
+        if complex_wave.dtype.kind != 'c':
+            raise ValueError("complex_wave should have a complex dtype")
+        super().__init__(
+            complex_wave=complex_wave,
+            unwrapped_phase=unwrapped_phase,
+            brightfield=brightfield,
+            metadata=metadata,
+        )
+
     def metadata_from_input(
         self,
         input_data: InputData,
@@ -134,8 +169,25 @@ class Results:
 
     @classmethod
     def load(cls, path: str | pathlib.Path) -> Results:
+<<<<<<< HEAD
         """Load a result that was previously saved using the `save` method."""
         arrz = cast("dict[str, np.ndarray]", np.load(path, allow_pickle=False))
+=======
+        """Load result data from a .npz file.
+
+        Parameters
+        ----------
+        path
+            The path to the .npz file to load
+
+        Returns
+        -------
+        Results
+            The loaded results object
+
+        """
+        arrz = np.load(path, allow_pickle=False)
+>>>>>>> 5601458 (WIP: example notebooks + small edits to filters, reconstr and utils)
         kwargs = {}
         for name in ["complex_wave", "unwrapped_phase", "brightfield"]:
             kwargs[name] = arrz.get(name)
@@ -316,7 +368,7 @@ class InputFile:
     """the path to the file on the filesystem"""
 
     pixelsize: float | None = None
-    """in nm"""
+    """in m"""
 
     tags: dict[str, Any] | None = None
     """raw tags from the DM file"""
@@ -370,16 +422,18 @@ class InputFile:
         units = ds["pixelUnit"][-2:]
         sizes = ds["pixelSize"][-2:]
 
-        assert units[0] == "nm", f'pixelUnit should be nm, is {ds["pixelUnit"]}'
+        assert units[0] in ('nm', 'µm'), f'pixelUnit should be nm, is {ds["pixelUnit"]}'
         assert sizes[0] == sizes[1]
         pixelsize = sizes[0]
+        if units[0] == 'µm':
+            pixelsize *= 1000
         assert len(ds["data"].shape) in (2, 3), "data should be 2D or 3D"
         exposure_time = dm.getMetadata(0)["DataBar Exposure Time (s)"]
         if len(ds["data"].shape) == 3:
             exposure_time *= ds["data"].shape[0]
         return cls(
             data=ds["data"],
-            pixelsize=pixelsize,
+            pixelsize=pixelsize * 1e-9,
             tags=dm.getMetadata(0),
             exposure_time=exposure_time,
             path=pathlib.Path(path),
