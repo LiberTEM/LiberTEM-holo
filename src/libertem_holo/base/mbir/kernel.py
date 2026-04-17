@@ -39,11 +39,11 @@ def get_freq_grid(
 
     Returns
     -------
-    f_y : jax.Array
-        2D array of y-frequency values.
-    f_x : jax.Array
+    f_y : Quantity["1/length"]
+        2D array of y-frequency values (units of ``1/nm``).
+    f_x : Quantity["1/length"]
         2D array of x-frequency values (real-FFT half-spectrum).
-    denom : jax.Array
+    denom : Quantity["1/length^2"]
         ``f_x**2 + f_y**2`` with the zero-frequency bin set to 1
         to avoid division by zero.
     """
@@ -202,8 +202,10 @@ def phase_mapper_rdfc(
 
     Returns
     -------
-    jax.Array
-        Magnetic phase-shift image of shape ``(H, W)``.
+    Quantity
+        Fourier-space phase-shift contribution of shape ``(H, W)``.
+        Carries the kernel's ``1/nm^2`` units; the forward model
+        multiplies by ``pixel_size**2`` to obtain radians.
     """
     u_field_q = cast(u.Quantity, _as_dimensionless_quantity(u_field))
     v_field_q = cast(u.Quantity, _as_dimensionless_quantity(v_field))

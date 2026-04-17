@@ -92,8 +92,9 @@ def exchange_loss_fn(
 
     Returns
     -------
-    jax.Array
-        Scalar exchange loss (L2 norm squared of finite differences).
+    Quantity[""]
+        Scalar exchange loss (L2 norm squared of finite differences),
+        dimensionless.
     """
     mag_q = cast(u.Quantity, _as_dimensionless_quantity(mag))
     mag_val = mag_q.value

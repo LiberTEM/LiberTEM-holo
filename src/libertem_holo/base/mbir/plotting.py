@@ -442,7 +442,7 @@ def plot_lcurve(
     lcurve_result : LCurveResult
         Result from lcurve_sweep or lcurve_sweep_vmap.
     pyramid_style : bool, optional
-        If True, plot y = reg_norm / lambda vs x = data_misfit (Pyramid style).
+        If True, plot y = reg_norm vs x = data_misfit (Pyramid style).
         If False (default), plot y = data_misfit vs x = reg_norm (standard style).
     ax : matplotlib.axes.Axes, optional
         Axis to plot on. If None, a new figure is created.

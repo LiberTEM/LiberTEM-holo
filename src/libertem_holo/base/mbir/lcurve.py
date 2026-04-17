@@ -57,7 +57,7 @@ def decompose_loss(
     magnetization : Quantity["dimensionless"]
         Reconstructed magnetization of shape ``(N, M, 2)``.
     ramp_coeffs : RampCoeffs
-        Background ramp coefficients ``[offset, slope_y, slope_x]``.
+        Background ramp coefficients with ``unxt.Quantity`` fields.
     phase : Quantity["angle"]
         Observed phase image of shape ``(N, M)``.
     mask : array_like
@@ -181,14 +181,15 @@ def lcurve_sweep(
 
     Parameters
     ----------
-    phase : array_like
+    phase : Quantity["angle"]
         Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
-    lambdas : array_like
-        1D array of ``lambda_exchange`` values to sweep.
+    lambdas : array_like or Quantity["rad2"]
+        1D array of ``lambda_exchange`` values to sweep. Plain scalars
+        are promoted to ``Quantity["rad2"]``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.
@@ -309,14 +310,15 @@ def lcurve_sweep_vmap(
 
     Parameters
     ----------
-    phase : array_like
+    phase : Quantity["angle"]
         Measured phase image of shape ``(N, M)`` in **radians**.
     mask : array_like
         Binary mask of shape ``(N, M)``.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
-    lambdas : array_like
-        1D array of ``lambda_exchange`` values to sweep.
+    lambdas : array_like or Quantity["rad2"]
+        1D array of ``lambda_exchange`` values to sweep. Plain scalars
+        are promoted to ``Quantity["rad2"]``.
     solver : str or SolverConfig, optional
         Solver selection string or config object.  Ignored when
         *solver_config* is provided.  Default ``"newton_cg"``.

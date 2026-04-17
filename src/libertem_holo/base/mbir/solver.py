@@ -72,17 +72,17 @@ def mbir_loss_2d(
     ----------
     params
         Tuple of ``(magnetization, ramp_coeffs)`` where
-        *magnetization* has shape ``(N, M, 2)`` and *ramp_coeffs*
-        has shape ``(3,)``.
+        *magnetization* is a ``Quantity[""]`` of shape ``(N, M, 2)``
+        and *ramp_coeffs* is a :class:`RampCoeffs` instance.
     mask
         Binary mask of shape ``(N, M)`` applied to the
         magnetization before the forward model.
     phase
-        Observed phase image of shape ``(H, W)``.
+        Observed phase image of shape ``(H, W)`` as a ``Quantity["angle"]``.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
     pixel_size
-        Pixel size in nanometres.
+        Pixel size as a ``Quantity["length"]``.
     reg_config
         Regularization configuration.  Pass a :class:`RegConfig` instance
         or a dict with key ``'lambda_exchange'`` (for backwards compat).
@@ -93,7 +93,7 @@ def mbir_loss_2d(
 
     Returns
     -------
-    jax.Array
+    Quantity["rad2"]
         Scalar loss value.
     """
     if reg_mask is None:
@@ -156,17 +156,18 @@ def _run_newton_cg_solver_2d(
     Parameters
     ----------
     phase
-        Observed phase image of shape ``(H, W)``.
+        Observed phase image of shape ``(H, W)`` as a ``Quantity["angle"]``.
     init_mag
-        Initial magnetization of shape ``(N, M, 2)``.
+        Initial magnetization of shape ``(N, M, 2)`` as a
+        ``Quantity[""]`` (dimensionless).
     mask
         Binary mask of shape ``(N, M)`` applied to the
         magnetization.
     pixel_size
-        Pixel size in nanometres.
+        Pixel size as a ``Quantity["length"]``.
     reg_config
-        Regularization configuration dictionary (see
-        :func:`mbir_loss_2d`), default ``{}``.
+        Regularization configuration (see :func:`mbir_loss_2d`).
+        Defaults to :class:`RegConfig` with zero exchange weight.
     rdfc_kernel
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
     cg_tol
@@ -177,8 +178,8 @@ def _run_newton_cg_solver_2d(
     preconditioner
         Experimental inverse preconditioner for the CG solve.
     init_ramp_coeffs
-        Initial ramp coefficients of shape ``(3,)``.  Defaults to
-        zeros.
+        Initial ramp coefficients as a :class:`RampCoeffs` instance.
+        Defaults to zeros.
     reg_mask
         Optional regularization mask of shape ``(N, M)``.
         Defaults to *mask*.
@@ -273,9 +274,9 @@ def solve_mbir_2d(
 
     Parameters
     ----------
-    phase : array_like
+    phase : Quantity["angle"]
         Measured phase image in **radians**.
-    init_mag : array_like
+    init_mag : Quantity[""]
         Initial magnetization estimate, shape ``(N, M, 2)``.
     mask : array_like
         Binary mask of shape ``(N, M)`` applied to the
@@ -290,17 +291,16 @@ def solve_mbir_2d(
         (e.g. ``{"lambda_exchange": 1.0}``) for backwards compatibility.
     rdfc_kernel : dict, optional
         Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-    init_ramp_coeffs : array_like, optional
-        Initial ramp coefficients ``[offset, slope_y, slope_x]``
-        in units of **[rad, rad/nm, rad/nm]**.
+    init_ramp_coeffs : RampCoeffs, optional
+        Initial ramp coefficients. Defaults to zeros.
     reg_mask : array_like, optional
         Regularization mask of shape ``(N, M)``.  Defaults to *mask*.
 
     Returns
     -------
     SolverResult
-        Named tuple with fields ``magnetization``, ``ramp_coeffs``, and
-        ``loss_history``.
+        Named tuple with fields ``magnetization``, ``ramp_coeffs``,
+        ``loss_history``, and ``converged``.
 
     """
     phase = _as_angle_quantity(phase)
@@ -386,8 +386,9 @@ def reconstruct_2d(
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
     mask : array_like, optional
         Binary mask of shape ``(N, M)``.  Defaults to all ones.
-    lam : Quantity["rad2"], optional
-        Regularization weight (``lambda_exchange``), default ``Quantity(1e-3, "rad2")``.
+    lam : float or Quantity["rad2"], optional
+        Regularization weight (``lambda_exchange``). Plain scalars are
+        promoted to ``Quantity["rad2"]``. Default ``1e-3``.
     solver : str or SolverConfig, optional
         Solver selection string (``"newton_cg"``) or a :class:`SolverConfig` instance.
         Ignored when *solver_config* is provided.
@@ -475,8 +476,9 @@ def reconstruct_2d_ensemble(
         Bootstrap mask ensemble of shape ``(N_boot, H, W)``.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
-    lam : float, optional
-        Regularization weight (``lambda_exchange``), default 1e-3.
+    lam : float or Quantity["rad2"], optional
+        Regularization weight (``lambda_exchange``). Plain scalars are
+        promoted to ``Quantity["rad2"]``. Default ``1e-3``.
     solver : str or SolverConfig, optional
         Solver selection string (``"newton_cg"``) or a
         :class:`NewtonCGConfig` instance.

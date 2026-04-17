@@ -176,9 +176,9 @@ def bootstrap_threshold_uncertainty_2d(
 
     Parameters
     ----------
-    phase
-        Observed phase image of shape ``(H, W)``.
-    mip_phase
+    phase : Quantity["angle"]
+        Observed phase image of shape ``(H, W)`` in **radians**.
+    mip_phase : Quantity["angle"]
         MIP phase image used for thresholding, shape ``(H, W)``.
     threshold : float
         Central threshold value around which the bootstrap draws are sampled.
@@ -186,8 +186,9 @@ def bootstrap_threshold_uncertainty_2d(
         MIP phase has been converted to radians.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units.
-    lam : float, optional
-        Regularization weight (``lambda_exchange``), default 1e-3.
+    lam : float or Quantity["rad2"], optional
+        Regularization weight (``lambda_exchange``). Plain scalars are
+        promoted to ``Quantity["rad2"]``. Default ``1e-3``.
     solver : str or SolverConfig, optional
         Solver selection string (``"newton_cg"``) or a
         :class:`NewtonCGConfig` instance. Ignored when

@@ -74,20 +74,21 @@ def forward_model_single_rdfc_2d(
 
     Parameters
     ----------
-    magnetization
+    magnetization: Quantity["dimensionless"]
         In-plane magnetization of shape ``(N, M, 2)`` where the
         last axis holds the (u, v) components.
-    ramp_coeffs
-        Background ramp coefficients ``[offset, slope_y, slope_x]``.
-    rdfc_kernel
+    ramp_coeffs: RampCoeffs
+        Background phase-ramp coefficients with explicit units
+        (offset in rad, slopes in rad/nm).
+    rdfc_kernel: dict
         Kernel dictionary as returned by :func:`build_rdfc_kernel`.
-    pixel_size
-        Pixel size in nanometres.
+    pixel_size: Quantity["length"]
+        Pixel size as a ``unxt.Quantity`` with length units.
 
     Returns
     -------
-    jax.Array
-        Predicted phase image of shape ``(N, M)``.
+    Quantity["angle"]
+        Predicted phase image of shape ``(N, M)`` in **radians**.
     """
     magnetization_q = _as_dimensionless_quantity(magnetization)
     ramp_coeffs_q = _as_ramp_coeffs(
@@ -126,7 +127,7 @@ def forward_model_2d(
 
     Parameters
     ----------
-    magnetization : array_like
+    magnetization : Quantity["dimensionless"]
         In-plane magnetization of shape ``(N, M, 2)`` where the
         last axis holds the (u, v) components. The input is assumed
         to be the projected normalized magnetization returned by
@@ -135,10 +136,9 @@ def forward_model_2d(
         expressed as a projected induction line integral.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
-    ramp_coeffs : array_like, optional
-        Background ramp coefficients ``[offset, slope_y, slope_x]``
-        in units of **[rad, rad/nm, rad/nm]**.
-        Defaults to zeros (no ramp).
+    ramp_coeffs : RampCoeffs, optional
+        Background phase-ramp coefficients with ``unxt.Quantity`` fields
+        (offset in rad, slopes in rad/nm). Defaults to zeros (no ramp).
     geometry : str, optional
         Voxel geometry for the RDFC kernel (``"disc"`` or
         ``"slab"``), default ``"disc"``.
@@ -205,7 +205,7 @@ def project_3d(
 
     Parameters
     ----------
-    magnetization_3d : array_like
+    magnetization_3d : Quantity["dimensionless"]
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
     axis : {'z', 'y', 'x'}, optional
@@ -258,16 +258,16 @@ def forward_model_3d(
 
     Parameters
     ----------
-    magnetization_3d : array_like
+    magnetization_3d : Quantity["dimensionless"]
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
     pixel_size : Quantity["length"]
         Voxel size as a ``unxt.Quantity`` with length units.
     axis : {'z', 'y', 'x'}, optional
         Projection axis, default ``'z'``.
-    ramp_coeffs : array_like, optional
-        Background ramp coefficients ``[offset, slope_y, slope_x]``.
-        Defaults to zeros (no ramp).
+    ramp_coeffs : RampCoeffs, optional
+        Background phase-ramp coefficients with ``unxt.Quantity`` fields
+        (offset in rad, slopes in rad/nm). Defaults to zeros (no ramp).
     geometry : str, optional
         Voxel geometry for the RDFC kernel (``"disc"`` or
         ``"slab"``), default ``"disc"``.
