@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 
-def _require_isotropic_voxel(voxel_size) -> float:
+def _require_isotropic_voxel(voxel_size: float | Sequence[float] | np.ndarray) -> None:
     sizes = np.asarray(voxel_size, dtype=float).reshape(-1)
     if sizes.size == 0:
         raise ValueError("voxel_size must not be empty")
@@ -25,7 +27,6 @@ def _require_isotropic_voxel(voxel_size) -> float:
         )
     if size <= 0:
         raise ValueError(f"voxel_size must be positive, got {size}.")
-    return size
 
 
 def _nodal_to_cell(values: np.ndarray) -> np.ndarray:
@@ -50,7 +51,7 @@ def _nodal_to_cell(values: np.ndarray) -> np.ndarray:
 
 def neuralmag_state_to_mbir_rho_m(
     state: np.ndarray,
-    voxel_size,
+    voxel_size: float | Sequence[float] | np.ndarray,
     *,
     state_is_nodal: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -74,4 +75,3 @@ def neuralmag_state_to_mbir_rho_m(
     rho = np.transpose(cell_state[..., 0], (2, 1, 0))
     m = np.transpose(cell_state[..., 1:], (2, 1, 0, 3))
     return rho, m
-
