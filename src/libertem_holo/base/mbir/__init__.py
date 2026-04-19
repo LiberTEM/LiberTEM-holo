@@ -33,6 +33,7 @@ This is a package; the implementation is split across submodules:
 * :mod:`.bootstrap` — bootstrap threshold uncertainty.
 * :mod:`.lcurve` — L-curve sweeps.
 * :mod:`.plotting` — matplotlib helpers.
+* :mod:`.synthetic` — synthetic support and magnetization primitives.
 
 All public names are re-exported from this package so users can import
 them directly from :mod:`libertem_holo.base.mbir`.
@@ -98,6 +99,12 @@ from .plotting import (
     plot_lcurve,
     plot_physical_bootstrap_uncertainty,
 )
+from .synthetic import (
+    domain_wall_magnetization,
+    soft_disc_support,
+    uniform_magnetization,
+    vortex_magnetization,
+)
 
 __all__ = [
     "B_REF",
@@ -141,4 +148,8 @@ __all__ = [
     "to_local_magnetization",
     "to_projected_induction_integral",
     "to_projected_magnetization_integral",
+    "domain_wall_magnetization",
+    "soft_disc_support",
+    "uniform_magnetization",
+    "vortex_magnetization",
 ]

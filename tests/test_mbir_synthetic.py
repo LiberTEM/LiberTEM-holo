@@ -1,0 +1,79 @@
+import numpy as np
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+_SYNTHETIC_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "libertem_holo"
+    / "base"
+    / "mbir"
+    / "synthetic.py"
+)
+_SPEC = spec_from_file_location("libertem_holo.base.mbir.synthetic", _SYNTHETIC_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_SYNTHETIC = module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_SYNTHETIC)
+
+soft_disc_support = _SYNTHETIC.soft_disc_support
+uniform_magnetization = _SYNTHETIC.uniform_magnetization
+vortex_magnetization = _SYNTHETIC.vortex_magnetization
+domain_wall_magnetization = _SYNTHETIC.domain_wall_magnetization
+
+
+def test_soft_disc_support_shape_dtype_and_profile():
+    support = soft_disc_support((3, 9, 9), radius=3.0, edge_width=0.8)
+
+    assert support.shape == (3, 9, 9)
+    assert support.dtype == np.float32
+    assert np.all(np.isfinite(np.asarray(support)))
+    assert np.all(np.asarray(support) >= 0.0)
+    assert np.all(np.asarray(support) <= 1.0)
+    assert np.asarray(support[0, 4, 4]) > np.asarray(support[0, 0, 0])
+
+
+def test_uniform_magnetization_shape_and_direction():
+    support = soft_disc_support((2, 7, 7), radius=2.5, edge_width=0.5)
+    mag = uniform_magnetization(
+        (2, 7, 7),
+        support_zyx=support,
+        direction_xyz=(0.0, 1.0, 0.0),
+        magnitude=2.0,
+    )
+
+    assert mag.shape == (2, 7, 7, 3)
+    assert np.all(np.isfinite(np.asarray(mag)))
+    assert np.allclose(np.asarray(mag[..., 0]), 0.0, atol=1e-7)
+    assert np.allclose(np.asarray(mag[..., 2]), 0.0, atol=1e-7)
+    assert np.all(np.asarray(mag[..., 1]) >= 0.0)
+
+
+def test_vortex_magnetization_curling_and_core():
+    mag = vortex_magnetization((1, 11, 11), core_radius=1.2)
+
+    assert mag.shape == (1, 11, 11, 3)
+    assert np.all(np.isfinite(np.asarray(mag)))
+
+    center_mz = float(np.asarray(mag[0, 5, 5, 2]))
+    edge_mz = float(np.asarray(mag[0, 5, 9, 2]))
+    assert center_mz > edge_mz
+
+    # For a vortex, in-plane magnetization is tangential: m · r_hat ~ 0.
+    my = float(np.asarray(mag[0, 5, 8, 1]))
+    mx = float(np.asarray(mag[0, 5, 8, 0]))
+    assert abs(mx) < 0.15
+    assert my > 0.1
+
+
+def test_domain_wall_magnetization_transition():
+    mag = domain_wall_magnetization((2, 5, 13), wall_width=1.5)
+
+    assert mag.shape == (2, 5, 13, 3)
+    assert np.all(np.isfinite(np.asarray(mag)))
+    assert np.allclose(np.asarray(mag[..., 1]), 0.0, atol=1e-7)
+
+    mx_line = np.asarray(mag[0, 0, :, 0])
+    mz_line = np.asarray(mag[0, 0, :, 2])
+    assert mx_line[0] < -0.9
+    assert mx_line[-1] > 0.9
+    assert mz_line[6] > mz_line[0]
