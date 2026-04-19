@@ -12,7 +12,8 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 
-_EPS = 1e-12
+# Small positive guard to avoid divide-by-zero at the vortex center.
+_DISTANCE_EPSILON = 1e-12
 
 
 def _as_center_yx(shape_zyx: tuple[int, int, int], center_yx: tuple[float, float] | None) -> tuple[float, float]:
@@ -97,7 +98,7 @@ def vortex_magnetization(
     dy = yy - cy
     dx = xx - cx
     r = jnp.hypot(dy, dx)
-    rinv = 1.0 / jnp.maximum(r, _EPS)
+    rinv = 1.0 / jnp.maximum(r, _DISTANCE_EPSILON)
 
     tangent_x = -chirality * dy * rinv
     tangent_y = chirality * dx * rinv

@@ -1,24 +1,14 @@
 import numpy as np
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
-_SYNTHETIC_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "src"
-    / "libertem_holo"
-    / "base"
-    / "mbir"
-    / "synthetic.py"
+from libertem_holo.base.mbir.synthetic import (
+    domain_wall_magnetization,
+    soft_disc_support,
+    uniform_magnetization,
+    vortex_magnetization,
 )
-_SPEC = spec_from_file_location("libertem_holo.base.mbir.synthetic", _SYNTHETIC_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-_SYNTHETIC = module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_SYNTHETIC)
 
-soft_disc_support = _SYNTHETIC.soft_disc_support
-uniform_magnetization = _SYNTHETIC.uniform_magnetization
-vortex_magnetization = _SYNTHETIC.vortex_magnetization
-domain_wall_magnetization = _SYNTHETIC.domain_wall_magnetization
+MAX_RADIAL_COMPONENT = 0.15
+MIN_TANGENTIAL_COMPONENT = 0.1
 
 
 def test_soft_disc_support_shape_dtype_and_profile():
@@ -61,8 +51,8 @@ def test_vortex_magnetization_curling_and_core():
     # For a vortex, in-plane magnetization is tangential: m · r_hat ~ 0.
     my = float(np.asarray(mag[0, 5, 8, 1]))
     mx = float(np.asarray(mag[0, 5, 8, 0]))
-    assert abs(mx) < 0.15
-    assert my > 0.1
+    assert abs(mx) < MAX_RADIAL_COMPONENT
+    assert my > MIN_TANGENTIAL_COMPONENT
 
 
 def test_domain_wall_magnetization_transition():
