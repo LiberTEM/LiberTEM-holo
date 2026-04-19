@@ -1,0 +1,635 @@
+# Plan: Differentiable Phase-Image Inversion
+**v3.3 — 2026-04-19**
+
+> Scope: medium-term synthetic research program. The unit of delivery is **evidence on identifiability and on whether a physics prior helps**, not a finished reconstruction tool. Real-data and unknown-shape work come later and are explicitly outside this scope.
+
+## The scientific question
+
+MBIR already solves the easiest part of the problem: from one phase image, recover the **projected in-plane magnetization**.
+
+The hard part is everything the image does **not** determine by itself:
+- how magnetization varies through the sample thickness
+- the out-of-plane component $M_z$
+- shape versus magnetization-amplitude tradeoffs
+- material parameters such as $(A_\text{ex}, M_s, K_u)$, where $A_\text{ex}$ is the exchange stiffness (how strongly neighboring spins want to align), $M_s$ is the saturation magnetization (the overall magnetic strength of the material), and $K_u$ is the uniaxial anisotropy constant (how strongly the material prefers one direction)
+
+In plain terms: **different 3D objects can produce the same 2D phase image**. The data alone cannot choose between them.
+
+A differentiable micromagnetic solver (NeuralMag) gives two possible benefits:
+
+$$\theta \;\xrightarrow{\text{define}}\; E[\mathbf{m}] \;\xrightarrow{\text{LLG / relax}}\; \mathbf{m}^*(\theta) \;\xrightarrow{\text{RDFC}}\; \varphi(\theta)$$
+
+1. It can act as a **physics regularizer** when we still invert for magnetization directly.
+2. It may let us invert for **material parameters** instead of magnetization, which is a much smaller search space.
+
+This is a hypothesis-testing plan. The deliverable is evidence for three questions:
+1. Does a physics prior improve reconstruction beyond smoothness?
+2. Can a small set of material parameters be constrained from phase data at all?
+3. Do 2–3 small tilts help enough to justify the extra complexity?
+
+### The inversion hierarchy
+
+Micromagnetics has a causal chain. MBIR inverts only the last arrow. This plan tests inverting further left.
+
+| Level | What you invert for | Free variables | Forward model | NeuralMag role |
+|---|---|---|---|---|
+| **L1** | Magnetization $m$ | $m(z,y,x,3)$ — ~$10^5$ DOF | $m \to \text{RDFC} \to \varphi$ | Not used (MBIR baseline) |
+| **L2** | Magnetization + physics critic | same $m$ | same, + $E[m]$ penalty | Evaluates energy, doesn't generate $m$ |
+| **L3** | Material parameters | $\theta = (A_\text{ex}, M_s, K_u)$ — 3 scalars | $\theta \to E[m] \to \text{LLG relax} \to m^*(\theta) \to \text{RDFC} \to \varphi$ | **Essential** — IS the forward model |
+| **L4** | Spatially-varying material | $\theta(x,y,z)$ — field | same but spatially resolved | **Essential** |
+
+L1 and L2 use NeuralMag as an **optional plug-in**. L3 and L4 use NeuralMag as **the forward model** — it is irreplaceable because you literally cannot compute $\varphi(\theta)$ without a differentiable micromagnetic solver.
+
+### Information budget: why L3 is worth testing
+
+A single $N \times N$ phase image contains about $2N^2$ numbers. A free 3D magnetization field contains about $3N^3$ unknowns. So direct 3D inversion is heavily underdetermined.
+
+| Level | Unknowns | Measurements ($N=64$) | What this means |
+|---|---|---|---|
+| L1/L2: free $m(z,y,x,3)$ | very many | about 8k | data alone is not enough |
+| L3: uniform $\theta$ | very few | about 8k | worth testing, but not guaranteed identifiable |
+| L4: spatial $\theta(x,y,z)$ | very many | about 8k | needs extra data or strong priors |
+
+So L3 is attractive not because success is guaranteed, but because it is a **small inverse problem**. If it fails, that is still useful: it tells us which parameters are not identifiable from one view.
+
+For L1/L2, 2–3 small tilts ($\pm 5$–$10°$) are the cheapest way to add real 3D information. They will not solve the whole problem, but they may reduce the most obvious thickness ambiguities.
+
+### Variables at each level
+- **L1/L2**: $m(z, y, x, 3)$, optionally $\rho(z,y,x) \in [0,1]$ (shape), nuisance $\eta$
+- **L3**: $\theta = (A_\text{ex}, M_s, K_u)$ — 3 scalars, known shape, known init
+- **L4**: $\theta(z,y,x)$ — spatially varying material, known shape
+
+### Shape hierarchy (orthogonal to inversion level)
+1. **Fixed shape, free magnetization/material** — proves inversion works in isolation
+2. **Parametric shape** — low-dim (disc radius, thickness, taper)
+3. **Density-field shape** — continuous $\rho$, bridge to FEM
+
+### Ablation axis (the thing we are testing)
+| Prior | Notation | What it is |
+|---|---|---|
+| None | — | Data fidelity only |
+| Smoothness | Tikhonov | 2D/3D exchange-like finite-difference penalty |
+| Micromagnetic critic | NeuralMag-L2 | Exchange + demag energy as penalty via `state.resolve()` |
+| Full forward model | NeuralMag-L3 | LLG relax as forward model; free variable is $\theta$ not $m$ |
+
+L1 vs L2 answers "does a physics prior help?" L2 vs L3 answers "is inverting for material parameters better than inverting for magnetization?"
+
+---
+
+## Scope constraints (v1)
+- **Isotropic voxels**: `dx = dy = dz`
+- **Phase-only**: use `φ_true` from the forward model directly, no hologram round-trip
+- **Single projection axis by default**: z only
+- **Optional small-tilt study**: 2–3 tilts at $\pm 5$–$10°$ as a separate experiment, not a core dependency
+- **Mesh-resolution phase**: phase image on same grid as magnetization
+- **Mutual support**: $m = 0$ wherever $\rho = 0$ (vacuum has no magnetization)
+
+---
+
+## Architecture: two modes of using NeuralMag
+
+There are two fundamentally different ways to integrate a micromagnetic solver:
+
+### Mode 1: Physics critic (L2) — NeuralMag evaluates energy on a free magnetization
+
+```
+Free variable: m(z,y,x,3)
+
+(shape ρ, magnetization m)  →  [observation operator]  →  predicted phase φ
+                            →  [physics backend]       →  energy penalty E[m]
+
+Loss = ‖φ_pred − φ_meas‖² + λ·E[m]
+```
+
+NeuralMag is **optional** here. It adds a penalty term but the pipeline runs without it.
+
+### Mode 2: Full forward model (L3) — NeuralMag IS the forward model
+
+```
+Free variable: θ = (A_ex, Ms, Ku)  — 3 scalars
+
+θ  →  [NeuralMag: define E(θ)]  →  [LLG relax]  →  m*(θ)  →  [RDFC]  →  φ(θ)
+
+Loss = ‖φ(θ) − φ_meas‖²
+```
+
+NeuralMag is **essential** here. There is no alternative forward model. The free variable is the material, not the magnetization. $m^*$ is an intermediate output, fully determined by $\theta$ (up to metastable states).
+
+### Why Mode 2 is attractive
+
+- **Low-dimensional**: 3 scalar parameters for a uniform material is a much smaller search space than a full 3D magnetization field.
+- **Self-consistent**: the predicted $m^*$ is a physical equilibrium of the chosen model.
+- **Different scientific question**: the output is not just "what does the magnetization look like?" but potentially "which material parameters are consistent with the data?"
+- **But not guaranteed**: a small parameter space can still be non-identifiable from one image. That is something this plan must test, not assume.
+
+### Backend interface (supports both modes)
+
+```python
+# src/libertem_holo/base/mbir/inversion/backends.py
+class PhysicsBackend(Protocol):
+    def prepare(self, rho: Array, m: Array) -> FieldState: ...
+    def energies(self, field: FieldState) -> dict[str, Array]: ...  # empty dict = no prior
+
+class IdentityBackend:     # L1: no physics, just passes m through
+class SmoothnessBackend:   # L1+: Tikhonov-style finite-difference energy in 3D
+class NeuralMagCritic:     # L2: wraps state.resolve() for energy evaluation
+class NeuralMagForward:    # L3: wraps LLG relax, free variable is θ not m
+```
+
+L1/L2 backends are interchangeable. L3 changes the optimization variable itself.
+
+### Verified NeuralMag inputs
+
+This section is based on the actual NeuralMag source and demos in `vendor/neuralmag/`.
+
+**Structural inputs**
+- `mesh = nm.Mesh(n=(nx, ny, nz), dx=(dx, dy, dz))`
+- `state = nm.State(mesh)`
+- geometry via `state.add_domain(...)` and `state.rho`
+- initial magnetization via `state.m`
+
+**Material inputs used in the forward model**
+
+| Parameter | Plain-language meaning | Units | Where NeuralMag uses it |
+|---|---|---|---|
+| `Ms` | saturation magnetization: how large the magnetization is when the material is fully magnetized; this mostly sets the overall magnetic field strength and therefore strongly affects phase amplitude | A/m | required by demag, anisotropy, external field, and field normalization |
+| `A` / `A_ex` | exchange stiffness: how strongly neighboring spins prefer to align with each other; larger `A` favors smoother magnetization textures and makes sharp twists more expensive | J/m | `ExchangeField()` |
+| `Ku` | uniaxial anisotropy constant: how strongly the material prefers to point along one special direction | J/m³ | `UniaxialAnisotropyField()` |
+| `Ku_axis` | easy axis: the preferred direction associated with `Ku` | unit vector | `UniaxialAnisotropyField()` |
+| `Db`, `Di` | DMI constants: how strongly the material prefers chiral twists or spiral/skyrmion-like rotation patterns | J/m² | optional DMI terms |
+| `alpha` | Gilbert damping: how quickly the dynamics lose energy and settle down during relaxation; it changes the path to equilibrium more than the final static state | dimensionless | LLG dynamics only |
+| `h_ext` | external magnetic field applied from outside the sample | A/m | `ExternalField(h_ext)` |
+
+**How to read the main L3 variables**
+- `Ms`: sets the overall magnetic scale
+- `A_ex`: sets how costly spatial variation in magnetization is
+- `Ku`: sets how strongly the material prefers one axis
+- `Ku_axis`: says which axis that is
+
+So when the plan writes `θ = (A_ex, Ms, Ku)`, it means: "fit smoothness/stiffness of the magnetic texture, total magnetic strength, and anisotropy strength of the material."
+
+**What the forward model actually is**
+1. Set mesh, geometry, material parameters, and initial `m`
+2. Register field terms such as `ExchangeField`, `DemagField`, `UniaxialAnisotropyField`, `ExternalField`
+3. Build `LLGSolver(state)`
+4. Run `llg.relax()` to get an equilibrium state, or `llg.solve(t, *args)` for a fixed-time differentiable solve
+5. Pass the resulting `state.m` to the holography forward model
+
+**Important limitation**
+- `llg.relax()` is the natural equilibrium path, but it uses a convergence loop
+- `llg.solve(t, *args)` is the better candidate for differentiable optimization
+- Therefore, L3 gradient-based inversion is a stretch goal until the fixed-time solve is validated for this use case
+
+---
+
+## Phase 0: Environment
+*5 minutes — do first*
+
+```bash
+pip install "neuralmag[jax]" diffrax optax equinox
+```
+
+Verify `import neuralmag, diffrax, optax, equinox; jax.devices()` works.
+
+---
+
+## Phase 1: Forward pipeline (structured grid, no physics backend)
+*Depends on: Phase 0*
+
+Establish the forward direction without any physics prior. Just coordinate conventions, projection, and RDFC.
+
+### Deliverables
+
+**1a. Shape model**
+```python
+def disc_shape(shape_xyz, radius_nm, thickness_nm, pixel_size_nm) -> Array  # (Z,Y,X) in [0,1]
+```
+Soft sigmoid disc — differentiable so shape parameters can be inferred later. `shape_xyz = (Nz, Ny, Nx)` in LiberTEM ordering.
+
+**1b. Analytic magnetization models**
+```python
+def vortex_field(shape_xyz, chirality=+1) -> Array  # (Z,Y,X,3)
+def uniform_field(shape_xyz, direction) -> Array
+def domain_wall_field(shape_xyz, axis="x") -> Array
+```
+No LLG needed — these are closed-form initial test cases.
+
+**1c. Forward operator**
+```python
+def forward_phase(rho, m, pixel_size, axis="z") -> Array:  # (Y,X) raw array, no Quantity
+    m_eff = rho[..., None] * m
+    return forward_model_3d(m_eff, pixel_size, axis=axis).value
+```
+Key point: `m_eff = ρ * m`. Shape and magnetization **multiply** in the forward model. This is the coupling that makes joint inversion possible (and confounded).
+
+**1d. Sanity checks**
+- Uniform out-of-plane `m`: `φ ≈ 0`
+- Vortex disc: antisymmetric pattern
+- Gradient check: `jax.grad(|forward_phase|²)(rho, m)` returns finite arrays of correct shape, **and** passes a finite-difference comparison at a single representative point (catches sign errors that shape/finiteness checks miss).
+
+### Why do this before touching NeuralMag
+These tests establish the RDFC operator is differentiable end-to-end and the shape/magnetization coupling behaves as expected. If anything breaks later, it is not the forward model.
+
+---
+
+## Phase 2: NeuralMag as ground-truth generator (optional path)
+*Depends on: Phase 1*
+
+### Role in the plan
+NeuralMag is one way to get a realistic magnetization field. It is **not the only way**. For v1 the analytic `vortex_field` from Phase 1b is sufficient. NeuralMag becomes useful when we need:
+- Equilibrium states we could not write by hand (e.g. relaxed domain walls, multi-vortex)
+- Comparison to literature micromagnetic benchmarks (standard problems)
+- The ablation study in Phase 5
+
+### Deliverables
+
+**2a. Adapter** (`src/libertem_holo/base/mbir/neuralmag_adapter.py`)
+- `neuralmag_to_mbir(state) → (rho_3d, m_3d, pixel_size_nm)`
+  - Returns **both** `ρ` (from `state.rho`) and `m` separately — matches our joint shape+magnetization formulation
+  - 8-point nodal→cell averaging
+  - `(X,Y,Z)` → `(Z,Y,X)` transpose
+  - Assert isotropic `dx = dy = dz`
+- `mbir_to_neuralmag(rho_3d, m_3d, mesh) → VectorFunction` — reverse direction for round-trip tests
+
+**2b. NeuralMag-as-backend**
+```python
+class NeuralMagBackend:
+    def __init__(self, state, term_names=("exchange", "demag")):
+        # Call state.resolve() ONCE, outside any jit boundary
+        self._fns = {n: state.resolve(f"E_{n}", ["m"]) for n in term_names}
+
+    def energies(self, rho, m):
+        m_xyz = jnp.transpose(rho[..., None] * m, (2, 1, 0, 3))
+        return {n: fn(m_xyz) for n, fn in self._fns.items()}
+```
+
+**2c. Vortex disc ground truth**
+- Permalloy disc: `Ms = 8e5`, `A = 1.3e-11`, `Ku = 0`
+- Mesh `(64, 64, 64)` @ `dx = 5e-9 m`
+- Soft-disc ρ via `state.rho` (use `state.eps` not 0 — NeuralMag forbids zero density)
+- Vortex ansatz init → `LLGSolver.relax()` → `m_true`
+- Adapter → `(rho_true, m_true)` → `forward_phase` → `φ_true`
+
+**2d. Verification**
+- Adapter round-trip RMSE < 1e-6
+- `E_exchange(m_true)` returns finite positive scalar
+- `φ_true` for vortex matches analytic expectation qualitatively
+- **Compare `φ_true` from NeuralMag-relaxed vs. analytic vortex**: how different are they in phase space? This tells us how much the "real" equilibrium deviates from the ansatz, which sets the bar for how much a physics prior could help.
+
+---
+
+## Phase 3: Regime A — Fixed shape, invert magnetization
+*Depends on: Phase 2 (for ground truth)*
+
+Shape is known. Only `m` is free. This is the **existing 2D MBIR problem lifted to 3D** — and the lifting is the whole point, because it exposes what MBIR structurally cannot resolve from a single projection.
+
+### What one phase image can and cannot tell us
+
+The RDFC forward model is a **line integral along z** of the in-plane magnetization. So one phase image directly constrains only a small part of the full 3D problem:
+
+| Observable | Status |
+|---|---|
+| $\int M_x\, dz$, $\int M_y\, dz$ | directly observed |
+| $M_z(z, y, x)$ | **exactly unobservable** from one image |
+| Depth distribution of $M_x(z, \cdot)$ and $M_y(z, \cdot)$ at fixed $(y,x)$ | **unobservable** — only the integral is constrained |
+| $\rho(z, y, x) \cdot m$ vs $\rho' \cdot m'$ with same projection | **unresolvable** — multiplicative confound |
+
+A smoothness prior can prefer one solution over another, but it does not add new measurements. A physics prior may help by rejecting obviously unphysical 3D states.
+
+Phase 3 is therefore a modest question: does micromagnetic physics help pick better 3D solutions than smoothness alone?
+
+### Setup
+- Known `rho_true` (from Phase 2)
+- Known `φ_true` (from Phase 2)
+- Free variable: `m ∈ R^(Z,Y,X,3)` with **hard** projection to unit sphere inside `ρ > 0.5` applied inside the inner loop on every step (not as a post-hoc cleanup). Without this, A.2 will shrink $|m|$ to cheat the energy penalty and look worse than A.1 for reasons unrelated to physics.
+
+### Three reconstructions to compare
+| Label | Prior | Implementation |
+|---|---|---|
+| A.0 | None | Data fidelity only |
+| A.1 | Smoothness | `SmoothnessBackend` — 3D finite-difference exchange |
+| A.2 | Micromagnetic | `NeuralMagBackend` — exchange + demag |
+
+For each: optax loop, `max_iter = 500`, same init (zero magnetization). Record loss history and final `m_recon`.
+
+### Metrics — split into directly observed vs. not directly observed
+
+**Observable (MBIR is expected to do well on all priors):**
+- `M_proj` error: `‖∫ m_recon dz − ∫ m_true dz‖ / ‖∫ m_true dz‖` for in-plane components only
+- Phase residual: `‖forward_phase(rho_true, m_recon) − φ_true‖ / ‖φ_true‖`
+- Convergence speed (iters to fixed data-loss threshold)
+
+**Not directly observed (this is where NeuralMag must prove itself):**
+- **Out-of-plane recovery**: per-voxel error in $M_z$: `‖m_recon[..., 2] − m_true[..., 2]‖_\text{RMSE}`
+- **Depth localization**: for a fixed $(y, x)$ inside the disc, correlation between $M_x(z)$ profiles of recon and truth. Baseline is the trivial "smeared uniformly along z" solution, which has zero depth information. Report relative improvement over that baseline.
+- **Vortex-core z-position**: if the test state has a vortex, locate the core $\operatorname{argmax}_z M_z(z, y_c, x_c)$ and report error. MBIR-only should be flat; physics should localize.
+- **Equilibrium consistency**: residual of $\mathbf{m} \times \mathbf{H}_\text{eff}(m_\text{recon}) = 0$. This must be evaluated using **different** energy terms than those used in the A.2 penalty (e.g. include anisotropy or DMI, or use a stricter tolerance) — otherwise A.2 scores trivially well because it was optimizing exactly this quantity.
+
+**Shape-amplitude confound (separate diagnostic):**
+- Scale `rho_true` by 1.5, rerun each prior with the same `φ_true`. Does A.2 implicitly correct by rescaling `|m|`? Does A.0/A.1 absorb the error into a biased `m`? Report `⟨|m_recon|⟩` vs the expected unit norm.
+
+### Interpreting the outcomes
+
+| Pattern | Conclusion |
+|---|---|
+| A.0 ≈ A.1 ≈ A.2 on **observable** metrics | Expected — MBIR works in its projected subspace regardless of prior |
+| A.1 ≈ A.2 on **3D ambiguity** metrics | **Smoothness is enough; NeuralMag is overkill** |
+| A.2 >> A.1 on **3D ambiguity** metrics | **NeuralMag is necessary** — it improves parts of the 3D problem that one image does not fix |
+| Only A.2 breaks the shape-amplitude confound | **NeuralMag's $\|m\|=1$ constraint is doing real work** |
+| A.2 ≈ A.0 everywhere | Something is wrong — physics term not wired in / λ mis-tuned |
+
+The not-directly-observed metrics are the main test. If we only report projected in-plane error, all methods may look similar.
+
+---
+
+## Phase 3b: Material parameter inversion (L3)
+*Depends on: Phase 2 (ground truth) + Phase 3 (baseline comparison)*
+
+This is the ambitious branch. Instead of inverting for a full 3D magnetization field, invert for **a few material scalars** and let the micromagnetic model predict the equilibrium state.
+
+### Concept
+
+```
+Free: θ = (A_ex, M_s, K_u)                    # 3 scalars
+Fixed: shape ρ_true, mesh, initial m-ansatz
+
+Forward(θ):
+  1. Build NeuralMag state with material constants θ
+  2. LLG relax from vortex ansatz → m*(θ)       # NeuralMag does the physics
+  3. Adapter: m*(θ) → LiberTEM ordering
+  4. RDFC: forward_phase(ρ_true, m*(θ)) → φ(θ)  # LiberTEM-holo does the observation
+
+Loss = ‖φ(θ) − φ_meas‖²
+
+First target: evaluate this loss by grid search.
+Stretch target: differentiate through a fixed-time solve and use gradients.
+```
+
+### Why this is different from Phase 3
+
+| | Phase 3 (L2) | Phase 3b (L3) |
+|---|---|---|
+| Free variable | $m(z,y,x,3)$ — ~$10^5$ values | $\theta = (A_\text{ex}, M_s, K_u)$ — 3 values |
+| 3D ambiguity | Large; physics prior **regularizes** it | Reduced by the small parameterization, but not guaranteed removed |
+| Output | "what does the magnetization look like?" | "what material is this?" |
+| NeuralMag role | Optional energy critic | **Essential** forward model |
+| Equilibrium guarantee | Only if physics prior is strong enough | Yes, for the chosen model and initialization |
+| Computational cost per step | One RDFC call | One LLG relaxation + one RDFC call |
+
+### Setup
+- Ground truth: a permalloy-like disc from Phase 2, but with **nonzero $K_u$** (e.g. a small hard-axis $K_u \sim 10^4$ J/m$^3$ along $\hat{y}$, or switch to a Co-like parameter set). Using $K_u = 0$ as ground truth would make $K_u$-axis identifiability a tautology.
+- Known shape $\rho_\text{true}$, known mesh. The NeuralMag state used for inversion **must use the same `dx = dy = dz` as the ground truth** — otherwise $A_\text{ex}$ recovery is biased by the discretization.
+- Known $\varphi_\text{true}$ from Phase 2
+- Initial guess: start with $\pm 20\%$ perturbations of each parameter; only escalate to larger perturbations ($2\times$, $0.5\times$) once the small-perturbation case works. Large perturbations are likely to relax into a different magnetic state class (vortex → C-state → single-domain), producing loss-landscape cliffs rather than smooth valleys.
+
+### Optimization approaches (in order of simplicity)
+
+**3b-i. Grid search (first priority)**
+- Sweep $A_\text{ex} \in [0.5, 3] \times 10^{-11}$, $M_s \in [4, 12] \times 10^5$, $K_u \in [0, 5] \times 10^4$
+- Start with a **$32^3$ mesh and a coarse $\sim 5^3 = 125$-point grid** pilot to measure wall-clock cost per LLG relax and to find the rough landscape shape. Only scale to $64^3$ and $\sim 10^3$ grid points once the pilot confirms the cost is tolerable.
+- Each grid point needs one LLG relax + one RDFC. At $64^3$ a single relax is typically seconds-to-minutes on GPU; $10^3$ points is therefore hours, not minutes. Treat this as the dominant compute budget of the program.
+- Plot loss landscape: $L(\theta)$ over each pair of parameters
+- Check: is the minimum unique? Or do several parameter combinations fit equally well?
+- **Metastability budget**: relax from at least 2 initial states per $\theta$ (e.g. vortex ansatz + uniform in-plane) and report the min-loss branch. Extreme $\theta$ will often switch state class, and a single-init sweep will show discontinuous cliffs that are artifacts of branch changes, not of identifiability.
+
+**3b-ii. Gradient-based solve (deferred)**
+- **Not part of the near-term program.** Prerequisite: a standalone diffrax-through-LLG toy problem (few voxels, short fixed-time solve) demonstrating stable, finite gradients end-to-end. Only once that works does gradient-based L3 become a realistic option.
+- Expected failure modes when attempted: gradients through long stiff LLG relaxations can vanish, explode, or be dominated by numerical noise near equilibrium; reverse-mode memory through many diffrax steps is non-trivial at $64^3$.
+- If it eventually works: optax adam or L-BFGS with 3 scalar parameters.
+
+**3b-iii. Bayesian optimization (fallback)**
+- If gradients through LLG are unreliable, use gradient-free BO
+- 3 parameters — well within BO's sweet spot
+- Gives uncertainty estimates on recovered $\theta$
+
+### Metrics
+
+- **Parameter recovery**: $|\theta_\text{recon} - \theta_\text{true}| / \theta_\text{true}$ for each of $A_\text{ex}, M_s, K_u$
+- **Phase residual**: $\|\varphi(\theta_\text{recon}) - \varphi_\text{true}\| / \|\varphi_\text{true}\|$
+- **Magnetization quality**: compare $m^*(\theta_\text{recon})$ to $m^*(\theta_\text{true})$ using the same 3D-ambiguity metrics as Phase 3 (especially $M_z$, depth, equilibrium consistency). Here these metrics come from the physics model, not from fitting a free 3D magnetization field.
+- **Identifiability**: Hessian $\nabla^2_\theta L$ at the minimum or simpler loss-landscape slices. If a direction is very flat, the data does not constrain that parameter combination well.
+- **Loss landscape**: 2D slices through $(A_\text{ex}, M_s)$, $(A_\text{ex}, K_u)$, $(M_s, K_u)$ — look for valleys, ridges, and local minima.
+
+### Interpreting the outcomes
+
+**Realistic expected outcome (stated up front so results are not oversold):**
+- $M_s$ is likely identifiable — it scales $\varphi$ globally. In a fixed-shape, $|m|=1$ synthetic setting this is partly an artifact of having broken the shape-amplitude confound by construction.
+- $A_\text{ex}$ is likely **weakly** identifiable via domain-wall width and vortex-core size, producing an elongated valley in the loss landscape.
+- $K_u$ is likely **near-flat** along at least one direction for a single phase image, particularly the magnitude when the easy axis is already approximately aligned with the ground-truth texture.
+- The flatness of the landscape is itself the result. A "success" is either tight recovery of all three, or a clear identifiability map showing which combinations the data does and does not constrain.
+
+| Pattern | Conclusion |
+|---|---|
+| $\theta_\text{recon} \approx \theta_\text{true}$ within 5% on all three | Strong evidence that these parameters are identifiable in this synthetic setting |
+| $M_s$ recoverable, $A_\text{ex}$ and $K_u$ degenerate | Expected. Phase directly constrains amplitude; texture details need more data (multi-tilt, field series) |
+| Unique minimum in loss landscape | Good sign for identifiability in this setup |
+| Elongated valley along $(A_\text{ex}, K_u)$ | Expected; quantifies a known identifiability limit |
+| Multiple local minima (e.g. vortex vs single-domain) | **Metastable states** are a real confound — need initialization control or marginalization |
+| Discontinuous cliffs in the landscape | Likely branch switches, not true non-identifiability. Cross-check with the 2-init metastability sweep before interpreting. |
+| Gradient through LLG fails (NaN / vanishes) | Expected if attempted before 3b-ii prerequisites are met; stay in grid search / BO |
+
+### The metastable-state problem
+
+Same $\theta$ can produce different equilibria depending on initial conditions (e.g. vortex vs. flower state). Two approaches:
+1. **Fix initialization**: always start LLG from vortex ansatz. Valid if the experimental sample is also in a vortex state. Breaks if you don't know the magnetic state class a priori.
+2. **Marginalize**: for each $\theta$, relax from $N$ initial conditions, pick the one with lowest loss. Expensive but robust. $N = 4-8$ covers the main states for a disc.
+
+### Why L3 matters
+
+MBIR gives you a magnetic state estimate. L3 asks a different question: can phase data constrain the **material parameters** behind that state? Even a partial answer is useful.
+
+### Stretch: spatially-varying material (L4)
+
+If L3 works for uniform $\theta$, the next step is $\theta(x,y,z)$ — e.g. a disc where the outer ring has oxidized ($A_\text{ex}$ reduced). Parameterize as piecewise-constant over 2-3 regions, or as a low-rank field. This maps composition gradients from phase images and is the long-term scientific goal.
+
+---
+
+## Phase 4: Regime B — Parametric shape + magnetization
+*Depends on: Phase 3 working*
+
+Shape is now low-dimensional, magnetization is free.
+
+Use a simple disc parameterization:
+- center `(cx, cy)`
+- radius `r`
+- thickness via `(z_min, z_max)`
+- smooth edge width `sigma`
+
+Experiments:
+- B.0: recover shape with `m` fixed
+- B.1: recover `m` with slightly wrong shape
+- B.2: joint shape + `m` with no prior, smoothness, and micromagnetic critic
+
+Metrics:
+- shape error (`radius`, IoU)
+- magnetization metrics from Phase 3
+- shape-versus-magnetization tradeoff
+
+Expected outcome: phase alone probably does not separate shape from magnetization well.
+
+---
+
+## Phase 4b: Small multi-tilt exploration
+*Depends on: Phase 3 or Phase 4*
+
+A single phase image is a 2D shadow. No amount of physics can fully replace missing viewing angles. This phase asks a narrower question: do **2–3 small tilts** help enough to justify adding them?
+
+### Why small tilts help
+
+Each tilt $\alpha_k$ produces a phase image that is a line integral of $\rho \cdot m$ along a **different projection axis**. Even at $\pm 10°$, the projections sample different depth-weighted combinations of $M_x, M_y$, and gain weak sensitivity to $M_z$ (which rotates into the new in-plane axis with weight $\sin\alpha \approx 0.17$ at $10°$).
+
+That same $\sin\alpha$ factor is an **SNR penalty**: $M_z$ contributes only $\sim 17\%$ of what an in-plane component would at $10°$. For synthetic data this is fine; for real data it means $M_z$ recovery needs either more counts per tilt or several tilts averaged. Do not oversell this for experimental work.
+
+| Tilts | In-plane depth info | $M_z$ sensitivity | Shape-amplitude separation |
+|---|---|---|---|
+| 1 (z only) | None | Zero | None |
+| 2 ($0°, +10°$) | Weak — two baselines | $\sim 17\%$ of in-plane | Partial |
+| 3 ($-10°, 0°, +10°$) | Moderate — triangulation | $\sim 17\%$ per tilt | Improved |
+
+### Multi-tilt forward model
+
+```python
+def multi_tilt_loss(rho, m, phi_meas_list, tilt_angles, pixel_size):
+    loss = 0.0
+    for phi_meas, alpha in zip(phi_meas_list, tilt_angles):
+        phi_pred = forward_phase(rho, m, pixel_size, tilt=alpha)
+        loss += jnp.sum((phi_pred - phi_meas)**2)
+    return loss
+```
+
+This section requires a **tilt-aware, differentiable forward model**, which does not currently exist. Implementing it means either resampling the volume onto rotated slabs, or rotating the line-of-sight through the fixed volume; either way the interpolation has to be differentiable. Budget this as Phase-1-scale work, not a one-liner. Phase 4b is therefore firmly optional and should not be started until Phase 3 / 3b-i have produced their main results.
+
+### Experiments
+
+**4b-0. Diagnostic: does a second tilt help at all?** (L1, no prior)
+- Single tilt: invert $m$ from $\varphi_0$ alone. Record the 3D-ambiguity metrics.
+- Add $\varphi_{+10°}$: re-invert. How much do $M_z$ and depth metrics improve?
+- Add $\varphi_{-10°}$: re-invert. Diminishing returns?
+
+**4b-1. Multi-tilt with fixed shape** (L2, physics critic)
+- Free variables: $m(z,y,x,3)$
+- Data: 2 or 3 tilted phase images
+- Compare: does multi-tilt reduce ambiguity in $M_z$ and depth structure?
+
+**4b-2. Multi-tilt with simple shape parameterization** (optional)
+- Free variables: a few disc-shape parameters plus either $m$ or $\theta$
+- Data: 3 tilted phase images
+- Goal: test whether tilts help enough to justify later work on unknown shape
+
+### What we learn
+- Whether a second or third tilt measurably improves the 3D ambiguity problem
+- Whether multi-tilt is worth pursuing before investing in a full tilt-aware reconstruction stack
+- Whether tilts matter more for L1/L2 than for L3
+
+---
+
+## Phase 5: Regime C — Density-field shape + magnetization (stretch)
+*Depends on: Phase 4 showing regime B works or fails informatively*
+
+This is the free-form shape branch.
+
+- parameterize `rho = sigmoid(rho_raw)`
+- regularize `rho` for smoothness / near-binary behavior
+- compare no prior, smoothness, and micromagnetic critic
+
+This is the most ill-posed part of the plan and is explicitly a stretch. It is mainly included as the bridge to future FEM or topology-optimization-style work.
+
+---
+
+## Phase 6: Warm-starts and initialization
+*Depends on: any regime*
+
+Independent of the regime hierarchy. Three sources of initialization:
+- Zero magnetization (current default)
+- Analytic ansatz (vortex, uniform, domain wall)
+- NeuralMag LLG relaxation from random init (the old "Connection 4")
+
+Compare convergence speed and final loss for each. Expected result: warm-start matters more in regimes B and C than in A.
+
+---
+
+## Phase 7: Experimental phase images
+*Future — after the synthetic program converges*
+
+Everything above is synthetic. Real microscope data adds these extra requirements:
+- phase calibration
+- pixel-size matching / resampling
+- geometry and tilt alignment
+- support estimation from electrostatic phase or other imaging
+- uncertainty weighting and nuisance parameters
+
+Electrostatic phase is not free: it requires magnetic/electrostatic separation by standard holography methods such as magnetization reversal or sample flip.
+
+---
+
+## Notebook structure (synthetic deliverable)
+
+`notebooks/MBIR/FEM-inversion/synthetic_inversion.ipynb`
+
+| Section | Cells | Phase |
+|---|---|---|
+| **Forward pipeline** | 1–4 | Phase 1 |
+| **NeuralMag integration** | 5–8 | Phase 2 |
+| **Regime A: fixed shape, invert m** | 9–12 | Phase 3 (L1/L2) |
+| **Material parameter inversion** | 13–16 | Phase 3b (L3) |
+| **Regime B: parametric shape (stub)** | 17–18 | Phase 4 |
+| **Multi-tilt exploration** | 19–21 | Phase 4b |
+
+Regime C and experimental data live in separate notebooks when we get there.
+
+---
+
+## Near-term focus
+
+This is a medium-term research program. Work in roughly this order:
+
+1. **Phase 1 + Phase 2**: forward pipeline and NeuralMag ground-truth generator. Low risk, blocks everything else.
+2. **Phase 3 (L1/L2)**: fixed-shape $m$ inversion with three priors. Produces the first real evidence on whether a physics prior adds anything over smoothness.
+3. **Phase 3b-i (L3 grid search)**: identifiability study for $\theta = (A_\text{ex}, M_s, K_u)$. Headline result of the program.
+4. **Phase 4b diagnostic (optional)**: do 2–3 small tilts help enough on the 3D-ambiguity metrics to justify a tilt-aware forward model?
+5. **Phase 3b-ii (L3 gradients)** and **Phase 4/5 (shape)**: later, conditional on earlier results.
+
+Everything from step 5 onward is conditional scope — do not treat it as required output.
+
+---
+
+## Decisions log
+
+| Decision | Rationale |
+|---|---|
+| **L3 gradient path (3b-ii) is deferred** | Gradients through stiff LLG relaxations are unreliable until a standalone diffrax-through-LLG toy is proven. Grid search + BO are the realistic L3 route near-term. |
+| **Metastability sweep with ≥ 2 inits per $\theta$** | Single-init grid sweeps will show cliffs that are branch switches, not identifiability structure. |
+| **Ground truth uses nonzero $K_u$** | $K_u = 0$ ground truth makes $K_u$ identifiability a tautology. |
+| **Hard unit-norm projection in A.2** | Soft energy penalty alone lets the optimizer shrink $|m|$ to cheat the energy term. |
+| **NeuralMag is plug-in (L2) or forward model (L3)** | Two modes: optional critic vs. essential forward model. L3 is the headline. |
+| **Material parameter inversion (L3) is high-value but high-risk** | Small search space and different scientific question, but identifiability is not assumed |
+| **Joint (ρ, m) formulation for L1/L2** | Matches "shape + magnetization" goal, matches `m_eff = ρ · m` in forward model |
+| **Three-shape hierarchy (fixed/parametric/density)** | Prevents ill-posed free-form shape inversion as v1 |
+| **Grid search before gradient descent for L3** | First prove the inverse problem is informative before relying on differentiable LLG |
+| **`PhysicsBackend` protocol** | Backend-neutral; FEM becomes a future backend |
+| **Smooth shape model** | Differentiable from day one — needed for gradient-based shape inversion |
+| **L3 is worth testing because it is low-dimensional** | Few unknowns makes it plausible, but not automatically identifiable |
+| **2–3 small tilts are an optional diagnostic** | They may reduce ambiguity, but they are not promised to recover full 3D shape |
+| **Isotropic voxels, phase-only** | Inherited from v2 — sound v1 scope |
+| **Analytic vortex before LLG vortex** | Isolate forward-model bugs from physics-solver bugs |
+
+---
+
+## Core questions for this plan
+
+1. **Does NeuralMag help as a physics regularizer?** Phase 3 compares no prior, smoothness, and micromagnetic energy on the same synthetic problem.
+2. **Can phase data constrain material parameters at all?** Phase 3b tests this first by grid search, then optionally with gradient-based optimization.
+3. **Which material parameters are actually visible to one image?** Phase 3b loss landscapes answer this. The likely case is that $M_s$ is easier to constrain than $A_\text{ex}$ or $K_u$.
+4. **Do 2–3 small tilts help enough to justify the extra work?** Phase 4b is a small diagnostic for this, not a full tomography plan.
+5. **Is unknown shape a near-term target or a later problem?** Phase 4 and Phase 5 decide this by testing simple parametric shape first and leaving free-form density shape as stretch scope.
+
+---
+
+## What this plan is not
+
+- A product plan for a phase-to-shape tool
+- A commitment to NeuralMag as the micromagnetic backend
+- A real-data pipeline
+- A full tomography plan
+
+It is a staged set of experiments designed to answer a narrower question over a medium-term horizon: where does micromagnetic physics genuinely add value beyond MBIR, and what extra data is needed when a single phase image is not enough?
