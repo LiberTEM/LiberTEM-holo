@@ -22,7 +22,7 @@ import unxt as u
 
 PHI_0 = u.Quantity(2067.83, "T nm2")  # magnetic flux quantum h/(2e)
 B_REF = u.Quantity(1.0, "T")  # reference magnetic induction
-KERNEL_COEFF = B_REF / (2 * PHI_0)  # Quantity["1/nm2"]
+KERNEL_COEFF = B_REF / (PHI_0 + PHI_0)  # Quantity["1/nm2"]
 
 MU_0 = u.Quantity(4e-7 * np.pi, "T m / A")  # vacuum permeability
 ELECTRON_INTERACTION_CONSTANT_300KV = u.Quantity(6.53e6, "rad / (V m)")
