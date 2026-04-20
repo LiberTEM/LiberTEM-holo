@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -9,6 +10,7 @@ import optax
 import unxt as u
 
 from ..forward import forward_phase_from_density_and_magnetization
+from ..synthetic import vortex_magnetization
 from .backends import PhysicsBackend
 
 
@@ -36,6 +38,14 @@ def _initial_m(rho: jnp.ndarray, init) -> jnp.ndarray:
             return jnp.broadcast_to(
                 jnp.asarray([1.0, 0.0, 0.0], dtype=rho.dtype),
                 shape,
+            )
+        if init == "analytic_vortex":
+            core_radius = max(1.5, rho.shape[0] / 32.0)
+            return vortex_magnetization(
+                tuple(int(v) for v in rho.shape),
+                support_zyx=rho,
+                core_radius=core_radius,
+                dtype=rho.dtype,
             )
         raise ValueError(f"Unknown init strategy {init!r}.")
 
@@ -84,7 +94,7 @@ def invert_magnetization(
     lambda_phys: float = 0.0,
     max_iter: int = 500,
     lr: float = 1e-2,
-    init="zero",
+    init: str | Any = "zero",
     axis: str = "z",
     projection_threshold: float = 0.5,
 ) -> InversionResult:

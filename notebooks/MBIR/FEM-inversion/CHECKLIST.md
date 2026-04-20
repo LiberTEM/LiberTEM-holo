@@ -20,7 +20,7 @@ Conventions:
 | 2.3 | Real NeuralMag energy validation | ✅ | Yes |
 | 2.4 | Cached ground-truth fixtures + loader API | ✅ | Yes |
 | 2.5 | Package cleanup + notebook CI | 🟡 | No |
-| 3 | Regime A: physics-coupled magnetization reconstruction ★ | ❌ | n/a |
+| 3 | Regime A: physics-coupled magnetization reconstruction ★ | 🟡 | n/a |
 | 3b | L3 material sensitivity study (secondary) | ❌ | n/a |
 
 ## Phase 3 Entry Gates
@@ -102,63 +102,63 @@ Implemented:
 - ✅ `E_exchange(m_true)` is exercised through the real resolved-energy path on a tiny NeuralMag state.
 - ✅ `φ_true(vortex)` qualitative check is shown in the validation notebook.
 - ✅ Report `‖φ_relaxed − φ_analytic‖ / ‖φ_analytic‖`; current notebook output is `~0.5493` for the cached `32^3` fixture.
-- [ ] Move `mbir_energy_backend.py` under `src/libertem_holo/base/mbir/` before Phase 3 starts so the package layout is coherent.
-- [ ] Export the moved backend from `src/libertem_holo/base/mbir/__init__.py`.
+- ✅ Move `mbir_energy_backend.py` under `src/libertem_holo/base/mbir/` before Phase 3 starts so the package layout is coherent.
+- ✅ Export the moved backend from `src/libertem_holo/base/mbir/__init__.py`.
 - [ ] Promote `phase1_phase2_validation.ipynb` to a headless CI smoke run via `jupyter nbconvert --execute` or equivalent.
 
 ---
 
-## Phase 3 — Regime A: physics-coupled magnetization reconstruction (L1/L2) ★ 🔴 NOT STARTED
+## Phase 3 — Regime A: physics-coupled magnetization reconstruction (L1/L2) ★ 🟡 PARTIAL
 
 This is the **headline experiment**. The question: does coupling all voxels through micromagnetic energy (exchange + demag) yield a measurably better 3D magnetization from a single image than treating voxels independently?
 
 ### 3.1 `PhysicsBackend` protocol
-- [ ] Create `src/libertem_holo/base/mbir/inversion/backends.py`.
-- [ ] Define `PhysicsBackend` Protocol with `prepare(rho, m) -> FieldState` and `energies(field) -> dict[str, Array]`.
-- [ ] Document the execution contract explicitly: `prepare()` may do non-jittable setup like `state.resolve()`, while the returned `energies()` path must be safe to call from inside the solver's jitted loss.
-- [ ] Implement `IdentityBackend` (returns `{}`).
-- [ ] Implement `SmoothnessBackend`:
-  - [ ] 3D finite-difference exchange-like penalty: `Σ‖∇m‖²` over interior voxels.
-  - [ ] Weight by `ρ` so vacuum does not contribute.
-  - [ ] Tests: zero loss for uniform `m`, positive for vortex, gradient finite.
-- [ ] Implement `NeuralMagCritic`:
-  - [ ] Wraps `NeuralMagEnergyBackend` with the `PhysicsBackend` interface.
-  - [ ] Transposes `(Z,Y,X,3) → (X,Y,Z,3)` and weights by `ρ` before calling `state.resolve()` callables.
-  - [ ] Tests: matches direct `state.resolve` output within float tolerance.
+- ✅ Create `src/libertem_holo/base/mbir/inversion/backends.py`.
+- ✅ Define `PhysicsBackend` Protocol with `prepare(rho, m) -> FieldState` and `energies(field) -> dict[str, Array]`.
+- ✅ Document the execution contract explicitly: `prepare()` may do non-jittable setup like `state.resolve()`, while the returned `energies()` path must be safe to call from inside the solver's jitted loss.
+- ✅ Implement `IdentityBackend` (returns `{}`).
+- ✅ Implement `SmoothnessBackend`:
+  - ✅ 3D finite-difference exchange-like penalty: `Σ‖∇m‖²` over interior voxels.
+  - ✅ Weight by `ρ` so vacuum does not contribute.
+  - ✅ Tests: zero loss for uniform `m`, positive for vortex, gradient finite.
+- ✅ Implement `NeuralMagCritic`:
+  - ✅ Wraps `NeuralMagEnergyBackend` with the `PhysicsBackend` interface.
+  - ✅ Transposes `(Z,Y,X,3) → (X,Y,Z,3)` and weights by `ρ` before calling `state.resolve()` callables.
+  - ✅ Tests: matches direct `state.resolve` output within float tolerance.
 
 ### 3.2 Inversion loop
-- [ ] Create `src/libertem_holo/base/mbir/inversion/solver.py` with `invert_magnetization(phi_meas, rho, backend, *, lambda_phys, max_iter, lr, init) -> InversionResult`.
-- [ ] Use `optax.adam` (or `optax.lbfgs`); record loss history per backend.
-- [ ] **Hard unit-norm projection** of `m` inside `ρ > 0.5` applied **every step**, not post-hoc. Unit test that `|m| = 1` within mask after each step.
-- [ ] Implement normalization as a small utility function so it is testable independently of the optimizer loop.
-- [ ] Acceptance criterion: after projection, `||m|| = 1.0 ± 1e-6` inside support and `m = 0` outside support.
-- [ ] `init` options: zero, analytic ansatz, warm-start from another backend's result.
-- [ ] Return dataclass with `m_recon`, `loss_history`, `phi_pred`, wall-clock time.
+- ✅ Create `src/libertem_holo/base/mbir/inversion/solver.py` with `invert_magnetization(phi_meas, rho, backend, *, lambda_phys, max_iter, lr, init) -> InversionResult`.
+- ✅ Use `optax.adam` (or `optax.lbfgs`); record loss history per backend.
+- ✅ **Hard unit-norm projection** of `m` inside `ρ > 0.5` applied **every step**, not post-hoc. Unit test that `|m| = 1` within mask after each step.
+- ✅ Implement normalization as a small utility function so it is testable independently of the optimizer loop.
+- ✅ Acceptance criterion: after projection, `||m|| = 1.0 ± 1e-6` inside support and `m = 0` outside support.
+- ✅ `init` options: zero, analytic ansatz, warm-start from another backend's result.
+- ✅ Return dataclass with `m_recon`, `loss_history`, `phi_pred`, wall-clock time.
 
 ### 3.3 Metrics module
 `src/libertem_holo/base/mbir/inversion/metrics.py`:
 
 **Solver outputs / directly observable from reconstruction output:**
-- [ ] `phase_residual(phi_pred, phi_true)` — relative L2.
-- [ ] Iterations to a fixed data-loss threshold (simple helper).
+- ✅ `phase_residual(phi_pred, phi_true)` — relative L2.
+- ✅ Iterations to a fixed data-loss threshold (simple helper).
 
 **Ground-truth diagnostics for the synthetic study:**
-- [ ] `projected_m_error(m_recon, m_true)` — in-plane `∫m dz` relative L2.
-- [ ] `mz_rmse(m_recon, m_true)` — voxel-wise `M_z` error.
-- [ ] `depth_correlation(m_recon, m_true, yx)` — `M_x(z)` profile correlation at fixed `(y,x)` vs. the smeared-along-z baseline.
-- [ ] `vortex_core_z_error(m_recon, y_c, x_c)` — `argmax_z M_z`.
-- [ ] `equilibrium_residual(m_recon, backend_alt)` — `‖m × H_eff‖`, **using `backend_alt` ≠ the backend used as A.2 prior** (e.g. include anisotropy/DMI). Document this in the docstring.
+- ✅ `projected_m_error(m_recon, m_true)` — in-plane `∫m dz` relative L2.
+- ✅ `mz_rmse(m_recon, m_true)` — voxel-wise `M_z` error.
+- ✅ `depth_correlation(m_recon, m_true, yx)` — `M_x(z)` profile correlation at fixed `(y,x)` vs. the smeared-along-z baseline.
+- ✅ `vortex_core_z_error(m_recon, y_c, x_c)` — `argmax_z M_z`.
+- ✅ `equilibrium_residual(m_recon, backend_alt)` — `‖m × H_eff‖`, **using `backend_alt` ≠ the backend used as A.2 prior** (e.g. include anisotropy/DMI). Document this in the docstring.
 
 **Shape-amplitude confound:**
-- [ ] Helper `run_with_scaled_rho(pipeline, scale=1.5)` to re-run each prior with `1.5·ρ_true` and report `⟨|m_recon|⟩` and `|m|` histogram.
+- ✅ Helper `run_with_scaled_rho(pipeline, scale=1.5)` to re-run each prior with `1.5·ρ_true` and report `⟨|m_recon|⟩` and `|m|` histogram.
 
 ### 3.4 Experiments notebook
-- [ ] Create `notebooks/MBIR/FEM-inversion/phase3_regimeA.ipynb`:
-  - [ ] Load cached `(rho_true, m_true, phi_true)` fixture from Phase 2c.
-  - [ ] Run A.0 (identity), A.1 (smoothness), A.2 (NeuralMag critic) with identical `max_iter=500` and zero init.
-  - [ ] Plot: loss curves, projected-m error, `M_z` recovery, depth correlation, vortex-core z error, equilibrium residual.
-  - [ ] Run shape-amplitude confound diagnostic (scale `ρ_true` by 1.5).
-  - [ ] Write a short "Interpretation" cell mapping outcomes to the table in PLAN Phase 3.
+- ✅ Create `notebooks/MBIR/FEM-inversion/phase3_regimeA.ipynb`:
+  - ✅ Load cached `(rho_true, m_true, phi_true)` fixture from Phase 2c.
+  - ✅ Run A.0 (identity), A.1 (smoothness), A.2 (NeuralMag critic) with identical `max_iter=500` and zero init.
+  - ✅ Plot: loss curves, projected-m error, `M_z` recovery, depth correlation, vortex-core z error, equilibrium residual.
+  - ✅ Run shape-amplitude confound diagnostic (scale `ρ_true` by 1.5).
+  - ✅ Write a short "Interpretation" cell mapping outcomes to the table in PLAN Phase 3, including the current caveat that the hard unit-norm projection makes the present confound run non-discriminative.
 
 ### 3.5 Electrostatic separation extension (A.2e)
 - [ ] Implement electrostatic forward: `phi_elec(rho, V_0) = C_E * V_0 * jnp.sum(rho, axis=0) * dx`.
@@ -168,19 +168,19 @@ This is the **headline experiment**. The question: does coupling all voxels thro
 - [ ] Report `V_0` recovery error and `m` quality metrics vs A.0/A.1/A.2.
 
 ### 3.6 Tests
-- [ ] `tests/base/test_inversion_backends.py` — backend contracts.
-- [ ] `tests/test_regime_a_smoke.py` — 16³ smoke test: each backend runs 10 iters, loads cached truth instead of running LLG, and satisfies `loss_history[-1] < loss_history[0]`.
+- ✅ `tests/base/test_inversion_backends.py` — backend contracts.
+- ✅ `tests/test_regime_a_smoke.py` — 16³ smoke test: each backend runs 10 iters, loads cached truth instead of running LLG, and satisfies `loss_history[-1] < loss_history[0]`.
 
 ### 3.7 Exit criteria for Phase 3
 
 **Engineering exit (code works):**
-- [ ] A.0, A.1, and A.2 all run end-to-end from the same cached truth fixture.
+- ✅ A.0, A.1, and A.2 all run end-to-end from the same cached truth fixture.
 - [ ] Regime A smoke test passes in CI.
 
 **Scientific exit (result interpreted):**
-- [ ] At least one non-trivial diagnostic beyond phase residual is reported in the notebook (`M_z` RMSE, depth correlation, or vortex-core depth).
-- [ ] The shape-amplitude confound diagnostic has been run once and interpreted, even if it is not favorable to NeuralMag.
-- [ ] **Headline result**: a clear comparison showing whether A.2 (physics-coupled) yields better 3D magnetization than A.0/A.1 on the non-observable metrics.
+- ✅ At least one non-trivial diagnostic beyond phase residual is reported in the notebook (`M_z` RMSE, depth correlation, or vortex-core depth).
+- ✅ The shape-amplitude confound diagnostic has been run once and interpreted, even if it is not favorable to NeuralMag.
+- ✅ **Headline result**: a clear comparison showing whether A.2 (physics-coupled) yields better 3D magnetization than A.0/A.1 on the non-observable metrics. Current result is mixed: A.2 improves projected-m error and vortex-core depth, but not `M_z` RMSE or depth-profile correlation yet.
 - [ ] *(Optional extension)* Electrostatic separation experiment (A.2e) has been run at least once and interpreted. Not blocking for Phase 3 closure.
 
 ---
@@ -240,10 +240,10 @@ These are not phase-specific but are blockers/enablers for the above.
 
 - [ ] **Caching**: persistent `.npz` fixtures for `(ρ_true, m_true, φ_true)` at `32³` and `64³` with `K_u = 0` for Phase 3. A second `K_u ≠ 0` fixture is only needed if Phase 3b is pursued. Loaded by notebooks and tests through one loader API, not by ad hoc `np.load` paths scattered across the repo.
 - [ ] **CI**: add a job that executes the validation notebook headlessly and, once Phase 3 lands, the Regime A smoke notebook.
-- [ ] **API surface**: expose the new backends, solver, and metrics via `src/libertem_holo/base/mbir/__init__.py`.
+- ✅ **API surface**: expose the new backends, solver, and metrics via `src/libertem_holo/base/mbir/__init__.py`.
 - [ ] **Units audit**: decide once and for all whether public MBIR APIs take `unxt.Quantity` or plain floats; document in `units.py` docstring. Today it is mixed.
-- [ ] **Metrics module in notebooks is a duplication risk** — implement in `src/` and import in notebooks, not the other way round.
-- [ ] **Plotting helpers**: `plot_loss_landscape_2d`, `plot_depth_profile`, `plot_m_slices` collected in `src/libertem_holo/base/mbir/inversion/plotting.py`. Keep notebook cells thin.
+- ✅ **Metrics module in notebooks is a duplication risk** — implement in `src/` and import in notebooks, not the other way round.
+- ✅ **Plotting helpers**: `plot_loss_landscape_2d`, `plot_depth_profile`, `plot_m_slices` collected in `src/libertem_holo/base/mbir/inversion/plotting.py`. Keep notebook cells thin.
 - [ ] **Documentation**: short `notebooks/MBIR/FEM-inversion/README.md` pointing at PLAN, CHECKLIST, and the two validation notebooks, with "what exists today" vs "what is pending".
 - [ ] **Runtime budget**: record expected wall-clock for fixture generation, Regime A smoke tests, and the 3b pilot sweep so CI and notebook expectations stay realistic.
 
