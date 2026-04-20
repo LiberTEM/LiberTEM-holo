@@ -7,6 +7,28 @@ Conventions:
 - Isotropic voxels `dx = dy = dz`. Phase-only, single-axis (z) projection unless stated.
 - All new public APIs live under `src/libertem_holo/base/mbir/` and are unit-tested under `tests/`.
 
+## Status Summary
+
+| Phase | Component | Status | Gate before Phase 3? |
+|---|---|---|---|
+| 0 | Environment | ✅ | No |
+| 1 | Forward pipeline + synthetic fields | ✅ | No |
+| 2.1 | Adapter: NeuralMag → MBIR | ✅ | No |
+| 2.2 | Adapter: MBIR → NeuralMag | ❌ | **Yes** |
+| 2.3 | Real NeuralMag energy validation | 🟡 | **Yes** |
+| 2.4 | Cached ground-truth fixtures + loader API | ❌ | **Yes** |
+| 2.5 | Package cleanup + notebook CI | ❌ | No |
+| 3 | Regime A solver (L1/L2) | ❌ | n/a |
+| 3b | L3 material grid search | ❌ | n/a |
+
+## Phase 3 Entry Gates
+
+Do **not** start Phase 3 implementation until all of these are true:
+
+- [ ] Reverse adapter exists and passes a round-trip RMSE threshold on a known vortex state.
+- [ ] Real `state.resolve()` energy evaluation is validated on a tiny NeuralMag state and is safe to call from a jitted loss path, with `resolve()` itself kept outside `jit`.
+- [ ] Ground-truth fixtures exist at both `32^3` and `64^3`, with a stable loader API used by tests and notebooks instead of regenerating LLG states ad hoc.
+
 ---
 
 ## Phase 0 — Environment ✅
@@ -27,7 +49,9 @@ Conventions:
 
 Gaps to close before Phase 3 starts:
 - [ ] Add a finite-difference gradient test vs analytic `jax.grad` for **both** `rho` and `m` arguments at a non-trivial point (not just finite/shape check). One consolidated test in `tests/base/` is enough.
+- [ ] Add a finite-difference gradient test for **each** magnetization component `m[..., 0:3]`; finite/shape checks alone are not enough to catch sign or axis mistakes.
 - [ ] Document pixel-size / units contract at the top of `forward.py` (is pixel size `Quantity["length"]` or plain float nm? what does `.value` strip?).
+- [ ] Add a regression test that `pixel_size=1.0` and `pixel_size=Quantity(1.0, "nm")` produce identical forward output.
 
 ---
 
@@ -38,25 +62,45 @@ Implemented:
 - ✅ `NeuralMagEnergyBackend` scaffold with resolver-based term caching (`mbir_energy_backend.py`).
 - ✅ Unit tests for adapter and backend scaffold (`tests/test_neuralmag_adapter.py`, `tests/test_mbir_energy_backend.py`, `tests/test_mbir_neuralmag_synthetic.py`).
 
-Outstanding (2a / 2b / 2c / 2d in PLAN):
-- [ ] **2a reverse adapter**: `mbir_rho_m_to_neuralmag(rho_3d, m_3d, mesh) -> VectorFunction` (or state setter) for round-trip tests.
-- [ ] **2a round-trip test**: `neuralmag → mbir → neuralmag` RMSE < 1e-6 on a vortex disc.
-- [ ] **2b energy backend – real NeuralMag path**: replace the mock-resolver-only tests with a real `state.resolve("E_exchange", ["m"])` and `state.resolve("E_demag", ["m"])` call on a tiny mesh (e.g. `16³`), confirming the returned callable is jit-safe.
-- [ ] **2b jit safety**: assert `state.resolve()` is called **outside** `@jax.jit` boundary (document this in a docstring + add a test that jits the `energies` call).
-- [ ] **2c vortex-disc ground truth script/fixture**:
-  - [ ] Permalloy params: `Ms=8e5`, `A=1.3e-11`, `Ku=0`.
-  - [ ] Mesh `(64,64,64)` @ `dx=5e-9 m`. Soft-disc `ρ` via `state.rho` (use `state.eps`, not 0).
-  - [ ] Vortex ansatz init → `LLGSolver.relax()` → `m_true`.
-  - [ ] Save `(rho_true, m_true, phi_true, pixel_size)` as a cached `.npz` fixture under `tests/test_mbir_data/` so Phase 3 does not re-run LLG on every test.
-- [ ] **2d verification**:
-  - [ ] Adapter round-trip RMSE < 1e-6.
-  - [ ] `E_exchange(m_true)` finite positive scalar.
-  - [ ] `φ_true(vortex)` qualitative check in the validation notebook.
-  - [ ] **Analytic-vs-relaxed φ comparison**: report `‖φ_relaxed − φ_analytic‖ / ‖φ_analytic‖` — this number sets the bar for how much a physics prior could plausibly help.
+### 2.1 Adapter: NeuralMag → MBIR ✅
 
-Housekeeping:
-- [ ] Move `mbir_energy_backend.py` under `src/libertem_holo/base/mbir/` (it lives one level up today; align with the rest of the mbir package).
-- [ ] Promote `phase1_phase2_validation.ipynb` to run headlessly in CI via `jupyter nbconvert --execute` (smoke job).
+- ✅ `neuralmag_state_to_mbir_rho_m` exists and is tested.
+
+### 2.2 Adapter: MBIR → NeuralMag ❌
+
+- [ ] Implement `mbir_rho_m_to_neuralmag(rho_3d, m_3d, mesh) -> VectorFunction` or a state setter with explicit cell→nodal interpolation.
+- [ ] Define whether the reverse adapter preserves `rho` and `m` separately or returns only the weighted magnetic field expected by NeuralMag.
+- [ ] Acceptance criterion: `neuralmag → mbir → neuralmag` round-trip RMSE < `1e-6` on a deterministic vortex-disc case.
+- [ ] Add a regression test that unit-norm magnetization remains unit norm after round-trip inside support.
+
+### 2.3 Real NeuralMag energy validation ❌
+
+- [ ] Replace purely mock-resolver validation with a real `state.resolve("E_exchange", ["m"])` and `state.resolve("E_demag", ["m"])` call on a tiny mesh (`8^3` or `16^3`).
+- [ ] Acceptance criterion: real resolved energy callables return finite positive scalars for a vortex-like state.
+- [ ] Document the `jit` contract clearly: `state.resolve()` happens outside `jit`; only the returned callables may be used inside a jitted loss.
+- [ ] Add a test that jits the loss path using already-resolved callables.
+- [ ] Fix any current Quantity/raw-array mismatch in the smoke tests so this path is genuinely runnable, not just sketched.
+
+### 2.4 Ground-truth fixtures + loader API ❌
+
+- [ ] Create a fixture-generation script or module for a permalloy-like vortex disc with `Ms=8e5`, `A=1.3e-11`, `Ku=0`.
+- [ ] Generate and cache both `32^3` and `64^3` cases with mesh `(N,N,N)` and `dx=5e-9 m`, soft-disc `ρ`, vortex ansatz init, and `LLGSolver.relax()`.
+- [ ] Save fixtures as stable `.npz` artifacts, for example:
+  - [ ] `tests/test_mbir_data/vortex_disc_32_ku0.npz`
+  - [ ] `tests/test_mbir_data/vortex_disc_64_ku0.npz`
+- [ ] Standardize `.npz` keys: `rho_true`, `m_true`, `phi_true`, `pixel_size_nm`.
+- [ ] Add a loader API, for example `src/libertem_holo/base/mbir/fixtures.py`, so notebooks and tests import fixtures through one stable interface.
+- [ ] Acceptance criterion: Phase 3 smoke tests and notebooks load cached fixtures instead of running LLG during normal execution.
+
+### 2.5 Verification and housekeeping ❌
+
+- [ ] Adapter round-trip RMSE < `1e-6` on the cached vortex fixture.
+- [ ] `E_exchange(m_true)` is finite and positive on the cached ground truth.
+- [ ] `φ_true(vortex)` qualitative check is shown in the validation notebook.
+- [ ] Report `‖φ_relaxed − φ_analytic‖ / ‖φ_analytic‖`; this sets the floor for how much a physics prior could plausibly improve over the analytic ansatz.
+- [ ] Move `mbir_energy_backend.py` under `src/libertem_holo/base/mbir/` before Phase 3 starts so the package layout is coherent.
+- [ ] Export the moved backend from `src/libertem_holo/base/mbir/__init__.py`.
+- [ ] Promote `phase1_phase2_validation.ipynb` to a headless CI smoke run via `jupyter nbconvert --execute` or equivalent.
 
 ---
 
@@ -67,6 +111,7 @@ This is the next major code target.
 ### 3.1 `PhysicsBackend` protocol
 - [ ] Create `src/libertem_holo/base/mbir/inversion/backends.py`.
 - [ ] Define `PhysicsBackend` Protocol with `prepare(rho, m) -> FieldState` and `energies(field) -> dict[str, Array]`.
+- [ ] Document the execution contract explicitly: `prepare()` may do non-jittable setup like `state.resolve()`, while the returned `energies()` path must be safe to call from inside the solver's jitted loss.
 - [ ] Implement `IdentityBackend` (returns `{}`).
 - [ ] Implement `SmoothnessBackend`:
   - [ ] 3D finite-difference exchange-like penalty: `Σ‖∇m‖²` over interior voxels.
@@ -81,18 +126,20 @@ This is the next major code target.
 - [ ] Create `src/libertem_holo/base/mbir/inversion/solver.py` with `invert_magnetization(phi_meas, rho, backend, *, lambda_phys, max_iter, lr, init) -> InversionResult`.
 - [ ] Use `optax.adam` (or `optax.lbfgs`); record loss history per backend.
 - [ ] **Hard unit-norm projection** of `m` inside `ρ > 0.5` applied **every step**, not post-hoc. Unit test that `|m| = 1` within mask after each step.
+- [ ] Implement normalization as a small utility function so it is testable independently of the optimizer loop.
+- [ ] Acceptance criterion: after projection, `||m|| = 1.0 ± 1e-6` inside support and `m = 0` outside support.
 - [ ] `init` options: zero, analytic ansatz, warm-start from another backend's result.
 - [ ] Return dataclass with `m_recon`, `loss_history`, `phi_pred`, wall-clock time.
 
 ### 3.3 Metrics module
 `src/libertem_holo/base/mbir/inversion/metrics.py`:
 
-**Observable:**
-- [ ] `projected_m_error(m_recon, m_true)` — in-plane `∫m dz` relative L2.
+**Solver outputs / directly observable from reconstruction output:**
 - [ ] `phase_residual(phi_pred, phi_true)` — relative L2.
 - [ ] Iterations to a fixed data-loss threshold (simple helper).
 
-**Not directly observed:**
+**Ground-truth diagnostics for the synthetic study:**
+- [ ] `projected_m_error(m_recon, m_true)` — in-plane `∫m dz` relative L2.
 - [ ] `mz_rmse(m_recon, m_true)` — voxel-wise `M_z` error.
 - [ ] `depth_correlation(m_recon, m_true, yx)` — `M_x(z)` profile correlation at fixed `(y,x)` vs. the smeared-along-z baseline.
 - [ ] `vortex_core_z_error(m_recon, y_c, x_c)` — `argmax_z M_z`.
@@ -111,7 +158,13 @@ This is the next major code target.
 
 ### 3.5 Tests
 - [ ] `tests/base/test_inversion_backends.py` — backend contracts.
-- [ ] `tests/test_regime_a_smoke.py` — 16³ smoke test: each backend runs 10 iters and `loss_history[-1] < loss_history[0]`.
+- [ ] `tests/test_regime_a_smoke.py` — 16³ smoke test: each backend runs 10 iters, loads cached truth instead of running LLG, and satisfies `loss_history[-1] < loss_history[0]`.
+
+### 3.6 Exit criteria for Phase 3
+
+- [ ] A.0, A.1, and A.2 all run end-to-end from the same cached truth fixture.
+- [ ] At least one non-trivial diagnostic beyond phase residual is reported in the notebook (`M_z` RMSE, depth correlation, or vortex-core depth).
+- [ ] The shape-amplitude confound diagnostic has been run once and interpreted, even if it is not favorable to NeuralMag.
 
 ---
 
@@ -122,7 +175,7 @@ Precondition from PLAN: **shape is known**. Do not start until Phase 3 produces 
 ### 3b.1 L3 forward operator
 - [ ] Create `src/libertem_holo/base/mbir/inversion/l3_forward.py` with `forward_phi_of_theta(theta, rho_true, mesh, *, init_ansatz, n_inits=2) -> jnp.ndarray`:
   - [ ] Build NeuralMag state with `theta = (A_ex, Ms, Ku)` (plus fixed `Ku_axis`).
-  - [ ] LLG relax from `init_ansatz`; optionally relax from `n_inits` different inits and keep the min-loss branch.
+  - [ ] LLG relax from deterministic init strategies; keep the min-loss branch across the configured init set.
   - [ ] Adapter → `(Z,Y,X,3)` → `forward_phase_from_density_and_magnetization`.
 - [ ] Enforce mesh `dx=dy=dz` **equal to** the ground-truth `dx` (assert at construction).
 - [ ] Unit test: `forward_phi_of_theta(theta_true)` matches cached `phi_true` within tolerance.
@@ -133,7 +186,8 @@ Precondition from PLAN: **shape is known**. Do not start until Phase 3 produces 
 ### 3b.3 Grid search (3b-i — priority)
 - [ ] Pilot on `32³` mesh with `5×5×5 = 125` grid. Record wall-clock per relax + RDFC.
 - [ ] Production sweep `64³`, `~10×10×10` grid over `A_ex ∈ [0.5,3]e-11`, `Ms ∈ [4,12]e5`, `Ku ∈ [0,5]e4`.
-- [ ] **Metastability budget**: 2 inits per θ (vortex ansatz + uniform in-plane); record min-loss branch.
+- [ ] **Metastability budget is mandatory, not optional**: at least 2 deterministic inits per `θ` (`vortex`, `uniform_in_plane`); record which branch won.
+- [ ] Save landscape metadata including `theta`, chosen init strategy, and relaxed-state energy so the sweep is reproducible.
 - [ ] Save landscape as `.npz` and plot 2D marginals `(A_ex,Ms)`, `(A_ex,Ku)`, `(Ms,Ku)`.
 - [ ] Identifiability diagnostics: Hessian (or quadratic fit) at minimum; report flat directions.
 
@@ -197,21 +251,24 @@ Out of scope for this program. Listed for completeness:
 
 These are not phase-specific but are blockers/enablers for the above.
 
-- [ ] **Caching**: persistent `.npz` fixtures for `(ρ_true, m_true, φ_true)` at `32³` and `64³`, two `K_u` variants. Loaded by notebooks and tests.
+- [ ] **Caching**: persistent `.npz` fixtures for `(ρ_true, m_true, φ_true)` at `32³` and `64³`, two `K_u` variants. Loaded by notebooks and tests through one loader API, not by ad hoc `np.load` paths scattered across the repo.
 - [ ] **CI**: add a job that executes the validation notebook headlessly and, once Phase 3 lands, the Regime A smoke notebook.
 - [ ] **API surface**: expose the new backends, solver, and metrics via `src/libertem_holo/base/mbir/__init__.py`.
 - [ ] **Units audit**: decide once and for all whether public MBIR APIs take `unxt.Quantity` or plain floats; document in `units.py` docstring. Today it is mixed.
 - [ ] **Metrics module in notebooks is a duplication risk** — implement in `src/` and import in notebooks, not the other way round.
 - [ ] **Plotting helpers**: `plot_loss_landscape_2d`, `plot_depth_profile`, `plot_m_slices` collected in `src/libertem_holo/base/mbir/inversion/plotting.py`. Keep notebook cells thin.
 - [ ] **Documentation**: short `notebooks/MBIR/FEM-inversion/README.md` pointing at PLAN, CHECKLIST, and the two validation notebooks, with "what exists today" vs "what is pending".
+- [ ] **Runtime budget**: record expected wall-clock for fixture generation, Regime A smoke tests, and the 3b pilot sweep so CI and notebook expectations stay realistic.
 
 ---
 
 ## Suggested execution order
 
-1. Close Phase 2 gaps (reverse adapter, real `state.resolve` path, cached ground-truth fixtures, notebook in CI).
-2. Implement Phase 3 (backends, solver, metrics, Regime A notebook, smoke tests).
-3. Phase 3b-i grid search on known shape — the headline identifiability result.
-4. Decide whether to pursue Phase 4 / 4b / 3b-ii based on those results.
+1. Close the **Phase 3 entry gates**: reverse adapter, real `state.resolve` validation, cached ground-truth fixtures + loader API.
+2. Clean package structure and reproducibility basics: move the energy backend into `mbir/`, lock down units tests, add notebook smoke execution.
+3. Implement Phase 3 Regime A: backends, solver core, normalization utility, metrics, and smoke tests.
+4. Run and interpret the Regime A notebook before adding any new scientific scope.
+5. Phase 3b-i grid search on known shape — the headline identifiability result.
+6. Decide whether to pursue Phase 4 / 4b / 3b-ii based on those results.
 
-Everything beyond step 3 is conditional scope.
+Everything beyond step 5 is conditional scope.
