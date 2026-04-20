@@ -106,6 +106,12 @@ from .synthetic import (
     uniform_magnetization,
     vortex_magnetization,
 )
+from .fixtures import (
+    generate_vortex_disc_fixture,
+    load_vortex_disc_fixture,
+    save_vortex_disc_fixture,
+    vortex_disc_fixture_path,
+)
 
 __all__ = [
     "B_REF",
@@ -132,10 +138,12 @@ __all__ = [
     "forward_model_2d",
     "forward_model_3d",
     "forward_model_single_rdfc_2d",
+    "generate_vortex_disc_fixture",
     "get_freq_grid",
     "kneedle_corner",
     "lcurve_sweep",
     "lcurve_sweep_vmap",
+    "load_vortex_disc_fixture",
     "make_quantity",
     "mbir_loss_2d",
     "phase_mapper_rdfc",
@@ -152,6 +160,8 @@ __all__ = [
     "to_projected_magnetization_integral",
     "domain_wall_magnetization",
     "soft_disc_support",
+    "save_vortex_disc_fixture",
     "uniform_magnetization",
+    "vortex_disc_fixture_path",
     "vortex_magnetization",
 ]
