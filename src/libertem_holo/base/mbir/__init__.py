@@ -68,6 +68,7 @@ from .kernel import (
 )
 from .forward import (
     apply_ramp,
+    forward_phase_from_density_and_magnetization,
     forward_model_2d,
     forward_model_3d,
     forward_model_single_rdfc_2d,
@@ -127,6 +128,7 @@ __all__ = [
     "estimate_mip_phase_from_thickness",
     "estimate_thickness_from_mip_phase",
     "exchange_loss_fn",
+    "forward_phase_from_density_and_magnetization",
     "forward_model_2d",
     "forward_model_3d",
     "forward_model_single_rdfc_2d",

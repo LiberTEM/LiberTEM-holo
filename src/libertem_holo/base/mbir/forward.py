@@ -3,7 +3,8 @@
 Provides :func:`apply_ramp`, the low-level
 :func:`forward_model_single_rdfc_2d`, the user-facing
 :func:`forward_model_2d`, and the 3D volume variants
-:func:`project_3d` and :func:`forward_model_3d`.
+:func:`project_3d`, :func:`forward_model_3d`, and
+:func:`forward_phase_from_density_and_magnetization`.
 """
 
 from __future__ import annotations
@@ -52,9 +53,11 @@ def apply_ramp(ramp_coeffs, height, width, pixel_size):
     ramp_coeffs_q = _as_ramp_coeffs(ramp_coeffs)
 
     y, x = qnp.meshgrid(qnp.arange(height), qnp.arange(width), indexing="ij")
-    ramp = ramp_coeffs_q.offset
-    ramp = ramp + ramp_coeffs_q.slope_y * (y * pixel_size_q)
-    ramp = ramp + ramp_coeffs_q.slope_x * (x * pixel_size_q)
+    pixel_size_val = u.uconvert("nm", pixel_size_q).value
+    ramp_val = ramp_coeffs_q.offset.value
+    ramp_val = ramp_val + u.uconvert("rad/nm", ramp_coeffs_q.slope_y).value * (y * pixel_size_val)
+    ramp_val = ramp_val + u.uconvert("rad/nm", ramp_coeffs_q.slope_x).value * (x * pixel_size_val)
+    ramp = u.Quantity(ramp_val, "rad")
 
     ramp = _as_angle_quantity(ramp)
     _assert_quantity_compatible(ramp, "rad", "ramp")
@@ -103,11 +106,13 @@ def forward_model_single_rdfc_2d(
     v_field = magnetization_q[..., 1]
 
     # Kernel is defined in pixel coordinates; convert to physical phase scale.
-    phase_density = pixel_size_q**2 * phase_mapper_rdfc(u_field, v_field, rdfc_kernel)
-    phase = _as_angle_quantity(phase_density)
+    phase_density = (u.uconvert("nm", pixel_size_q).value**2) * phase_mapper_rdfc(
+        u_field, v_field, rdfc_kernel,
+    ).value
+    phase = _as_angle_quantity(u.Quantity(phase_density, "rad"))
     ramp = apply_ramp(ramp_coeffs_q, height, width, pixel_size_q)
 
-    phase_total = phase + ramp
+    phase_total = _as_angle_quantity(u.Quantity(phase.value + ramp.value, "rad"))
     _assert_quantity_compatible(phase_total, "rad", "phase_total")
     return phase_total
 
@@ -293,3 +298,42 @@ def forward_model_3d(
         rdfc_kernel=rdfc_kernel,
     )
 
+
+def forward_phase_from_density_and_magnetization(
+    rho,
+    magnetization_3d,
+    pixel_size,
+    axis="z",
+    **kwargs,
+):
+    """Compute raw phase from density and magnetization via the MBIR forward model.
+
+    The effective magnetization is formed as ``m_eff = rho * m`` and forwarded
+    through :func:`forward_model_3d`. The returned value is a raw JAX array
+    (without Quantity wrapper), suitable for synthetic inversion workflows.
+    """
+    if isinstance(rho, u.Quantity):
+        rho_q = _as_dimensionless_quantity(rho)
+    else:
+        rho_q = _as_dimensionless_quantity(u.Quantity(jnp.asarray(rho), ""))
+    if isinstance(magnetization_3d, u.Quantity):
+        magnetization_q = _as_dimensionless_quantity(magnetization_3d)
+    else:
+        magnetization_q = _as_dimensionless_quantity(u.Quantity(jnp.asarray(magnetization_3d), ""))
+
+    if magnetization_q.ndim != 4 or magnetization_q.shape[-1] != 3:
+        raise ValueError(
+            "magnetization_3d must have shape (Z, Y, X, 3); "
+            f"got {magnetization_q.shape!r}",
+        )
+    if rho_q.shape != magnetization_q.shape[:-1]:
+        raise ValueError(
+            "rho must match magnetization_3d spatial shape "
+            f"{magnetization_q.shape[:-1]!r}; got {rho_q.shape!r}",
+        )
+
+    m_eff = _as_dimensionless_quantity(
+        u.Quantity(rho_q.value[..., None] * magnetization_q.value, str(magnetization_q.unit)),
+    )
+    phase = forward_model_3d(m_eff, pixel_size, axis=axis, **kwargs)
+    return phase.value

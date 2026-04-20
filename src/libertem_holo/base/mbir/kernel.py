@@ -136,38 +136,39 @@ def build_rdfc_kernel(
     uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
 
     coeff = KERNEL_COEFF
+    coeff_val = jnp.asarray(coeff.value, dtype=dtype)
     
     # Compute elementary phases once
     elem_uv = _rdfc_elementary_phase(geometry, uu, vv)
     elem_vu = _rdfc_elementary_phase(geometry, vv, uu)
     
-    u_kernel = coeff * elem_uv
-    v_kernel = -coeff * elem_vu
+    u_kernel_val = coeff_val * elem_uv
+    v_kernel_val = -coeff_val * elem_vu
 
     if prw_vec is not None:
         uu_prw = uu + prw_vec[1]
         vv_prw = vv + prw_vec[0]
         elem_prw_uv = _rdfc_elementary_phase(geometry, uu_prw, vv_prw)
         elem_prw_vu = _rdfc_elementary_phase(geometry, vv_prw, uu_prw)
-        u_kernel = u_kernel - coeff * elem_prw_uv
-        v_kernel = v_kernel + coeff * elem_prw_vu
+        u_kernel_val = u_kernel_val - coeff_val * elem_prw_uv
+        v_kernel_val = v_kernel_val + coeff_val * elem_prw_vu
 
     kernel_unit = str(coeff.unit)
     u_pad = u.Quantity(
-        jax.lax.dynamic_update_slice(
-            jnp.zeros(dim_pad, dtype=dtype),
-            u_kernel.value,
-            (0, 0),
-        ),
-        kernel_unit,
+            jax.lax.dynamic_update_slice(
+                jnp.zeros(dim_pad, dtype=dtype),
+                u_kernel_val,
+                (0, 0),
+            ),
+            kernel_unit,
     )
     v_pad = u.Quantity(
-        jax.lax.dynamic_update_slice(
-            jnp.zeros(dim_pad, dtype=dtype),
-            v_kernel.value,
-            (0, 0),
-        ),
-        kernel_unit,
+            jax.lax.dynamic_update_slice(
+                jnp.zeros(dim_pad, dtype=dtype),
+                v_kernel_val,
+                (0, 0),
+            ),
+            kernel_unit,
     )
 
     result = {
@@ -232,8 +233,10 @@ def phase_mapper_rdfc(
     u_fft = u.Quantity(jnp.fft.rfft2(u_pad.value), str(u_field_q.unit))
     v_fft = u.Quantity(jnp.fft.rfft2(v_pad.value), str(v_field_q.unit))
 
-    phase_fft = u_fft * rdfc_kernel["u_fft"] + v_fft * rdfc_kernel["v_fft"]
-    phase_pad = u.Quantity(jnp.fft.irfft2(phase_fft.value, s=dim_pad), str(phase_fft.unit))
+    kernel_u_fft = cast(u.Quantity, rdfc_kernel["u_fft"])
+    kernel_v_fft = cast(u.Quantity, rdfc_kernel["v_fft"])
+    phase_fft_val = u_fft.value * kernel_u_fft.value + v_fft.value * kernel_v_fft.value
+    phase_pad = u.Quantity(jnp.fft.irfft2(phase_fft_val, s=dim_pad), str(kernel_u_fft.unit))
 
     phase = u.Quantity(
         jax.lax.dynamic_slice(
@@ -244,4 +247,3 @@ def phase_mapper_rdfc(
         str(phase_pad.unit),
     )
     return phase
-
