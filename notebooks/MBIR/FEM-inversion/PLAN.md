@@ -1,5 +1,6 @@
 # Plan: Differentiable Phase-Image Inversion
 **v3.3 — 2026-04-19**
+**Working branch: `copilot/update-plan-for-fem-inversion`**
 
 > Scope: medium-term synthetic research program. The unit of delivery is **evidence on identifiability and on whether a physics prior helps**, not a finished reconstruction tool. Real-data and unknown-shape work come later and are explicitly outside this scope.
 
