@@ -114,6 +114,7 @@ from .fixtures import (
 )
 from .energy_backend import NeuralMagEnergyBackend
 from .inversion import (
+    CombinedBackend,
     FieldState,
     IdentityBackend,
     InversionResult,
@@ -121,6 +122,7 @@ from .inversion import (
     PhysicsBackend,
     ScaledRhoExperimentResult,
     SmoothnessBackend,
+    WeightedBackend,
     analytic_vortex_init,
     depth_correlation,
     equilibrium_residual,
@@ -142,6 +144,7 @@ from .inversion import (
 __all__ = [
     "B_REF",
     "BootstrapThresholdResult",
+    "CombinedBackend",
     "ELECTRON_INTERACTION_CONSTANT_300KV",
     "FieldState",
     "IdentityBackend",
@@ -158,6 +161,7 @@ __all__ = [
     "RegConfig",
     "ScaledRhoExperimentResult",
     "SmoothnessBackend",
+    "WeightedBackend",
     "SolverConfig",
     "SolverResult",
     "add_units_to_inputs",

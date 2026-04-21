@@ -73,6 +73,47 @@ class SmoothnessBackend:
         return total
 
 
+class WeightedBackend:
+    def __init__(self, backend: PhysicsBackend, *, weight: float) -> None:
+        self._backend = backend
+        self._weight = float(weight)
+
+    def prepare(self, rho, m) -> FieldState:
+        return self._backend.prepare(rho, m)
+
+    def energies(self, field: FieldState) -> dict[str, jnp.ndarray]:
+        return {
+            name: jnp.asarray(self._weight, dtype=value.dtype) * value
+            for name, value in self._backend.energies(field).items()
+        }
+
+
+class CombinedBackend:
+    def __init__(self, *backends: PhysicsBackend) -> None:
+        if not backends:
+            raise ValueError("CombinedBackend requires at least one backend.")
+        self._backends = tuple(backends)
+
+    def prepare(self, rho, m) -> FieldState:
+        rho_arr, m_arr = _validate_rho_m(rho, m)
+        return FieldState(rho=rho_arr, m=m_arr)
+
+    def energies(self, field: FieldState) -> dict[str, jnp.ndarray]:
+        energy_terms: dict[str, jnp.ndarray] = {}
+        for backend in self._backends:
+            prepared = backend.prepare(field.rho, field.m)
+            terms = backend.energies(prepared)
+            duplicate_terms = set(energy_terms).intersection(terms)
+            if duplicate_terms:
+                duplicate_str = ", ".join(sorted(duplicate_terms))
+                raise ValueError(
+                    "CombinedBackend received duplicate energy term names: "
+                    f"{duplicate_str}."
+                )
+            energy_terms.update(terms)
+        return energy_terms
+
+
 class NeuralMagCritic:
     def __init__(self, backend: NeuralMagEnergyBackend) -> None:
         self._backend = backend

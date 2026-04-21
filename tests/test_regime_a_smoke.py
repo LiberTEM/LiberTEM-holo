@@ -1,8 +1,11 @@
 import numpy as np
 import pytest
 import unxt as u
+import jax.numpy as jnp
 
 from libertem_holo.base.mbir import (
+    RampCoeffs,
+    apply_ramp,
     depth_correlation,
     equilibrium_residual,
     forward_phase_from_density_and_magnetization,
@@ -13,8 +16,10 @@ from libertem_holo.base.mbir import (
     vortex_core_z_error,
 )
 from libertem_holo.base.mbir.inversion import (
+    FieldState,
     IdentityBackend,
     NeuralMagCritic,
+    PhysicsBackend,
     SmoothnessBackend,
     invert_magnetization,
     project_unit_norm,
@@ -66,6 +71,15 @@ def _make_neuralmag_backend(rho, pixel_size_nm: float):
     nm.ExchangeField().register(state, "exchange")
     nm.DemagField(p=1).register(state, "demag")
     return NeuralMagCritic.from_state(state, terms=("exchange", "demag"))
+
+
+class _NaNPhysicsBackend(PhysicsBackend):
+    def prepare(self, rho, m):
+        return FieldState(rho=jnp.asarray(rho), m=jnp.asarray(m))
+
+    def energies(self, field):
+        del field
+        return {"nan_term": jnp.asarray(np.nan, dtype=np.float32)}
 
 
 def test_project_unit_norm_enforces_support_contract():
@@ -122,6 +136,132 @@ def test_regime_a_accepts_array_warm_start():
 
     norms = np.linalg.norm(np.asarray(result.m_recon), axis=-1)
     assert np.allclose(norms[rho > 0.5], 1.0, atol=1e-6)
+
+
+def test_regime_a_fit_ramp_recovers_background_phase_trend():
+    rho, m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+    ramp_true = RampCoeffs(
+        offset=u.Quantity(0.25, "rad"),
+        slope_y=u.Quantity(1.2e-3, "rad/nm"),
+        slope_x=u.Quantity(-8.0e-4, "rad/nm"),
+    )
+    ramp_img = np.asarray(
+        apply_ramp(ramp_true, phi_true.shape[0], phi_true.shape[1], pixel_size).value,
+        dtype=np.float32,
+    )
+    phi_target = phi_true + ramp_img
+
+    no_ramp = invert_magnetization(
+        phi_target,
+        rho,
+        IdentityBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=0.0,
+        max_iter=20,
+        lr=5e-2,
+        init=m_true,
+    )
+    with_ramp = invert_magnetization(
+        phi_target,
+        rho,
+        IdentityBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=0.0,
+        max_iter=20,
+        lr=5e-2,
+        init=m_true,
+        fit_ramp=True,
+    )
+
+    rms_no_ramp = float(np.sqrt(np.mean((np.asarray(no_ramp.phi_pred) - phi_target) ** 2)))
+    rms_with_ramp = float(np.sqrt(np.mean((np.asarray(with_ramp.phi_pred) - phi_target) ** 2)))
+
+    assert rms_with_ramp < 0.2 * rms_no_ramp
+    assert rms_with_ramp < 5e-2
+    assert float(with_ramp.ramp_coeffs.offset.value) == pytest.approx(float(ramp_true.offset.value), abs=5e-2)
+    assert float(with_ramp.ramp_coeffs.slope_y.value) == pytest.approx(float(ramp_true.slope_y.value), abs=5e-4)
+    assert float(with_ramp.ramp_coeffs.slope_x.value) == pytest.approx(float(ramp_true.slope_x.value), abs=5e-4)
+
+
+def test_regime_a_zero_lambda_skips_nonfinite_physics_terms():
+    rho, m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    result = invert_magnetization(
+        phi_true,
+        rho,
+        _NaNPhysicsBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=0.0,
+        max_iter=5,
+        lr=5e-2,
+        init=m_true,
+        fit_ramp=True,
+    )
+
+    assert result.loss_history.shape == (5,)
+    assert np.all(np.isfinite(np.asarray(result.loss_history)))
+    assert np.isfinite(float(np.asarray(result.phi_pred).mean()))
+
+
+def test_regime_a_lbfgs_reduces_loss_on_cached_fixture():
+    rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    result = invert_magnetization(
+        phi_true,
+        rho,
+        IdentityBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=0.0,
+        max_iter=5,
+        lr=1.0,
+        init="zero",
+        optimizer="lbfgs",
+    )
+
+    assert result.loss_history.shape == (5,)
+    assert np.all(np.isfinite(np.asarray(result.loss_history)))
+    assert float(result.loss_history[-1]) < float(result.loss_history[0])
+    assert result.m_recon.shape == rho.shape + (3,)
+    assert result.phi_pred.shape == phi_true.shape
+
+
+def test_regime_a_early_stopping_shortens_plateau_run():
+    rho, m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    result = invert_magnetization(
+        phi_true,
+        rho,
+        IdentityBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=0.0,
+        max_iter=20,
+        lr=5e-2,
+        init=m_true,
+        early_stopping_patience=2,
+        early_stopping_min_delta=1e-9,
+    )
+
+    assert result.loss_history.shape[0] < 20
+    assert result.loss_history.shape[0] >= 1
+    assert np.all(np.isfinite(np.asarray(result.loss_history)))
+    assert result.m_recon.shape == rho.shape + (3,)
+
+
+def test_regime_a_rejects_invalid_early_stopping_patience():
+    rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    with pytest.raises(ValueError, match="early_stopping_patience"):
+        invert_magnetization(
+            phi_true,
+            rho,
+            IdentityBackend(),
+            pixel_size=pixel_size,
+            lambda_phys=0.0,
+            max_iter=5,
+            lr=5e-2,
+            init="zero",
+            early_stopping_patience=0,
+        )
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,12 @@
-from .backends import FieldState, IdentityBackend, NeuralMagCritic, PhysicsBackend, SmoothnessBackend
+from .backends import (
+    CombinedBackend,
+    FieldState,
+    IdentityBackend,
+    NeuralMagCritic,
+    PhysicsBackend,
+    SmoothnessBackend,
+    WeightedBackend,
+)
 from .experiments import (
     ScaledRhoExperimentResult,
     analytic_vortex_init,
@@ -23,6 +31,7 @@ from .plotting import (
 from .solver import InversionResult, invert_magnetization, project_unit_norm
 
 __all__ = [
+    "CombinedBackend",
     "FieldState",
     "IdentityBackend",
     "InversionResult",
@@ -30,6 +39,7 @@ __all__ = [
     "PhysicsBackend",
     "ScaledRhoExperimentResult",
     "SmoothnessBackend",
+    "WeightedBackend",
     "analytic_vortex_init",
     "depth_correlation",
     "equilibrium_residual",
