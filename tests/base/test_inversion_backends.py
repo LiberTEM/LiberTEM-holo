@@ -5,7 +5,7 @@ from numpy.testing import assert_allclose
 
 from libertem_holo.base.mbir import soft_disc_support, vortex_magnetization
 from libertem_holo.base.mbir.energy_backend import NeuralMagEnergyBackend
-from libertem_holo.base.mbir.inversion import CombinedBackend, FieldState, IdentityBackend, NeuralMagCritic, SmoothnessBackend, WeightedBackend
+from libertem_holo.base.mbir.inversion import CombinedBackend, EquilibriumTorqueBackend, FieldState, IdentityBackend, NeuralMagCritic, SmoothnessBackend, WeightedBackend
 
 
 def test_identity_backend_returns_empty_terms():
@@ -65,6 +65,21 @@ def test_weighted_backend_scales_energy_terms():
     weighted_energy = weighted_backend.energies(weighted_backend.prepare(rho, vortex_m))["smoothness"]
 
     assert float(weighted_energy) == pytest.approx(0.125 * float(base_energy))
+
+
+def test_equilibrium_torque_backend_zero_for_uniform_and_positive_for_vortex():
+    rho = np.asarray(soft_disc_support((8, 8, 8), radius=2.8, edge_width=1.2), dtype=np.float32)
+    uniform_m = np.zeros((8, 8, 8, 3), dtype=np.float32)
+    uniform_m[..., 0] = 1.0
+    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_zyx=jnp.asarray(rho)), dtype=np.float32)
+
+    backend = EquilibriumTorqueBackend(SmoothnessBackend())
+
+    uniform_energy = backend.energies(backend.prepare(rho, uniform_m))["equilibrium_torque"]
+    vortex_energy = backend.energies(backend.prepare(rho, vortex_m))["equilibrium_torque"]
+
+    assert float(uniform_energy) == pytest.approx(0.0, abs=1e-6)
+    assert float(vortex_energy) > 0.0
 
 
 def test_combined_backend_rejects_duplicate_energy_term_names():

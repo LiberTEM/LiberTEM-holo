@@ -1,5 +1,6 @@
 from .backends import (
     CombinedBackend,
+    EquilibriumTorqueBackend,
     FieldState,
     IdentityBackend,
     NeuralMagCritic,
@@ -32,6 +33,7 @@ from .solver import InversionResult, invert_magnetization, project_unit_norm
 
 __all__ = [
     "CombinedBackend",
+    "EquilibriumTorqueBackend",
     "FieldState",
     "IdentityBackend",
     "InversionResult",

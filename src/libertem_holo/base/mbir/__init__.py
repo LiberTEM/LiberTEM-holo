@@ -115,6 +115,7 @@ from .fixtures import (
 from .energy_backend import NeuralMagEnergyBackend
 from .inversion import (
     CombinedBackend,
+    EquilibriumTorqueBackend,
     FieldState,
     IdentityBackend,
     InversionResult,
@@ -145,6 +146,7 @@ __all__ = [
     "B_REF",
     "BootstrapThresholdResult",
     "CombinedBackend",
+    "EquilibriumTorqueBackend",
     "ELECTRON_INTERACTION_CONSTANT_300KV",
     "FieldState",
     "IdentityBackend",

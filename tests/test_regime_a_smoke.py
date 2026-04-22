@@ -16,6 +16,7 @@ from libertem_holo.base.mbir import (
     vortex_core_z_error,
 )
 from libertem_holo.base.mbir.inversion import (
+    EquilibriumTorqueBackend,
     FieldState,
     IdentityBackend,
     NeuralMagCritic,
@@ -203,7 +204,14 @@ def test_regime_a_zero_lambda_skips_nonfinite_physics_terms():
     assert np.isfinite(float(np.asarray(result.phi_pred).mean()))
 
 
-def test_regime_a_lbfgs_reduces_loss_on_cached_fixture():
+@pytest.mark.parametrize(
+    ("optimizer", "lr"),
+    [
+        ("lbfgs", 1.0),
+        ("bb", 5e-2),
+    ],
+)
+def test_regime_a_static_optimizers_reduce_loss_on_cached_fixture(optimizer, lr):
     rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
 
     result = invert_magnetization(
@@ -213,9 +221,9 @@ def test_regime_a_lbfgs_reduces_loss_on_cached_fixture():
         pixel_size=pixel_size,
         lambda_phys=0.0,
         max_iter=5,
-        lr=1.0,
+        lr=lr,
         init="zero",
-        optimizer="lbfgs",
+        optimizer=optimizer,
     )
 
     assert result.loss_history.shape == (5,)
@@ -223,6 +231,66 @@ def test_regime_a_lbfgs_reduces_loss_on_cached_fixture():
     assert float(result.loss_history[-1]) < float(result.loss_history[0])
     assert result.m_recon.shape == rho.shape + (3,)
     assert result.phi_pred.shape == phi_true.shape
+
+
+def test_regime_a_torque_objective_runs_with_smoothness_backend():
+    rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    result = invert_magnetization(
+        phi_true,
+        rho,
+        SmoothnessBackend(),
+        pixel_size=pixel_size,
+        lambda_phys=1e-3,
+        max_iter=5,
+        lr=5e-2,
+        init="analytic_vortex",
+        optimizer="bb",
+        physics_objective="torque",
+    )
+
+    assert result.loss_history.shape == (5,)
+    assert np.all(np.isfinite(np.asarray(result.loss_history)))
+    assert result.m_recon.shape == rho.shape + (3,)
+    assert result.phi_pred.shape == phi_true.shape
+
+
+def test_regime_a_equilibrium_torque_backend_runs_with_bb_optimizer():
+    rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    result = invert_magnetization(
+        phi_true,
+        rho,
+        EquilibriumTorqueBackend(SmoothnessBackend()),
+        pixel_size=pixel_size,
+        lambda_phys=1e-3,
+        max_iter=5,
+        lr=5e-2,
+        init="analytic_vortex",
+        optimizer="bb",
+    )
+
+    assert result.loss_history.shape == (5,)
+    assert np.all(np.isfinite(np.asarray(result.loss_history)))
+    assert result.m_recon.shape == rho.shape + (3,)
+    assert result.phi_pred.shape == phi_true.shape
+
+
+def test_regime_a_rejects_invalid_physics_objective():
+    rho, _m_true, phi_true, pixel_size = _load_smoke_fixture(size=16)
+
+    with pytest.raises(ValueError, match="physics_objective"):
+        invert_magnetization(
+            phi_true,
+            rho,
+            IdentityBackend(),
+            pixel_size=pixel_size,
+            lambda_phys=0.0,
+            max_iter=5,
+            lr=5e-2,
+            init="zero",
+            physics_objective="invalid",
+        )
 
 
 def test_regime_a_early_stopping_shortens_plateau_run():

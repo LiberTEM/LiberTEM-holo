@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+import jax
 import jax.numpy as jnp
 
 from ..energy_backend import NeuralMagEnergyBackend
@@ -85,6 +86,40 @@ class WeightedBackend:
         return {
             name: jnp.asarray(self._weight, dtype=value.dtype) * value
             for name, value in self._backend.energies(field).items()
+        }
+
+
+class EquilibriumTorqueBackend:
+    def __init__(
+        self,
+        backend: PhysicsBackend,
+        *,
+        term_name: str = "equilibrium_torque",
+    ) -> None:
+        self._backend = backend
+        self._term_name = term_name
+
+    def prepare(self, rho, m) -> FieldState:
+        return self._backend.prepare(rho, m)
+
+    def energies(self, field: FieldState) -> dict[str, jnp.ndarray]:
+        prepared = self._backend.prepare(field.rho, field.m)
+
+        def total_energy(m_current):
+            local_field = self._backend.prepare(prepared.rho, m_current)
+            terms = self._backend.energies(local_field)
+            if not terms:
+                return jnp.asarray(0.0, dtype=prepared.m.dtype)
+            return jnp.sum(
+                jnp.stack(
+                    [jnp.asarray(value, dtype=prepared.m.dtype) for value in terms.values()]
+                )
+            )
+
+        grad_energy = jax.grad(total_energy)(prepared.m)
+        torque = jnp.cross(prepared.m, grad_energy)
+        return {
+            self._term_name: jnp.mean(jnp.sum(torque ** 2, axis=-1))
         }
 
 
