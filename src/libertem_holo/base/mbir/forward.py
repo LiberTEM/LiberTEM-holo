@@ -3,15 +3,19 @@
 Provides :func:`apply_ramp`, the low-level
 :func:`forward_model_single_rdfc_2d`, the user-facing
 :func:`forward_model_2d`, and the 3D volume variants
-:func:`project_3d` and :func:`forward_model_3d`.
+:func:`project_3d`, :func:`project_3d_tilted`,
+:func:`forward_model_3d`, and :func:`forward_model_3d_tilted`.
 """
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.ndimage as jsnd
+import numpy as np
 import quaxed.numpy as qnp
 import unxt as u
 
@@ -194,6 +198,94 @@ _SIMPLE_PROJ = {
 }
 
 
+def _rotation_matrix_z(angle, dtype):
+    c = jnp.cos(angle)
+    s = jnp.sin(angle)
+    return jnp.array(
+        [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+        dtype=dtype,
+    )
+
+
+def _rotation_matrix_x(angle, dtype):
+    c = jnp.cos(angle)
+    s = jnp.sin(angle)
+    return jnp.array(
+        [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+        dtype=dtype,
+    )
+
+
+def _build_tilt_rotation_matrix(rotation, tilt):
+    rotation = jnp.asarray(rotation)
+    tilt = jnp.asarray(tilt, dtype=rotation.dtype)
+    dtype = jnp.result_type(rotation.dtype, tilt.dtype, jnp.float64)
+    rotation = rotation.astype(dtype)
+    tilt = tilt.astype(dtype)
+    return (
+        _rotation_matrix_z(-rotation, dtype)
+        @ _rotation_matrix_x(tilt, dtype)
+        @ _rotation_matrix_z(rotation, dtype)
+    )
+
+
+def _projection_coefficients(rotation, tilt, dtype):
+    return _build_tilt_rotation_matrix(rotation, tilt).astype(dtype)[:2, :]
+
+
+def _compute_tilted_projection_geometry(dim_zyx, rotation, tilt, dim_uv=None):
+    dim_z, dim_y, dim_x = (int(dim) for dim in dim_zyx)
+    rot = np.asarray(_build_tilt_rotation_matrix(float(rotation), float(tilt)))
+
+    half_extents = np.array([dim_x, dim_y, dim_z], dtype=np.float64) / 2.0
+    corner_signs = np.array(list(itertools.product((-1.0, 1.0), repeat=3)), dtype=np.float64)
+    corners_xyz = corner_signs * half_extents
+    rotated = corners_xyz @ rot.T
+
+    span_u = rotated[:, 0].max() - rotated[:, 0].min()
+    span_v = rotated[:, 1].max() - rotated[:, 1].min()
+    span_t = rotated[:, 2].max() - rotated[:, 2].min()
+
+    if dim_uv is None:
+        dim_uv = (
+            max(1, int(np.ceil(span_v))),
+            max(1, int(np.ceil(span_u))),
+        )
+    else:
+        dim_uv = tuple(int(dim) for dim in dim_uv)
+        if len(dim_uv) != 2 or dim_uv[0] <= 0 or dim_uv[1] <= 0:
+            raise ValueError(f"dim_uv must be a pair of positive ints, got {dim_uv!r}")
+
+    dim_t = max(1, int(np.ceil(span_t)))
+    return cast(tuple[int, int], dim_uv), dim_t
+
+
+def _tilted_detector_grid(dim_t, dim_uv, dtype):
+    dim_v, dim_u = dim_uv
+    t = jnp.arange(dim_t, dtype=dtype) + 0.5 - dim_t / 2.0
+    v = jnp.arange(dim_v, dtype=dtype) + 0.5 - dim_v / 2.0
+    u = jnp.arange(dim_u, dtype=dtype) + 0.5 - dim_u / 2.0
+    tt, vv, uu = jnp.meshgrid(t, v, u, indexing="ij")
+    return jnp.stack([uu, vv, tt], axis=0)
+
+
+def _sample_tilted_volume(volume, coords_zyx, out_shape):
+    components_first = jnp.moveaxis(volume, -1, 0)
+
+    def sample_component(field):
+        sampled = jsnd.map_coordinates(
+            field,
+            coords_zyx,
+            order=1,
+            mode="constant",
+            cval=0.0,
+        )
+        return sampled.reshape(out_shape)
+
+    sampled = jax.vmap(sample_component, in_axes=0, out_axes=0)(components_first)
+    return jnp.moveaxis(sampled, 0, -1)
+
+
 def project_3d(
     magnetization_3d,
     axis="z",
@@ -241,6 +333,82 @@ def project_3d(
     return projected
 
 
+def project_3d_tilted(
+    magnetization_3d,
+    rotation,
+    tilt,
+    dim_uv=None,
+) -> u.Quantity:
+    """Project a 3D magnetization field along a tilted beam direction.
+
+    This implements a cleaned-up, differentiable analogue of pyramid's
+    ``RotTiltProjector``. The 3D volume is sampled along the detector beam
+    direction using trilinear interpolation, then the projected vector field
+    is mixed into detector-plane ``(u, v)`` components.
+
+    Parameters
+    ----------
+    magnetization_3d : Quantity["dimensionless"]
+        3D magnetization of shape ``(Z, Y, X, 3)`` where the last axis holds
+        ``(mx, my, mz)`` components.
+    rotation : float
+        In-plane rotation angle in radians.
+    tilt : float
+        Tilt angle in radians.
+    dim_uv : tuple[int, int], optional
+        Explicit detector shape ``(V, U)``. If omitted, uses the rotated
+        bounding box of the volume.
+
+    Returns
+    -------
+    Quantity["dimensionless"]
+        Projected 2D magnetization of shape ``(V, U, 2)`` where the last axis
+        holds ``(u, v)`` components suitable for :func:`phase_mapper_rdfc`.
+    """
+    magnetization_q = _as_dimensionless_quantity(magnetization_3d)
+    dtype = magnetization_q.value.dtype
+    rotation_f = float(rotation)
+    tilt_f = float(tilt)
+
+    if rotation_f == 0.0 and tilt_f == 0.0 and dim_uv is None:
+        return project_3d(magnetization_q, axis="z")
+
+    dim_z, dim_y, dim_x, comp = magnetization_q.shape
+    if comp != 3:
+        raise ValueError(
+            f"magnetization_3d must have shape (Z, Y, X, 3); got {magnetization_q.shape!r}",
+        )
+
+    dim_uv_resolved, dim_t = _compute_tilted_projection_geometry(
+        magnetization_q.shape[:3],
+        rotation_f,
+        tilt_f,
+        dim_uv=dim_uv,
+    )
+
+    detector_xyz = _tilted_detector_grid(dim_t, dim_uv_resolved, dtype)
+    detector_xyz_flat = detector_xyz.reshape(3, -1)
+
+    rotation_matrix = _build_tilt_rotation_matrix(rotation_f, tilt_f).astype(dtype)
+    volume_xyz = rotation_matrix.T @ detector_xyz_flat
+
+    x_idx = volume_xyz[0] + dim_x / 2.0 - 0.5
+    y_idx = volume_xyz[1] + dim_y / 2.0 - 0.5
+    z_idx = volume_xyz[2] + dim_z / 2.0 - 0.5
+    coords_zyx = jnp.stack([z_idx, y_idx, x_idx], axis=0)
+
+    sampled = _sample_tilted_volume(
+        magnetization_q.value,
+        coords_zyx,
+        (dim_t, dim_uv_resolved[0], dim_uv_resolved[1]),
+    )
+    summed = jnp.sum(sampled, axis=0)
+
+    coeff = _projection_coefficients(rotation_f, tilt_f, dtype)
+    projected = jnp.einsum("...c,oc->...o", summed, coeff)
+    return u.Quantity(projected, str(magnetization_q.unit))
+
+
 def forward_model_3d(
     magnetization_3d,
     pixel_size,
@@ -283,6 +451,39 @@ def forward_model_3d(
         Predicted phase image of shape ``(V, U)``.
     """
     projected = project_3d(magnetization_3d, axis=axis)
+
+    return forward_model_2d(
+        projected,
+        pixel_size,
+        ramp_coeffs=ramp_coeffs,
+        geometry=geometry,
+        prw_vec=prw_vec,
+        rdfc_kernel=rdfc_kernel,
+    )
+
+
+def forward_model_3d_tilted(
+    magnetization_3d,
+    pixel_size,
+    rotation,
+    tilt,
+    dim_uv=None,
+    ramp_coeffs=None,
+    geometry="disc",
+    prw_vec=None,
+    rdfc_kernel=None,
+) -> u.Quantity:
+    """Convenience forward model for a tilted 3D magnetization volume.
+
+    Projects a 3D magnetization field along a rotated and tilted beam using
+    :func:`project_3d_tilted`, then computes the magnetic phase shift via RDFC.
+    """
+    projected = project_3d_tilted(
+        magnetization_3d,
+        rotation=rotation,
+        tilt=tilt,
+        dim_uv=dim_uv,
+    )
 
     return forward_model_2d(
         projected,

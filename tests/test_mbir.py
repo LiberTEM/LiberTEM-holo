@@ -102,6 +102,15 @@ def project_3d(magnetization_3d, axis="z"):
     return mbir_mod.project_3d(_mag_q(magnetization_3d), axis=axis)
 
 
+def project_3d_tilted(magnetization_3d, rotation, tilt, dim_uv=None):
+    return mbir_mod.project_3d_tilted(
+        _mag_q(magnetization_3d),
+        rotation=rotation,
+        tilt=tilt,
+        dim_uv=dim_uv,
+    )
+
+
 def forward_model_single_rdfc_2d(magnetization, ramp_coeffs, rdfc_kernel, pixel_size):
     return mbir_mod.forward_model_single_rdfc_2d(
         _mag_q(magnetization),
@@ -125,6 +134,18 @@ def forward_model_3d(magnetization_3d, pixel_size, axis="z", ramp_coeffs=None, *
         _mag_q(magnetization_3d),
         _pixel_size_q(pixel_size),
         axis=axis,
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def forward_model_3d_tilted(magnetization_3d, pixel_size, rotation, tilt, dim_uv=None, ramp_coeffs=None, **kwargs):
+    return mbir_mod.forward_model_3d_tilted(
+        _mag_q(magnetization_3d),
+        _pixel_size_q(pixel_size),
+        rotation=rotation,
+        tilt=tilt,
+        dim_uv=dim_uv,
         ramp_coeffs=_ramp_q(ramp_coeffs),
         **kwargs,
     )
@@ -607,6 +628,91 @@ class TestProject3D:
         )
 
 
+class TestProject3DTilted:
+    def test_zero_tilt_matches_simple_projector(self, projector_ref):
+        mag_3d = jnp.array(
+            np.transpose(projector_ref["magdata"], (1, 2, 3, 0)),
+            dtype=jnp.float64,
+        )
+
+        tilted = project_3d_tilted(mag_3d, rotation=0.0, tilt=0.0)
+        simple = project_3d(mag_3d, axis="z")
+
+        assert_allclose(np.asarray(tilted), np.asarray(simple), atol=1e-12)
+
+    def test_projection_shape_explicit_dim_uv(self):
+        mag_3d = jnp.zeros((6, 5, 4, 3), dtype=jnp.float64)
+        result = project_3d_tilted(mag_3d, rotation=0.3, tilt=0.2, dim_uv=(8, 7))
+        assert result.shape == (8, 7, 2)
+
+    def test_invalid_dim_uv_raises(self):
+        mag_3d = jnp.zeros((4, 4, 4, 3), dtype=jnp.float64)
+        with pytest.raises(ValueError, match="dim_uv must be a pair of positive ints"):
+            project_3d_tilted(mag_3d, rotation=0.1, tilt=0.2, dim_uv=(0, 6))
+
+    def test_projection_matches_pyramid_rottilt(self, projector_ref):
+        pytest.importorskip("pyramid")
+        from pyramid.fielddata import VectorData
+        from pyramid.projector import RotTiltProjector
+        from pyramid import quaternion as pyramid_quaternion
+
+        original_normalize = pyramid_quaternion.Quaternion._normalize
+
+        def _normalize_compat(self):
+            mag2 = sum(n**2 for n in self.values)
+            if abs(mag2 - 1.0) > self.NORM_TOLERANCE:
+                mag = np.sqrt(mag2)
+                self.values = tuple(n / mag for n in self.values)
+
+        pyramid_quaternion.Quaternion._normalize = _normalize_compat
+
+        mag_comp_first = projector_ref["magdata"]
+        mag_3d = jnp.array(np.transpose(mag_comp_first, (1, 2, 3, 0)), dtype=jnp.float64)
+        rotation = np.deg2rad(20.0)
+        tilt = np.deg2rad(15.0)
+        dim_uv = (8, 8)
+
+        try:
+            ref_projector = RotTiltProjector(
+                mag_3d.shape[:3],
+                rotation=rotation,
+                tilt=tilt,
+                dim_uv=dim_uv,
+            )
+            ref = ref_projector(VectorData(a=1.0, field=mag_comp_first)).field
+        finally:
+            pyramid_quaternion.Quaternion._normalize = original_normalize
+
+        result = np.asarray(project_3d_tilted(mag_3d, rotation=rotation, tilt=tilt, dim_uv=dim_uv))
+
+        assert_allclose(
+            result[..., 0],
+            ref[0, 0],
+            atol=7e-1,
+            rtol=3e-1,
+            err_msg="Tilted u-component deviates too much from pyramid RotTiltProjector",
+        )
+        assert_allclose(
+            result[..., 1],
+            ref[1, 0],
+            atol=7e-1,
+            rtol=3e-1,
+            err_msg="Tilted v-component deviates too much from pyramid RotTiltProjector",
+        )
+
+    def test_projector_jacobian_runs(self):
+        dim_uv = (5, 4)
+
+        def project_from_vec(vec_flat):
+            mag = vec_flat.reshape(4, 3, 2, 3)
+            proj = project_3d_tilted(mag, rotation=0.2, tilt=0.1, dim_uv=dim_uv)
+            return proj.value.reshape(-1)
+
+        vec0 = jnp.zeros((4 * 3 * 2 * 3,), dtype=jnp.float64)
+        jac = jax.jacfwd(project_from_vec)(vec0)
+        assert jac.shape == (dim_uv[0] * dim_uv[1] * 2, vec0.size)
+
+
 # ===================================================================
 # 4. Forward models  (cf. pyramid test_forwardmodel.py)
 # ===================================================================
@@ -701,6 +807,44 @@ class TestForwardModels:
                 atol=1e-10,
                 err_msg=f"forward_model_3d inconsistent with project_3d+forward_model_2d (axis={axis})",
             )
+
+    def test_forward_model_3d_tilted_consistency(self, projector_ref, phasemapper_ref):
+        magdata = projector_ref["magdata"]
+        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        voxel_size = float(phasemapper_ref["voxel_size"])
+        rotation = np.deg2rad(18.0)
+        tilt = np.deg2rad(12.0)
+        dim_uv = (8, 8)
+
+        projected = project_3d_tilted(mag_3d, rotation=rotation, tilt=tilt, dim_uv=dim_uv)
+        phase_2step = forward_model_2d(projected, _Q(voxel_size, "nm"))
+        phase_direct = forward_model_3d_tilted(
+            mag_3d,
+            _Q(voxel_size, "nm"),
+            rotation=rotation,
+            tilt=tilt,
+            dim_uv=dim_uv,
+        )
+
+        assert_allclose(np.asarray(phase_direct), np.asarray(phase_2step), atol=1e-10)
+
+    def test_forward_model_3d_tilted_gradient_runs(self):
+        dim_uv = (6, 6)
+
+        def loss(vec_flat):
+            mag = vec_flat.reshape(4, 4, 4, 3)
+            phase = forward_model_3d_tilted(
+                mag,
+                _Q(1.0, "nm"),
+                rotation=0.2,
+                tilt=0.1,
+                dim_uv=dim_uv,
+            )
+            return jnp.sum(phase.value**2)
+
+        vec0 = jnp.zeros((4 * 4 * 4 * 3,), dtype=jnp.float64)
+        grad = jax.grad(loss)(vec0)
+        assert grad.shape == vec0.shape
 
 
 # ===================================================================
