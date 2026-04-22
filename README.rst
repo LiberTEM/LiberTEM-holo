@@ -70,6 +70,17 @@ Installation
   $ conda activate holo
   $ pip install libertem-holo
 
+For the MBIR and NeuralMag workflows, install NeuralMag from a Git remote instead
+of relying on the ignored ``vendor/`` checkout. Set ``NEURALMAG_GIT_URL`` to your
+fork or private repository and optionally ``NEURALMAG_GIT_REF`` to a branch, tag,
+or commit. The same environment variables are picked up by ``tox`` automatically.
+
+.. code-block:: shell
+
+  $ export NEURALMAG_GIT_URL=git@github.com:DavidLanders95/your-neuralmag-repo.git
+  $ export NEURALMAG_GIT_REF=mag_inversion
+  $ python scripts/install_neuralmag.py
+
 Input File formats
 ------------------
 LiberTEM-holo was designed specfically for working on larger stacks of images

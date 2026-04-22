@@ -109,10 +109,10 @@ def mbir_loss_2d(
     )
     pixel_size_q = _as_length_quantity(pixel_size)
 
-    magnetization_q = qnp.stack([
-        magnetization_q[..., 0] * mask,
-        magnetization_q[..., 1] * mask,
-    ], axis=-1)
+    # Apply mask to magnetization values, then reconstruct Quantity
+    # (This avoids issues with tracers in vmap/jit contexts)
+    mag_masked = magnetization_q.value * mask[..., None]
+    magnetization_q = u.Quantity(mag_masked, magnetization_q.unit)
 
     predictions = forward_model_single_rdfc_2d(
         magnetization_q,
@@ -122,12 +122,16 @@ def mbir_loss_2d(
     )
 
     residuals = predictions - phase_q
-    loss = 0.5 * qnp.sum(residuals ** 2)
+    loss = make_quantity(0.5 * qnp.sum(residuals.value ** 2), "rad2")
 
     rc = _normalize_reg_config(reg_config)
     lambda_exchange = _to_lambda_exchange(rc.lambda_exchange)
 
-    loss += lambda_exchange * exchange_loss_fn(magnetization_q, reg_mask)
+    exchange_loss = exchange_loss_fn(magnetization_q, reg_mask)
+    loss = make_quantity(
+        loss.value + lambda_exchange.value * exchange_loss.value,
+        "rad2",
+    )
     _assert_quantity_compatible(loss, "rad2", "loss")
 
     return loss

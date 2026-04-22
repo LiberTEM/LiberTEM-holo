@@ -156,11 +156,16 @@ def estimate_thickness_from_mip_phase(
     if use_abs:
         phase_for_estimate = make_quantity(jnp.abs(mip_phase_q.value), str(mip_phase_q.unit))
 
-    result = cast(
+    phase_rad = _as_angle_quantity(phase_for_estimate)
+    interaction_constant_rad_per_v_nm = cast(
         u.Quantity,
-        phase_for_estimate / (interaction_constant_q * mean_inner_potential_q),
+        u.uconvert("rad / (V nm)", interaction_constant_q),
     )
-    result = _to_nm(result)
+    voltage_v = cast(u.Quantity, u.uconvert("V", mean_inner_potential_q))
+    thickness_nm = phase_rad.value / (
+        interaction_constant_rad_per_v_nm.value * voltage_v.value
+    )
+    result = make_quantity(thickness_nm, "nm")
 
     _assert_quantity_compatible(result, "nm", "thickness")
     return result
@@ -203,11 +208,16 @@ def estimate_mip_phase_from_thickness(
     _validate_positive(mean_inner_potential_q, "mean_inner_potential")
     _validate_positive(interaction_constant_q, "interaction_constant")
 
-    result = cast(
+    thickness_nm = _to_nm(thickness_q)
+    interaction_constant_rad_per_v_nm = cast(
         u.Quantity,
-        interaction_constant_q * mean_inner_potential_q * thickness_q,
+        u.uconvert("rad / (V nm)", interaction_constant_q),
     )
-    result = cast(u.Quantity, u.uconvert("rad", result))
+    voltage_v = cast(u.Quantity, u.uconvert("V", mean_inner_potential_q))
+    phase_rad = (
+        interaction_constant_rad_per_v_nm.value * voltage_v.value * thickness_nm.value
+    )
+    result = make_quantity(phase_rad, "rad")
 
     _assert_quantity_compatible(result, "rad", "mip_phase")
     return result

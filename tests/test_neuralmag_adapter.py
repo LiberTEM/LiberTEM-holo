@@ -1,12 +1,13 @@
 import importlib.util
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
-import neuralmag as nm
 
-from libertem_holo.base.mbir import load_vortex_disc_fixture
+
+nm = pytest.importorskip("neuralmag")
 
 
 _ADAPTER_PATH = (
@@ -24,6 +25,26 @@ _SPEC.loader.exec_module(_MODULE)
 neuralmag_state_to_mbir_rho_m = _MODULE.neuralmag_state_to_mbir_rho_m
 mbir_rho_m_to_neuralmag = _MODULE.mbir_rho_m_to_neuralmag
 mbir_rho_m_to_neuralmag_state = _MODULE.mbir_rho_m_to_neuralmag_state
+
+
+class VortexDiscFixture(TypedDict):
+    rho_true: np.ndarray
+    m_true: np.ndarray
+    phi_true: np.ndarray
+    pixel_size_nm: float
+
+
+def _load_cached_vortex_disc_fixture(size: int) -> VortexDiscFixture:
+    fixture_path = (
+        Path(__file__).resolve().parent / "test_mbir_data" / f"vortex_disc_{size}_ku0.npz"
+    )
+    with np.load(fixture_path) as data:
+        return {
+            "rho_true": data["rho_true"],
+            "m_true": data["m_true"],
+            "phi_true": data["phi_true"],
+            "pixel_size_nm": float(np.asarray(data["pixel_size_nm"])),
+        }
 
 
 def test_neuralmag_state_to_mbir_rho_m_nodal_to_cell_and_transpose():
@@ -123,7 +144,7 @@ def test_mbir_rho_m_to_neuralmag_returns_vector_function_with_unit_norm_preserve
 
 
 def test_mbir_rho_m_to_neuralmag_cached_vortex_round_trip_rmse():
-    fixture = load_vortex_disc_fixture(32)
+    fixture = _load_cached_vortex_disc_fixture(32)
     rho = fixture["rho_true"]
     m = fixture["m_true"]
     pixel_size_nm = fixture["pixel_size_nm"]

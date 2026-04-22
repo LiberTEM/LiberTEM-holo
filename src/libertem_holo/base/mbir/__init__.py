@@ -41,183 +41,137 @@ them directly from :mod:`libertem_holo.base.mbir`.
 
 from __future__ import annotations
 
-from .units import (
-    B_REF,
-    ELECTRON_INTERACTION_CONSTANT_300KV,
-    KERNEL_COEFF,
-    MU_0,
-    PHI_0,
-    RampCoeffs,
-    add_units_to_inputs,
-    make_quantity,
-)
-from .types import (
-    BootstrapThresholdResult,
-    LCurveResult,
-    NewtonCGConfig,
-    RegConfig,
-    SolverConfig,
-    SolverResult,
-)
-from .regularization import exchange_loss_fn
-from .kernel import (
-    build_rdfc_kernel,
-    get_freq_grid,
-    phase_mapper_rdfc,
-    _rdfc_elementary_phase,
-)
-from .forward import (
-    apply_ramp,
-    forward_phase_from_density_and_magnetization,
-    forward_model_2d,
-    forward_model_3d,
-    forward_model_single_rdfc_2d,
-    project_3d,
-)
-from .solver import (
-    mbir_loss_2d,
-    reconstruct_2d,
-    reconstruct_2d_ensemble,
-    solve_mbir_2d,
-)
-from .physical import (
-    estimate_mip_phase_from_thickness,
-    estimate_thickness_from_mip_phase,
-    to_local_induction,
-    to_local_magnetization,
-    to_projected_induction_integral,
-    to_projected_magnetization_integral,
-)
-from .lcurve import (
-    decompose_loss,
-    kneedle_corner,
-    lcurve_sweep,
-    lcurve_sweep_vmap,
-)
-from .bootstrap import bootstrap_threshold_uncertainty_2d
-from .plotting import (
-    plot_bootstrap_mask_summary,
-    plot_lcurve,
-    plot_physical_bootstrap_uncertainty,
-)
-from .synthetic import (
-    domain_wall_magnetization,
-    soft_disc_support,
-    uniform_magnetization,
-    vortex_magnetization,
-)
-from .fixtures import (
-    generate_vortex_disc_fixture,
-    load_vortex_disc_fixture,
-    save_vortex_disc_fixture,
-    vortex_disc_fixture_path,
-)
-from .energy_backend import NeuralMagEnergyBackend
-from .inversion import (
-    CombinedBackend,
-    EquilibriumTorqueBackend,
-    FieldState,
-    IdentityBackend,
-    InversionResult,
-    NeuralMagCritic,
-    PhysicsBackend,
-    ScaledRhoExperimentResult,
-    SmoothnessBackend,
-    WeightedBackend,
-    analytic_vortex_init,
-    depth_correlation,
-    equilibrium_residual,
-    invert_magnetization,
-    iterations_to_threshold,
-    mz_rmse,
-    phase_residual,
-    plot_depth_profile,
-    plot_loss_history,
-    plot_loss_landscape_2d,
-    plot_m_slices,
-    project_unit_norm,
-    projected_m_error,
-    run_with_scaled_rho,
-    support_center_yx,
-    vortex_core_z_error,
-)
+from importlib import import_module
+from importlib.util import find_spec
+
+_EXPORTS_BY_MODULE = {
+    ".units": (
+        "B_REF",
+        "ELECTRON_INTERACTION_CONSTANT_300KV",
+        "KERNEL_COEFF",
+        "MU_0",
+        "PHI_0",
+        "RampCoeffs",
+        "add_units_to_inputs",
+        "make_quantity",
+    ),
+    ".types": (
+        "BootstrapThresholdResult",
+        "LCurveResult",
+        "NewtonCGConfig",
+        "RegConfig",
+        "SolverConfig",
+        "SolverResult",
+    ),
+    ".regularization": ("exchange_loss_fn",),
+    ".kernel": (
+        "build_rdfc_kernel",
+        "get_freq_grid",
+        "phase_mapper_rdfc",
+        "_rdfc_elementary_phase",
+    ),
+    ".forward": (
+        "apply_ramp",
+        "forward_phase_from_density_and_magnetization",
+        "forward_model_2d",
+        "forward_model_3d",
+        "forward_model_single_rdfc_2d",
+        "project_3d",
+    ),
+    ".solver": (
+        "mbir_loss_2d",
+        "reconstruct_2d",
+        "reconstruct_2d_ensemble",
+        "solve_mbir_2d",
+    ),
+    ".physical": (
+        "estimate_mip_phase_from_thickness",
+        "estimate_thickness_from_mip_phase",
+        "to_local_induction",
+        "to_local_magnetization",
+        "to_projected_induction_integral",
+        "to_projected_magnetization_integral",
+    ),
+    ".lcurve": (
+        "decompose_loss",
+        "kneedle_corner",
+        "lcurve_sweep",
+        "lcurve_sweep_vmap",
+    ),
+    ".bootstrap": ("bootstrap_threshold_uncertainty_2d",),
+    ".plotting": (
+        "plot_bootstrap_mask_summary",
+        "plot_lcurve",
+        "plot_physical_bootstrap_uncertainty",
+    ),
+    ".synthetic": (
+        "domain_wall_magnetization",
+        "soft_disc_support",
+        "uniform_magnetization",
+        "vortex_magnetization",
+    ),
+    ".fixtures": (
+        "generate_vortex_disc_fixture",
+        "load_vortex_disc_fixture",
+        "save_vortex_disc_fixture",
+        "vortex_disc_fixture_path",
+    ),
+    ".energy_backend": ("NeuralMagEnergyBackend",),
+}
+
+if find_spec(f"{__name__}.inversion") is not None:
+    _EXPORTS_BY_MODULE[".inversion"] = (
+        "CombinedBackend",
+        "EquilibriumTorqueBackend",
+        "FieldState",
+        "IdentityBackend",
+        "InversionResult",
+        "NeuralMagCritic",
+        "PhysicsBackend",
+        "ScaledRhoExperimentResult",
+        "SmoothnessBackend",
+        "WeightedBackend",
+        "analytic_vortex_init",
+        "depth_correlation",
+        "equilibrium_residual",
+        "invert_magnetization",
+        "iterations_to_threshold",
+        "mz_rmse",
+        "phase_residual",
+        "plot_depth_profile",
+        "plot_loss_history",
+        "plot_loss_landscape_2d",
+        "plot_m_slices",
+        "project_unit_norm",
+        "projected_m_error",
+        "run_with_scaled_rho",
+        "support_center_yx",
+        "vortex_core_z_error",
+    )
+
+_NAME_TO_MODULE = {
+    name: module_name
+    for module_name, names in _EXPORTS_BY_MODULE.items()
+    for name in names
+}
 
 __all__ = [
-    "B_REF",
-    "BootstrapThresholdResult",
-    "CombinedBackend",
-    "EquilibriumTorqueBackend",
-    "ELECTRON_INTERACTION_CONSTANT_300KV",
-    "FieldState",
-    "IdentityBackend",
-    "InversionResult",
-    "KERNEL_COEFF",
-    "LCurveResult",
-    "MU_0",
-    "NeuralMagCritic",
-    "NeuralMagEnergyBackend",
-    "NewtonCGConfig",
-    "PHI_0",
-    "PhysicsBackend",
-    "RampCoeffs",
-    "RegConfig",
-    "ScaledRhoExperimentResult",
-    "SmoothnessBackend",
-    "WeightedBackend",
-    "SolverConfig",
-    "SolverResult",
-    "add_units_to_inputs",
-    "analytic_vortex_init",
-    "apply_ramp",
-    "bootstrap_threshold_uncertainty_2d",
-    "build_rdfc_kernel",
-    "depth_correlation",
-    "decompose_loss",
-    "equilibrium_residual",
-    "estimate_mip_phase_from_thickness",
-    "estimate_thickness_from_mip_phase",
-    "exchange_loss_fn",
-    "forward_phase_from_density_and_magnetization",
-    "forward_model_2d",
-    "forward_model_3d",
-    "forward_model_single_rdfc_2d",
-    "generate_vortex_disc_fixture",
-    "get_freq_grid",
-    "invert_magnetization",
-    "iterations_to_threshold",
-    "kneedle_corner",
-    "lcurve_sweep",
-    "lcurve_sweep_vmap",
-    "load_vortex_disc_fixture",
-    "make_quantity",
-    "mbir_loss_2d",
-    "phase_mapper_rdfc",
-    "phase_residual",
-    "plot_depth_profile",
-    "plot_bootstrap_mask_summary",
-    "plot_lcurve",
-    "plot_loss_history",
-    "plot_loss_landscape_2d",
-    "plot_m_slices",
-    "plot_physical_bootstrap_uncertainty",
-    "project_3d",
-    "project_unit_norm",
-    "projected_m_error",
-    "reconstruct_2d",
-    "reconstruct_2d_ensemble",
-    "run_with_scaled_rho",
-    "solve_mbir_2d",
-    "to_local_induction",
-    "to_local_magnetization",
-    "to_projected_induction_integral",
-    "to_projected_magnetization_integral",
-    "domain_wall_magnetization",
-    "mz_rmse",
-    "soft_disc_support",
-    "save_vortex_disc_fixture",
-    "support_center_yx",
-    "uniform_magnetization",
-    "vortex_disc_fixture_path",
-    "vortex_core_z_error",
-    "vortex_magnetization",
+    name
+    for module_name, names in _EXPORTS_BY_MODULE.items()
+    for name in names
 ]
+
+
+def __getattr__(name: str):
+    module_name = _NAME_TO_MODULE.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module = import_module(module_name, __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
