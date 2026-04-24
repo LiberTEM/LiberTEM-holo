@@ -1,0 +1,62 @@
+\documentclass[12pt]{standalone}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+
+% Colours
+\definecolor{headerblue}{RGB}{30, 90, 160}
+\definecolor{rowgray}{RGB}{245, 247, 250}
+
+\begin{document}
+
+\renewcommand{\arraystretch}{1.55}
+\setlength{\tabcolsep}{10pt}
+
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{7.5cm}
+  >{\raggedright\arraybackslash}p{7.5cm}
+}
+
+\rowcolor{headerblue}
+\textcolor{white}{\textbf{LLG method}} &
+\textcolor{white}{\textbf{Steepest descent + BB step}} \\[4pt]
+
+\rowcolor{rowgray}
+\multicolumn{1}{c}{%
+  $\dfrac{\partial \mathbf{m}}{\partial t}
+    = -\gamma\,\mathbf{m}\times\mathbf{H}_{\mathrm{eff}}
+      + \alpha\,\mathbf{m}\times\dfrac{\partial \mathbf{m}}{\partial t}$
+} &
+\multicolumn{1}{c}{%
+  $\mathbf{m}_{n+1}
+    = \operatorname{normalize}\!\left(
+        \mathbf{m}_n - \tau_n^{\mathrm{BB}}\,\nabla_{\!S} E(\mathbf{m}_n)
+      \right)$
+} \\
+
+Physical time evolution &
+Numerical energy minimisation \\
+
+\rowcolor{rowgray}
+Includes precession and damping &
+Keeps only the downhill energy direction \\
+
+Follows a real dynamical trajectory &
+Takes artificial optimiser steps \\
+
+\rowcolor{rowgray}
+Useful for switching dynamics, relaxation paths, spin waves &
+Useful when you only care about the final equilibrium state \\
+
+Time step has physical meaning &
+BB step size has no physical time meaning \\
+
+\bottomrule
+\end{tabular}
+
+\end{document}
