@@ -16,6 +16,19 @@ def _default_axis2_hint() -> np.ndarray:
     return np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
 
+def _safe_norm(
+    vector: jax.Array,
+    *,
+    axis: int | tuple[int, ...] | None = None,
+    keepdims: bool = False,
+    eps: float = 1e-8,
+) -> jax.Array:
+    vector = jnp.asarray(vector)
+    eps_arr = jnp.asarray(eps, dtype=vector.dtype)
+    sq_norm = jnp.sum(vector * vector, axis=axis, keepdims=keepdims)
+    return jnp.sqrt(sq_norm + eps_arr * eps_arr)
+
+
 @dataclass(frozen=True)
 class DifferentiableAnisotropyConfig:
     """Weights and geometry for a differentiable phase/physics objective.
@@ -51,7 +64,7 @@ class DifferentiableAnisotropyFitResult:
 
 def _safe_normalize(vector: jax.Array, eps: float = 1e-8) -> jax.Array:
     vector = jnp.asarray(vector)
-    return vector / jnp.maximum(jnp.linalg.norm(vector), eps)
+    return vector / _safe_norm(vector, axis=-1, keepdims=True, eps=eps)
 
 
 def axis_angles_to_unit_vector(theta: jax.Array, phi: jax.Array) -> jax.Array:
@@ -91,7 +104,7 @@ def orthonormalize_anisotropy_axes_jax(
     hint = _safe_normalize(jnp.asarray(axis2_hint, dtype=axis1.dtype))
 
     axis2 = hint - jnp.dot(hint, axis1) * axis1
-    axis2_norm = jnp.linalg.norm(axis2)
+    axis2_norm = _safe_norm(axis2, eps=1e-12)
 
     fallback_hint = jnp.where(
         jnp.abs(axis1[0]) < 0.9,

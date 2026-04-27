@@ -702,6 +702,47 @@ class TestForwardModels:
                 err_msg=f"forward_model_3d inconsistent with project_3d+forward_model_2d (axis={axis})",
             )
 
+    def test_forward_model_3d_projection_step_size_defaults_to_pixel_size(self, projector_ref, phasemapper_ref):
+        """Omitting projection_step_size must preserve the historical isotropic behavior."""
+        magdata = projector_ref["magdata"]
+        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        voxel_size = float(phasemapper_ref["voxel_size"])
+
+        phase_default = forward_model_3d(mag_3d, _Q(voxel_size, "nm"), axis="z")
+        phase_explicit = forward_model_3d(
+            mag_3d,
+            _Q(voxel_size, "nm"),
+            projection_step_size=_Q(voxel_size, "nm"),
+            axis="z",
+        )
+
+        assert_allclose(np.asarray(phase_default), np.asarray(phase_explicit), atol=1e-12)
+
+    def test_forward_model_3d_projection_step_size_matches_manual_scaling(self, projector_ref, phasemapper_ref):
+        """Anisotropic dz support should match manual projected-field rescaling."""
+        magdata = projector_ref["magdata"]
+        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        pixel_size_nm = float(phasemapper_ref["voxel_size"])
+        projection_step_nm = 0.35 * pixel_size_nm
+
+        projected = project_3d(mag_3d, axis="z")
+        projected_scaled = _Q(
+            np.asarray(projected) * (projection_step_nm / pixel_size_nm),
+            "",
+        )
+        phase_manual = forward_model_2d(
+            projected_scaled,
+            _Q(pixel_size_nm, "nm"),
+        )
+        phase_direct = forward_model_3d(
+            mag_3d,
+            _Q(pixel_size_nm, "nm"),
+            projection_step_size=_Q(projection_step_nm, "nm"),
+            axis="z",
+        )
+
+        assert_allclose(np.asarray(phase_direct), np.asarray(phase_manual), atol=1e-10)
+
 
 # ===================================================================
 # 5. Auxiliary functions

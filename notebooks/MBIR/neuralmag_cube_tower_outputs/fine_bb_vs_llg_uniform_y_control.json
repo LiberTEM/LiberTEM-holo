@@ -1,0 +1,31 @@
+{
+  "bb_converged": true,
+  "bb_elapsed_s": 138.2813034390565,
+  "bb_max_g": 811.2310180664062,
+  "bb_n_iter": 1673,
+  "bb_vs_rerun_llg": {
+    "max_abs_angle_deg": 89.99999237060547,
+    "mean_abs_angle_deg": 68.0168685913086,
+    "mean_abs_dot": 0.35325801372528076,
+    "phase_loss": 0.047944169218326275,
+    "phase_rms": 0.3096584221955743
+  },
+  "bb_vs_saved_target": {
+    "phase_loss": 0.04794416855120834,
+    "phase_rms": 0.30965842004120714
+  },
+  "cellsize_nm": 3.0,
+  "fine_shape_xyz": [
+    112,
+    342,
+    56
+  ],
+  "generated_at": "2026-04-27T15:40:09",
+  "init_mode": "uniform_y",
+  "llg_elapsed_s": 170.0107681809459,
+  "rerun_llg_vs_saved_target": {
+    "phase_loss": 1.300676243946371e-13,
+    "phase_rms": 5.100345564658087e-07
+  },
+  "source_npz": "/Users/landers/LiberTEM-holo/notebooks/MBIR/neuralmag_cube_tower_outputs/cube_tower_relaxed_comparison.npz"
+}

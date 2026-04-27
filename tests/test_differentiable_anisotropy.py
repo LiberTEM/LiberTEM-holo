@@ -41,6 +41,20 @@ def test_angle_params_to_axes_returns_orthonormal_basis():
     np.testing.assert_allclose(np.asarray(axis1), axis, atol=1e-6)
 
 
+def test_angle_params_to_axes_handles_parallel_hint_with_finite_gradients():
+    axis2_hint = jnp.array([0.0, 0.0, 1.0], dtype=jnp.float32)
+    axis_angles = jnp.array([0.0, 0.0], dtype=jnp.float32)
+
+    def loss_fn(axis_angles_arg):
+        axis1, axis2, axis3 = angle_params_to_anisotropy_axes(axis_angles_arg, axis2_hint=axis2_hint)
+        return jnp.sum(axis1 + axis2 + axis3)
+
+    grad = jax.grad(loss_fn)(axis_angles)
+
+    assert grad.shape == (2,)
+    assert jnp.all(jnp.isfinite(grad))
+
+
 def test_phase_data_loss_prefers_matching_magnetization():
     rho, m = _random_unit_volume()
     rho_view, m_view = pad_phase_view_zyx_jax(rho, m, phase_pad=1)

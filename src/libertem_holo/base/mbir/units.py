@@ -295,11 +295,17 @@ def _validate_positive(value, name):
     """Raise ValueError if *value* is not positive.
 
     Handles both plain scalars and ``unxt.Quantity`` instances.
+    Skips validation silently when called inside a JAX JIT trace, where
+    concrete values are unavailable.
     """
+    inner = value.value if isinstance(value, u.Quantity) else value
+    # Abstract JAX tracers cannot be concretized; skip the check under JIT.
+    if isinstance(inner, jax.core.Tracer):
+        return
     if isinstance(value, u.Quantity):
-        v = float(value.value) if np.ndim(value.value) == 0 else float(np.min(np.asarray(value.value)))
+        v = float(inner) if np.ndim(inner) == 0 else float(np.min(np.asarray(inner)))
     else:
-        v = float(value) if np.ndim(value) == 0 else np.min(value)
+        v = float(inner) if np.ndim(inner) == 0 else np.min(inner)
     if v <= 0:
         raise ValueError(f"{name} must be positive, got {value}")
 

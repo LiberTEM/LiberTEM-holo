@@ -91,16 +91,13 @@ def decompose_loss(
     mask = jnp.asarray(mask)
     reg_mask = jnp.asarray(reg_mask)
 
-    masked_mag = qnp.stack([
-        magnetization[..., 0] * mask,
-        magnetization[..., 1] * mask,
-    ], axis=-1)
+    masked_mag = make_quantity(magnetization.value * mask[..., None], "")
 
     predicted = forward_model_single_rdfc_2d(
         masked_mag, ramp_coeffs, rdfc_kernel, pixel_size,
     )
-    residuals = predicted - phase
-    data_misfit = qnp.sum(residuals ** 2)
+    residuals = predicted.value - phase.value
+    data_misfit = make_quantity(jnp.sum(residuals * residuals), "rad2")
     exchange_norm = exchange_loss_fn(masked_mag, reg_mask)
 
     _assert_quantity_compatible(cast(u.Quantity, data_misfit), "rad2", "data_misfit")
@@ -398,18 +395,12 @@ def lcurve_sweep_vmap(
         )
 
     def _decompose_single(mag, ramp):
-        masked_mag = u.Quantity(
-            jnp.stack([
-                mag[..., 0] * mask,
-                mag[..., 1] * mask,
-            ], axis=-1),
-            "",
-        )
+        masked_mag = make_quantity(mag * mask[..., None], "")
         predicted = forward_model_single_rdfc_2d(
             masked_mag, _ramp_coeffs_from_array(ramp), rdfc_kernel, pixel_size,
         )
-        residuals = predicted - phase
-        dm = cast(u.Quantity, qnp.sum(residuals ** 2)).value
+        residuals = predicted.value - phase.value
+        dm = jnp.sum(residuals * residuals)
         rn = cast(u.Quantity, exchange_loss_fn(masked_mag, reg_mask)).value
         return dm, rn
 

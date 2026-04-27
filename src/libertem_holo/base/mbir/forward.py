@@ -108,7 +108,7 @@ def forward_model_single_rdfc_2d(
     # Kernel is defined in pixel coordinates; convert to physical phase scale.
     phase_density = (u.uconvert("nm", pixel_size_q).value**2) * phase_mapper_rdfc(
         u_field, v_field, rdfc_kernel,
-    ).value
+    )
     phase = _as_angle_quantity(u.Quantity(phase_density, "rad"))
     ramp = apply_ramp(ramp_coeffs_q, height, width, pixel_size_q)
 
@@ -249,6 +249,7 @@ def project_3d(
 def forward_model_3d(
     magnetization_3d,
     pixel_size,
+    projection_step_size=None,
     axis="z",
     ramp_coeffs=None,
     geometry="disc",
@@ -267,7 +268,13 @@ def forward_model_3d(
         3D magnetization of shape ``(Z, Y, X, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
     pixel_size : Quantity["length"]
-        Voxel size as a ``unxt.Quantity`` with length units.
+        Image-plane pixel size as a ``unxt.Quantity`` with length units.
+    projection_step_size : Quantity["length"], optional
+        Physical step size along the projection axis. Defaults to
+        ``pixel_size`` so existing isotropic behavior is unchanged.
+        When this differs from ``pixel_size``, the projected
+        magnetization is rescaled by ``projection_step_size / pixel_size``
+        before the 2D MBIR forward model is applied.
     axis : {'z', 'y', 'x'}, optional
         Projection axis, default ``'z'``.
     ramp_coeffs : RampCoeffs, optional
@@ -287,11 +294,24 @@ def forward_model_3d(
     Quantity["angle"]
         Predicted phase image of shape ``(V, U)``.
     """
+    pixel_size_q = _as_length_quantity(pixel_size)
+    _validate_positive(pixel_size_q, "pixel_size")
+    if projection_step_size is None:
+        projection_step_size_q = pixel_size_q
+    else:
+        projection_step_size_q = _as_length_quantity(projection_step_size)
+        _validate_positive(projection_step_size_q, "projection_step_size")
+
     projected = project_3d(magnetization_3d, axis=axis)
+    projection_scale = (
+        u.uconvert("nm", projection_step_size_q).value
+        / u.uconvert("nm", pixel_size_q).value
+    )
+    projected = u.Quantity(projected.value * projection_scale, str(projected.unit))
 
     return forward_model_2d(
         projected,
-        pixel_size,
+        pixel_size_q,
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
         prw_vec=prw_vec,
@@ -303,6 +323,7 @@ def forward_phase_from_density_and_magnetization(
     rho,
     magnetization_3d,
     pixel_size,
+    projection_step_size=None,
     axis="z",
     **kwargs,
 ):
@@ -311,6 +332,20 @@ def forward_phase_from_density_and_magnetization(
     The effective magnetization is formed as ``m_eff = rho * m`` and forwarded
     through :func:`forward_model_3d`. The returned value is a raw JAX array
     (without Quantity wrapper), suitable for synthetic inversion workflows.
+
+    Parameters
+    ----------
+    rho
+        Dimensionless support / density array with shape ``(Z, Y, X)``.
+    magnetization_3d
+        Dimensionless magnetization array with shape ``(Z, Y, X, 3)``.
+    pixel_size
+        Image-plane pixel size.
+    projection_step_size : Quantity["length"], optional
+        Physical step size along the projection axis. Defaults to
+        ``pixel_size`` for backward-compatible isotropic behavior.
+    axis : {'z', 'y', 'x'}, optional
+        Projection axis.
     """
     if isinstance(rho, u.Quantity):
         rho_q = _as_dimensionless_quantity(rho)
@@ -335,5 +370,11 @@ def forward_phase_from_density_and_magnetization(
     m_eff = _as_dimensionless_quantity(
         u.Quantity(rho_q.value[..., None] * magnetization_q.value, str(magnetization_q.unit)),
     )
-    phase = forward_model_3d(m_eff, pixel_size, axis=axis, **kwargs)
+    phase = forward_model_3d(
+        m_eff,
+        pixel_size,
+        projection_step_size=projection_step_size,
+        axis=axis,
+        **kwargs,
+    )
     return phase.value

@@ -62,7 +62,10 @@ def to_projected_induction_integral(
     magnetization = _as_dimensionless_quantity(magnetization)
     pixel_size = _as_length_quantity(pixel_size)
     reference_induction = _as_induction_quantity(reference_induction)
-    result = pixel_size * reference_induction * magnetization
+    result = make_quantity(
+        magnetization.value * pixel_size.value * reference_induction.value,
+        "T nm",
+    )
     _assert_quantity_compatible(result, "T nm", "projected_induction_integral")
     return cast(u.Quantity, u.uconvert("T nm", result))
 
@@ -102,7 +105,11 @@ def to_projected_magnetization_integral(
         pixel_size,
         reference_induction=reference_induction,
     )
-    result = induction / MU_0
+    mu0 = cast(u.Quantity, u.uconvert("T m / A", MU_0))
+    result = make_quantity(
+        induction.value * 1e-9 / mu0.value,
+        "A",
+    )
     _assert_quantity_compatible(result, "A", "projected_magnetization_integral")
     return cast(u.Quantity, u.uconvert("A", result))
 
@@ -279,7 +286,7 @@ def to_local_induction(
             str(thickness.unit),
         )
 
-    result = cast(u.Quantity, projected_induction_integral / divisor)
+    result = make_quantity(projected_induction_integral.value / divisor.value, "T")
     result = cast(u.Quantity, u.uconvert("T", result))
     if invalid_mask is not None and invalid_to_nan:
         result = make_quantity(
@@ -346,7 +353,10 @@ def to_local_magnetization(
             str(thickness.unit),
         )
 
-    result = cast(u.Quantity, projected_magnetization_integral / divisor)
+    result = make_quantity(
+        projected_magnetization_integral.value / (divisor.value * 1e-9),
+        "A / m",
+    )
     result = cast(u.Quantity, u.uconvert("A / m", result))
     if invalid_mask is not None and invalid_to_nan:
         result = make_quantity(

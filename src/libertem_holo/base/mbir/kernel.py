@@ -19,6 +19,7 @@ from .units import (
     _as_dimensionless_quantity,
     _as_length_quantity,
     _assert_quantity_compatible,
+    make_quantity,
 )
 
 def get_freq_grid(
@@ -186,7 +187,7 @@ def phase_mapper_rdfc(
     u_field: u.Quantity,
     v_field: u.Quantity,
     rdfc_kernel: dict[str, Any],
-) -> u.Quantity:
+) -> jax.Array:
     """Map (u, v) magnetization components to a phase image via RDFC.
 
     Uses a precomputed Fourier-space kernel from
@@ -203,11 +204,16 @@ def phase_mapper_rdfc(
 
     Returns
     -------
-    Quantity
-        Fourier-space phase-shift contribution of shape ``(H, W)``.
-        Carries the kernel's ``1/nm^2`` units; the forward model
+    jax.Array
+        Fourier-space phase-shift contribution of shape ``(H, W)``
+        expressed in the kernel's ``1/nm^2`` scale. The forward model
         multiplies by ``pixel_size**2`` to obtain radians.
     """
+    if not isinstance(u_field, u.Quantity):
+        u_field = make_quantity(u_field, "")
+    if not isinstance(v_field, u.Quantity):
+        v_field = make_quantity(v_field, "")
+
     u_field_q = cast(u.Quantity, _as_dimensionless_quantity(u_field))
     v_field_q = cast(u.Quantity, _as_dimensionless_quantity(v_field))
     height, width = u_field_q.shape
@@ -238,12 +244,9 @@ def phase_mapper_rdfc(
     phase_fft_val = u_fft.value * kernel_u_fft.value + v_fft.value * kernel_v_fft.value
     phase_pad = u.Quantity(jnp.fft.irfft2(phase_fft_val, s=dim_pad), str(kernel_u_fft.unit))
 
-    phase = u.Quantity(
-        jax.lax.dynamic_slice(
-            phase_pad.value,
-            (height - 1, width - 1),
-            (height, width),
-        ),
-        str(phase_pad.unit),
+    phase = jax.lax.dynamic_slice(
+        phase_pad.value,
+        (height - 1, width - 1),
+        (height, width),
     )
     return phase

@@ -1,0 +1,23 @@
+{
+  "bb_converged": true,
+  "bb_elapsed_s": 42.42964442912489,
+  "bb_loss_to_coarse_llg_target": 3.3864696888485923e-05,
+  "bb_max_g": 2158.27880859375,
+  "bb_n_iter": 955,
+  "bb_phase_rms_to_coarse_llg_target": 0.008229786530137062,
+  "cellsize_nm": 6.0,
+  "coarse_shape_xyz": [
+    56,
+    171,
+    28
+  ],
+  "generated_at": "2026-04-27 14:11:37",
+  "init_mode": "uniform_y",
+  "llg_elapsed_s": 159.6332461659331,
+  "magnetization_vs_coarse_llg_target": {
+    "max_abs_dm": 1.9999996423721313,
+    "mean_abs_dm": 1.3932205438613892,
+    "rms_dm": 1.5212877988815308
+  },
+  "phase_residual_rms_direct": 0.008229787461459637
+}

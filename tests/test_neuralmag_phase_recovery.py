@@ -83,7 +83,8 @@ def test_make_initial_m_cell_enforces_support_contract():
     assert np.count_nonzero(initialized[rho <= 0.5]) == 0
 
 
-def test_run_neuralmag_phase_recovery_smoke_enforces_support_constraints():
+@pytest.mark.parametrize("solver_family", ["neuralmag", "optax_lbfgs"])
+def test_run_neuralmag_phase_recovery_smoke_enforces_support_constraints(solver_family):
     pytest.importorskip("neuralmag")
     rho, m = _cube_support()
     m0 = make_initial_m_cell(
@@ -93,6 +94,7 @@ def test_run_neuralmag_phase_recovery_smoke_enforces_support_constraints():
         rng_seed=5,
     )
     config = NeuralMagPhaseRecoveryConfig(
+        solver_family=solver_family,
         phase_weight_schedule=(1e-4,),
         phase_pad=1,
         phase_energy_scale=1.0,
@@ -109,7 +111,7 @@ def test_run_neuralmag_phase_recovery_smoke_enforces_support_constraints():
         m0_cell_xyz=m0,
     )
 
-    assert result.n_iter == 1
+    assert 0 <= result.n_iter <= config.minimizer_max_iter
     assert len(result.history) == 2
     assert result.history[0]["event"] == "start"
     assert result.history[1]["event"] == "end"
@@ -120,6 +122,50 @@ def test_run_neuralmag_phase_recovery_smoke_enforces_support_constraints():
     norms = np.linalg.norm(result.m_recovered_xyz, axis=-1)
     assert np.allclose(norms[rho > 0.5], 1.0, atol=1e-6)
     assert np.count_nonzero(result.m_recovered_xyz[rho <= 0.5]) == 0
+
+
+@pytest.mark.parametrize("solver_family", ["neuralmag", "optax_lbfgs"])
+def test_run_neuralmag_phase_recovery_reuses_state_across_phase_schedule(monkeypatch, solver_family):
+    pytest.importorskip("neuralmag")
+    rho, m = _cube_support()
+    m0 = make_initial_m_cell(
+        rho,
+        m,
+        mode="random",
+        rng_seed=7,
+    )
+    config = NeuralMagPhaseRecoveryConfig(
+        solver_family=solver_family,
+        phase_weight_schedule=(1e-4, 3e-4),
+        phase_pad=1,
+        phase_energy_scale=1.0,
+        minimizer_max_iter=0,
+        demag_p=1,
+        init_mode="uniform_y",
+    )
+    build_calls: list[int] = []
+    original_build = neuralmag_phase_recovery._build_neuralmag_state
+
+    def counting_build(*args, **kwargs):
+        state, phase_terms = original_build(*args, **kwargs)
+        build_calls.append(id(state))
+        return state, phase_terms
+
+    monkeypatch.setattr(neuralmag_phase_recovery, "_build_neuralmag_state", counting_build)
+
+    result = run_neuralmag_phase_recovery(
+        rho,
+        m,
+        cellsize_nm=2.0,
+        config=config,
+        m0_cell_xyz=m0,
+    )
+
+    assert len(build_calls) == 1
+    assert result.n_iter == 0
+    assert len(result.history) == 4
+    assert [row["lambda_phase"] for row in result.history if row["event"] == "start"] == [1e-4, 3e-4]
+    assert [row["lambda_phase"] for row in result.history if row["event"] == "end"] == [1e-4, 3e-4]
 
 
 def test_select_anisotropy_orientation_from_phase_ranks_candidates(monkeypatch):

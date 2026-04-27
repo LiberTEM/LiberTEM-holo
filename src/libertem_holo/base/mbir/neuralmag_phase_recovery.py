@@ -17,6 +17,7 @@ from .kernel import build_rdfc_kernel
 MU0 = 4.0e-7 * np.pi
 
 InitMode = Literal["random", "uniform_y", "target_warm_start"]
+SolverFamily = Literal["neuralmag", "optax_lbfgs"]
 
 
 def _default_phase_schedule() -> tuple[float, ...]:
@@ -53,12 +54,15 @@ class NeuralMagPhaseRecoveryConfig:
     anisotropy_axis1: np.ndarray = field(default_factory=_default_axis1)
     anisotropy_axis2: np.ndarray = field(default_factory=_default_axis2)
 
+    solver_family: SolverFamily = "neuralmag"
     minimizer_method: str = "alternating"
     minimizer_update: str = "cayley"
     minimizer_tol: float = 1e-3
     minimizer_max_iter: int = 75
     minimizer_tau_min: float = 1e-18
     minimizer_tau_max: float = 1e-4
+    optax_lbfgs_memory_size: int = 10
+    optax_lbfgs_max_linesearch_steps: int = 20
 
 
 @dataclass(frozen=True)
@@ -215,8 +219,10 @@ def make_support_projection(
 
     def projection(m):
         support_cast = support.astype(m.dtype)
-        norms = jnp.linalg.norm(m, axis=-1, keepdims=True)
-        normalized = m / jnp.maximum(norms, jnp.finfo(m.dtype).eps)
+        eps = jnp.asarray(jnp.finfo(m.dtype).eps, dtype=m.dtype)
+        sq_norms = jnp.sum(m * m, axis=-1, keepdims=True)
+        safe_norms = jnp.sqrt(jnp.maximum(sq_norms, eps * eps))
+        normalized = m / safe_norms
         return jnp.where(support_cast[..., None] > 0, normalized, 0.0)
 
     return projection
@@ -371,13 +377,11 @@ def _make_phase_field_callables(
     target: NeuralMagPhaseTarget,
     config: NeuralMagPhaseRecoveryConfig,
     *,
-    lambda_phase: float,
     phase_energy_scale: float,
 ) -> dict[str, Any]:
     target_const = jnp.asarray(target.phase_target, dtype=jnp.float32)
     mask_const = jnp.asarray(target.phase_mask, dtype=jnp.float32)
     denom = jnp.maximum(jnp.sum(mask_const), 1.0)
-    scale = jnp.asarray(lambda_phase * phase_energy_scale, dtype=jnp.float32)
     field_scale = jnp.asarray(MU0 * config.Msat_A_per_m, dtype=jnp.float32)
 
     def raw_phase_loss(m):
@@ -387,10 +391,12 @@ def _make_phase_field_callables(
 
     grad_raw_phase_loss = jax.grad(raw_phase_loss)
 
-    def E_phase(m):
+    def E_phase(m, phase_scale):
+        scale = jnp.asarray(phase_scale, dtype=m.dtype)
         return scale * raw_phase_loss(m)
 
-    def h_phase(m):
+    def h_phase(m, phase_scale):
+        scale = jnp.asarray(phase_scale, dtype=m.dtype)
         grad = grad_raw_phase_loss(m)
         return -scale * grad / jnp.maximum(field_scale, jnp.finfo(m.dtype).eps)
 
@@ -398,13 +404,24 @@ def _make_phase_field_callables(
         return jnp.zeros(m.shape[:-1], dtype=m.dtype)
 
     return {
-        "lambda_phase": float(lambda_phase),
         "phase_energy_scale": float(phase_energy_scale),
         "raw_phase_loss": jax.jit(raw_phase_loss),
         "E_phase": jax.jit(E_phase),
         "h_phase": jax.jit(h_phase),
         "e_phase": e_phase,
     }
+
+
+def _set_phase_scale(
+    state,
+    phase_terms: Mapping[str, Any],
+    *,
+    lambda_phase: float,
+    phase_energy_scale: float,
+) -> None:
+    """Update the runtime phase-energy scale on a reused NeuralMag state."""
+    state.phase_scale = state.tensor(float(lambda_phase * phase_energy_scale))
+    phase_terms["lambda_phase"] = float(lambda_phase)
 
 
 def _build_neuralmag_state(
@@ -474,6 +491,11 @@ def _build_neuralmag_state(
     phase_terms = _make_phase_field_callables(
         target,
         config,
+        phase_energy_scale=phase_energy_scale,
+    )
+    _set_phase_scale(
+        state,
+        phase_terms,
         lambda_phase=lambda_phase,
         phase_energy_scale=phase_energy_scale,
     )
@@ -492,6 +514,139 @@ def _current_max_gradient(state) -> float:
     m_dot_m = jnp.sum(m * m, axis=-1, keepdims=True)
     g = m * m_dot_h - h * m_dot_m
     return float(np.asarray(jnp.sqrt(jnp.sum(g * g, axis=-1).max())))
+
+
+def _make_projected_energy_objective(state, projection):
+    """Build the projected total-energy objective used by Optax solvers."""
+    energy_fn = jax.jit(state.resolve("E", ["m"]))
+
+    def objective(m):
+        return energy_fn(projection(m))
+
+    return objective
+
+
+def _run_neuralmag_minimizer_stage(state, config: NeuralMagPhaseRecoveryConfig, projection) -> tuple[int, float]:
+    """Run one scheduled stage using NeuralMag's built-in BB minimizer."""
+    import neuralmag as nm
+
+    minimizer_kwargs = {
+        "method": config.minimizer_method,
+        "update": config.minimizer_update,
+        "tol": config.minimizer_tol,
+        "max_iter": config.minimizer_max_iter,
+        "tau_min": config.minimizer_tau_min,
+        "tau_max": config.minimizer_tau_max,
+    }
+    minimizer_uses_projection = True
+    try:
+        minimizer = nm.EnergyMinimizer(
+            state,
+            projection=projection,
+            **minimizer_kwargs,
+        )
+    except TypeError:
+        minimizer = nm.EnergyMinimizer(
+            state,
+            **minimizer_kwargs,
+        )
+        minimizer_uses_projection = False
+
+    try:
+        max_g_value, info = minimizer.minimize(return_info=True)
+        n_iter = int(np.asarray(info["n_iter"]))
+    except TypeError:
+        max_g_value = minimizer.minimize()
+        n_iter = int(minimizer.n_iter)
+    if not minimizer_uses_projection:
+        state.m.tensor = projection(state.m.tensor)
+    return n_iter, float(np.asarray(max_g_value))
+
+
+def _run_optax_lbfgs_stage(state, config: NeuralMagPhaseRecoveryConfig, projection) -> tuple[int, float]:
+    """Run one scheduled stage using Optax L-BFGS on the projected energy."""
+    try:
+        import optax
+    except ImportError as exc:
+        raise ImportError("solver_family='optax_lbfgs' requires optax.") from exc
+
+    linesearch = optax.scale_by_zoom_linesearch(
+        max_linesearch_steps=config.optax_lbfgs_max_linesearch_steps,
+        initial_guess_strategy="one",
+    )
+    solver = optax.lbfgs(
+        memory_size=config.optax_lbfgs_memory_size,
+        linesearch=linesearch,
+    )
+    objective = _make_projected_energy_objective(state, projection)
+
+    value_and_grad = optax.value_and_grad_from_state(objective)
+    params = projection(state.m.tensor)
+    state.m.tensor = params
+    opt_state = solver.init(params)
+    max_g = _current_max_gradient(state)
+    n_iter = 0
+
+    for iteration in range(config.minimizer_max_iter):
+        if not np.isfinite(max_g) or max_g <= config.minimizer_tol:
+            break
+        value, grad = value_and_grad(params, state=opt_state)
+        updates, opt_state = solver.update(
+            grad,
+            opt_state,
+            params,
+            value=value,
+            grad=grad,
+            value_fn=objective,
+        )
+        params = projection(optax.apply_updates(params, updates))
+        state.m.tensor = params
+        max_g = _current_max_gradient(state)
+        n_iter = iteration + 1
+
+    return n_iter, max_g
+
+
+def _run_solver_stage(state, config: NeuralMagPhaseRecoveryConfig, projection) -> tuple[int, float]:
+    """Dispatch one scheduled stage to the configured solver family."""
+    if config.solver_family == "neuralmag":
+        return _run_neuralmag_minimizer_stage(state, config, projection)
+    if config.solver_family == "optax_lbfgs":
+        return _run_optax_lbfgs_stage(state, config, projection)
+    raise ValueError(f"Unsupported solver_family {config.solver_family!r}.")
+
+
+def _resolve_phase_recovery_target(
+    rho_xyz: np.ndarray | NeuralMagPhaseTarget,
+    m_target_xyz: np.ndarray | None,
+    *,
+    cellsize_nm: float | None,
+    config: NeuralMagPhaseRecoveryConfig,
+    crop_shape: tuple[int, int, int] | None,
+) -> NeuralMagPhaseTarget:
+    """Normalize raw arrays or a pre-built target to one target object."""
+    if isinstance(rho_xyz, NeuralMagPhaseTarget):
+        return rho_xyz
+    if m_target_xyz is None or cellsize_nm is None:
+        raise ValueError("m_target_xyz and cellsize_nm are required when passing raw arrays.")
+    return prepare_neuralmag_phase_target(
+        rho_xyz,
+        m_target_xyz,
+        cellsize_nm=cellsize_nm,
+        config=config,
+        crop_shape=crop_shape,
+    )
+
+
+def _resolve_phase_energy_scale(
+    target: NeuralMagPhaseTarget,
+    config: NeuralMagPhaseRecoveryConfig,
+    phase_schedule: tuple[float, ...],
+) -> float:
+    """Resolve the runtime phase-energy scale from config or calibration."""
+    if config.phase_energy_scale is not None:
+        return float(config.phase_energy_scale)
+    return calibrate_phase_energy_scale(target, config, lambda_ref=phase_schedule[0])
 
 
 def _metrics_for_state(
@@ -514,7 +669,7 @@ def _metrics_for_state(
     phase_rms = float(np.sqrt(np.sum(residual * residual) / max(float(mask.sum()), 1.0)))
 
     raw_phase_loss = float(phase_terms["raw_phase_loss"](state.m.tensor))
-    e_phase = float(phase_terms["E_phase"](state.m.tensor))
+    e_phase = float(phase_terms["E_phase"](state.m.tensor, state.phase_scale))
     e_micro = float(np.asarray(state.E_micromagnetic)) if hasattr(state, "E_micromagnetic") else np.nan
     e_total = float(np.asarray(state.E)) if hasattr(state, "E") else e_micro + e_phase
 
@@ -577,7 +732,7 @@ def calibrate_phase_energy_scale(
         m0_cell_xyz=None,
     )
     m_ref = state.m.tensor
-    h_phase_ref = phase_terms["h_phase"](m_ref)
+    h_phase_ref = phase_terms["h_phase"](m_ref, state.phase_scale)
     h_micro_ref = state.h_micromagnetic.tensor
     phase_max = float(jnp.max(jnp.abs(h_phase_ref)))
     micro_max = float(jnp.max(jnp.abs(h_micro_ref)))
@@ -596,52 +751,41 @@ def run_neuralmag_phase_recovery(
 ) -> NeuralMagPhaseRecoveryResult:
     """Run scheduled NeuralMag recovery constrained by an MBIR phase image."""
     config = config or NeuralMagPhaseRecoveryConfig()
-    if isinstance(rho_xyz, NeuralMagPhaseTarget):
-        target = rho_xyz
-    else:
-        if m_target_xyz is None or cellsize_nm is None:
-            raise ValueError("m_target_xyz and cellsize_nm are required when passing raw arrays.")
-        target = prepare_neuralmag_phase_target(
-            rho_xyz,
-            m_target_xyz,
-            cellsize_nm=cellsize_nm,
-            config=config,
-            crop_shape=crop_shape,
-        )
+    target = _resolve_phase_recovery_target(
+        rho_xyz,
+        m_target_xyz,
+        cellsize_nm=cellsize_nm,
+        config=config,
+        crop_shape=crop_shape,
+    )
 
     phase_schedule = tuple(float(v) for v in config.phase_weight_schedule)
     if not phase_schedule:
         raise ValueError("phase_weight_schedule must contain at least one value.")
 
-    phase_energy_scale = (
-        float(config.phase_energy_scale)
-        if config.phase_energy_scale is not None
-        else calibrate_phase_energy_scale(target, config, lambda_ref=phase_schedule[0])
-    )
+    phase_energy_scale = _resolve_phase_energy_scale(target, config, phase_schedule)
     projection = make_support_projection(
         target.rho_xyz,
         threshold=config.support_threshold,
     )
 
-    try:
-        import neuralmag as nm
-    except ImportError as exc:
-        raise ImportError("run_neuralmag_phase_recovery requires neuralmag.") from exc
-
     history: list[dict[str, float | int | str]] = []
     total_iter = 0
-    m0_cell: np.ndarray | None = m0_cell_xyz
-    state = None
-    phase_terms: Mapping[str, Any] | None = None
+    state, phase_terms = _build_neuralmag_state(
+        target,
+        config,
+        lambda_phase=phase_schedule[0],
+        phase_energy_scale=phase_energy_scale,
+        m0_cell_xyz=m0_cell_xyz,
+    )
     max_g = np.nan
 
     for stage, lambda_phase in enumerate(phase_schedule):
-        state, phase_terms = _build_neuralmag_state(
-            target,
-            config,
+        _set_phase_scale(
+            state,
+            phase_terms,
             lambda_phase=lambda_phase,
             phase_energy_scale=phase_energy_scale,
-            m0_cell_xyz=m0_cell,
         )
         state.m.tensor = projection(state.m.tensor)
         initial_max_g = _current_max_gradient(state)
@@ -657,42 +801,8 @@ def run_neuralmag_phase_recovery(
                 max_g=initial_max_g,
             )
         )
-        minimizer_kwargs = {
-            "method": config.minimizer_method,
-            "update": config.minimizer_update,
-            "tol": config.minimizer_tol,
-            "max_iter": config.minimizer_max_iter,
-            "tau_min": config.minimizer_tau_min,
-            "tau_max": config.minimizer_tau_max,
-        }
-        minimizer_uses_projection = True
-        try:
-            minimizer = nm.EnergyMinimizer(
-                state,
-                projection=projection,
-                **minimizer_kwargs,
-            )
-        except TypeError:
-            # Older NeuralMag JAX backends do not support projection=.
-            minimizer = nm.EnergyMinimizer(
-                state,
-                **minimizer_kwargs,
-            )
-            minimizer_uses_projection = False
-
-        try:
-            max_g_value, info = minimizer.minimize(return_info=True)
-            n_iter = int(np.asarray(info["n_iter"]))
-        except TypeError:
-            max_g_value = minimizer.minimize()
-            n_iter = int(minimizer.n_iter)
-        if not minimizer_uses_projection:
-            # Keep behavior consistent across backends by applying support
-            # projection after each stage when in-solver projection is absent.
-            state.m.tensor = projection(state.m.tensor)
-        max_g = float(np.asarray(max_g_value))
+        n_iter, max_g = _run_solver_stage(state, config, projection)
         total_iter += n_iter
-        m0_cell = np.asarray(state.m.tensor, dtype=np.float32)
         history.append(
             _metrics_for_state(
                 state,
@@ -705,10 +815,6 @@ def run_neuralmag_phase_recovery(
                 max_g=max_g,
             )
         )
-
-    if state is None or phase_terms is None:
-        raise RuntimeError("Recovery did not run any phase-weight stages.")
-
     m_recovered = np.asarray(state.m.tensor, dtype=np.float32)
     phase_recovered = np.asarray(_predict_phase_from_m(state.m.tensor, target, config), dtype=np.float32)
     return NeuralMagPhaseRecoveryResult(
