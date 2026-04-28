@@ -555,13 +555,10 @@ def main() -> None:
 
     if args.skip_coarse and args.skip_fine and not args.llg_report_only:
         raise SystemExit("Nothing to do: both controls were skipped.")
-    if not FINE_TARGET_NPZ.exists():
-        raise FileNotFoundError(f"Missing saved cube-tower target: {FINE_TARGET_NPZ}")
+    if args.llg_report_only and not SUMMARY_JSON.exists():
+        raise FileNotFoundError(f"Missing existing cube summary: {SUMMARY_JSON}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    nm = ensure_neuralmag_jax_backend()
-    backend_name = getattr(getattr(nm, "config", None), "backend", None)
-    backend_name = getattr(backend_name, "name", backend_name)
 
     summary: dict[str, object] = {}
     if SUMMARY_JSON.exists():
@@ -570,8 +567,16 @@ def main() -> None:
         except json.JSONDecodeError:
             summary = {}
 
+    needs_solver_run = (not args.skip_coarse) or (not args.skip_fine)
+    if needs_solver_run:
+        if not FINE_TARGET_NPZ.exists():
+            raise FileNotFoundError(f"Missing saved cube-tower target: {FINE_TARGET_NPZ}")
+        nm = ensure_neuralmag_jax_backend()
+        backend_name = getattr(getattr(nm, "config", None), "backend", None)
+        backend_name = getattr(backend_name, "name", backend_name)
+        summary["neuralmag_backend"] = backend_name
+
     summary["fine_target_npz"] = str(FINE_TARGET_NPZ.relative_to(REPO_ROOT))
-    summary["neuralmag_backend"] = backend_name
 
     if not args.skip_coarse:
         coarse_modes = ("target", "random") if args.coarse_mode == "all" else (args.coarse_mode,)
