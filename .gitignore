@@ -31,3 +31,5 @@ data
 src/libertem_holo/_baked_revision.py
 *.dm4
 /empyre-pyramid-master-tests
+*.ovf
+*.npz
