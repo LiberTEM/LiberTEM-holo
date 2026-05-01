@@ -1,0 +1,5 @@
+libertem-holo
+neuralmag[jax]
+matplotlib
+ipykernel
+jupyterlab>=4
