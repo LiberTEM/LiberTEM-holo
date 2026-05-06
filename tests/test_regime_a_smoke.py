@@ -4,6 +4,7 @@ import unxt as u
 import jax.numpy as jnp
 
 from libertem_holo.base.mbir import (
+    B_REF,
     RampCoeffs,
     apply_ramp,
     depth_correlation,
@@ -45,6 +46,7 @@ def _load_smoke_fixture(size: int = 16):
             rho=rho,
             magnetization_3d=m,
             pixel_size=pixel_size,
+            reference_induction=B_REF,
             axis="z",
         ),
         dtype=np.float32,
@@ -53,11 +55,11 @@ def _load_smoke_fixture(size: int = 16):
 
 
 def _support_center_yx(rho):
-    support = np.argwhere(rho.max(axis=0) > 0.5)
+    support = np.argwhere(rho.max(axis=2) > 0.5)
     if support.size == 0:
         raise ValueError("Support mask is empty.")
-    center = np.round(support.mean(axis=0)).astype(int)
-    return int(center[0]), int(center[1])
+    center_xy = np.round(support.mean(axis=0)).astype(int)
+    return int(center_xy[1]), int(center_xy[0])
 
 
 def _make_neuralmag_backend(rho, pixel_size_nm: float):

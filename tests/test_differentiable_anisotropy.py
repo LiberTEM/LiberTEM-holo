@@ -4,6 +4,7 @@ import numpy as np
 import unxt as u
 
 from libertem_holo.base.mbir import (
+    B_REF,
     DifferentiableAnisotropyConfig,
     angle_params_to_anisotropy_axes,
     joint_phase_anisotropy_loss,
@@ -62,6 +63,7 @@ def test_phase_data_loss_prefers_matching_magnetization():
         rho_view,
         m_view,
         pixel_size=u.Quantity(2.0, "nm"),
+        reference_induction=B_REF,
         axis="z",
         geometry="disc",
     )
@@ -103,10 +105,15 @@ def test_joint_phase_anisotropy_loss_has_finite_gradients():
         rho_view,
         m_view,
         pixel_size=u.Quantity(2.0, "nm"),
+        reference_induction=B_REF,
         axis=config.projection_axis,
         geometry=config.geometry,
     )
-    rdfc_kernel = build_rdfc_kernel(tuple(phase_target.shape), geometry=config.geometry)
+    rdfc_kernel = build_rdfc_kernel(
+        tuple(phase_target.shape),
+        reference_induction=B_REF,
+        geometry=config.geometry,
+    )
 
     axis = np.array([0.45, 0.2, 0.87], dtype=np.float32)
     axis = axis / np.linalg.norm(axis)
@@ -154,6 +161,7 @@ def test_joint_phase_anisotropy_loss_handles_zero_off_support_gradients():
         rho_view,
         m_view,
         pixel_size=u.Quantity(2.0, "nm"),
+        reference_induction=B_REF,
         axis=config.projection_axis,
         geometry=config.geometry,
     )
@@ -195,6 +203,7 @@ def test_optimize_joint_phase_anisotropy_reduces_loss_and_preserves_support():
         rho_view,
         m_view,
         pixel_size=u.Quantity(2.0, "nm"),
+        reference_induction=B_REF,
         axis=config.projection_axis,
         geometry=config.geometry,
     )

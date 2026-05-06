@@ -1,7 +1,6 @@
 """Model-based iterative reconstruction (MBIR) for 2D projected magnetization.
 
 Unit conventions
-----------------
 Public functions in this package generally require ``unxt.Quantity`` inputs
 for physical parameters and return ``Quantity``-annotated outputs, unless
 an API explicitly documents scalar convenience inputs.
@@ -13,13 +12,16 @@ an API explicitly documents scalar convenience inputs.
   named tuple with ``unxt.Quantity`` fields (offset in rad, slopes in rad/nm).
 * ``PHI_0`` — magnetic flux quantum :math:`h/(2e)` expressed as
   ``Quantity(2067.83, "T nm2")``.
-* ``B_REF`` — reference magnetic induction :math:`B_0 = 1\\,\\text{T}`,
-  baked into ``KERNEL_COEFF``.
+* ``B_REF`` — conventional 1 T reference magnetic induction kept for
+  reconstruction defaults and reference conversions.
 * ``KERNEL_COEFF`` — :math:`B_{\\text{ref}} / (2 \\Phi_0)` with units
-  :math:`1/\\text{nm}^2`.
+  :math:`1/\\text{nm}^2` for the 1 T reference case.
 
 The reconstructed magnetization is **dimensionless** (normalised
-:math:`M / M_s`).  Phase outputs carry ``Quantity["rad"]``.
+:math:`M / M_s`). Public forward-model calls now also require an explicit
+``reference_induction`` so phase amplitude is chosen at the call boundary
+instead of being hidden inside the kernel. Phase outputs carry
+``Quantity["rad"]``.
 
 This is a package; the implementation is split across submodules:
 
@@ -65,13 +67,15 @@ _EXPORTS_BY_MODULE = {
     ),
     ".regularization": ("exchange_loss_fn",),
     ".kernel": (
-        "build_rdfc_kernel",
         "get_freq_grid",
         "phase_mapper_rdfc",
         "_rdfc_elementary_phase",
     ),
     ".forward": (
         "apply_ramp",
+        "phase_from_magnetisation",
+        "phase_from_magnetization",
+        "phase_from_density_and_magnetization",
         "forward_phase_from_density_and_magnetization",
         "forward_model_2d",
         "forward_model_3d",
@@ -221,6 +225,16 @@ __all__ = [
     for module_name, names in _EXPORTS_BY_MODULE.items()
     for name in names
 ]
+
+phase_from_magnetisation = import_module(
+    ".forward", __name__
+).phase_from_magnetisation
+phase_from_magnetization = import_module(
+    ".forward", __name__
+).phase_from_magnetization
+phase_from_density_and_magnetization = import_module(
+    ".forward", __name__
+).phase_from_density_and_magnetization
 
 
 def __getattr__(name: str):

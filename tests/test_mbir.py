@@ -24,19 +24,28 @@ import jax.numpy as jnp  # noqa: E402
 import libertem_holo.base.mbir as mbir_mod  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
+    B_REF,
     LCurveResult,
     NewtonCGConfig,
     RampCoeffs,
     SolverResult,
     _rdfc_elementary_phase,
-    build_rdfc_kernel,
     kneedle_corner,
     mbir_loss_2d,
 )
+from libertem_holo.base.mbir.forward import (  # noqa: E402
+    forward_model_3d_tilted as _forward_model_3d_tilted,
+    project_3d_tilted as _project_3d_tilted,
+)
+from libertem_holo.base.mbir.kernel import build_rdfc_kernel as _build_rdfc_kernel  # noqa: E402
 import unxt as u
 
 _Q = u.Quantity  # shorthand for test readability
 _KERNEL_COEFF_FLOAT = 1.0 / (2 * 2067.83)
+
+
+def build_rdfc_kernel(dim_uv, **kwargs):
+    return _build_rdfc_kernel(dim_uv, reference_induction=B_REF, **kwargs)
 
 
 def _ramp_array(rc):
@@ -108,6 +117,7 @@ def forward_model_single_rdfc_2d(magnetization, ramp_coeffs, rdfc_kernel, pixel_
         _ramp_q(ramp_coeffs),
         rdfc_kernel,
         _pixel_size_q(pixel_size),
+        B_REF,
     )
 
 
@@ -115,6 +125,7 @@ def forward_model_2d(magnetization, pixel_size, ramp_coeffs=None, **kwargs):
     return mbir_mod.forward_model_2d(
         _mag_q(magnetization),
         _pixel_size_q(pixel_size),
+        reference_induction=kwargs.pop("reference_induction", B_REF),
         ramp_coeffs=_ramp_q(ramp_coeffs),
         **kwargs,
     )
@@ -124,7 +135,30 @@ def forward_model_3d(magnetization_3d, pixel_size, axis="z", ramp_coeffs=None, *
     return mbir_mod.forward_model_3d(
         _mag_q(magnetization_3d),
         _pixel_size_q(pixel_size),
+        reference_induction=kwargs.pop("reference_induction", B_REF),
         axis=axis,
+        ramp_coeffs=_ramp_q(ramp_coeffs),
+        **kwargs,
+    )
+
+
+def project_3d_tilted(magnetization_3d, rotation, tilt, dim_uv=None):
+    return _project_3d_tilted(
+        _mag_q(magnetization_3d),
+        rotation=rotation,
+        tilt=tilt,
+        dim_uv=dim_uv,
+    )
+
+
+def forward_model_3d_tilted(magnetization_3d, pixel_size, rotation, tilt, dim_uv=None, ramp_coeffs=None, **kwargs):
+    return _forward_model_3d_tilted(
+        _mag_q(magnetization_3d),
+        _pixel_size_q(pixel_size),
+        reference_induction=kwargs.pop("reference_induction", B_REF),
+        rotation=rotation,
+        tilt=tilt,
+        dim_uv=dim_uv,
         ramp_coeffs=_ramp_q(ramp_coeffs),
         **kwargs,
     )
@@ -527,9 +561,9 @@ class TestProject3D:
 
     @pytest.mark.parametrize("axis", ["z", "y", "x"])
     def test_projection_matches_pyramid(self, projector_ref, axis):
-        # Pyramid format: (comp, Z, Y, X) → our format: (Z, Y, X, comp)
+        # Pyramid format: (comp, Z, Y, X) -> our XYZ format: (X, Y, Z, comp)
         mag_3d = jnp.array(
-            np.transpose(projector_ref["magdata"], (1, 2, 3, 0)),
+            np.transpose(projector_ref["magdata"], (3, 2, 1, 0)),
             dtype=jnp.float64,
         )
         result = project_3d(mag_3d, axis=axis)
@@ -549,20 +583,19 @@ class TestProject3D:
         )
 
     def test_projection_shape_z(self):
-        mag_3d = jnp.zeros((6, 5, 4, 3))
+        mag_3d = jnp.zeros((4, 5, 6, 3))
         result = project_3d(mag_3d, axis="z")
         assert result.shape == (5, 4, 2)
 
     def test_projection_shape_y(self):
-        mag_3d = jnp.zeros((6, 5, 4, 3))
+        mag_3d = jnp.zeros((4, 5, 6, 3))
         result = project_3d(mag_3d, axis="y")
         assert result.shape == (6, 4, 2)
 
     def test_projection_shape_x(self):
-        mag_3d = jnp.zeros((6, 5, 4, 3))
+        mag_3d = jnp.zeros((4, 5, 6, 3))
         result = project_3d(mag_3d, axis="x")
-        # x-axis: sum over X (axis=2) -> (Z, Y, 3) -> coeff -> (Z, Y, 2)
-        # then transpose -> (Y, Z, 2) = (5, 6, 2)
+        # x-axis: sum over X (axis=0) -> (Y, Z, 3) -> coeff -> (Y, Z, 2)
         assert result.shape == (5, 6, 2)
 
     def test_projection_invalid_axis(self):
@@ -572,9 +605,9 @@ class TestProject3D:
 
     def test_uniform_field_projection(self):
         """Uniform 3D field: projection sums over depth."""
-        mag_3d = jnp.ones((4, 5, 6, 3), dtype=jnp.float64)
+        mag_3d = jnp.ones((6, 5, 4, 3), dtype=jnp.float64)
         result = project_3d(mag_3d, axis="z")
-        # z-axis: sum over Z (4 slices of 1.0) → 4.0
+        # z-axis: sum over Z (4 slices of 1.0) -> 4.0
         # coeff for z: u=mx, v=my so (u=4, v=4)
         assert_allclose(np.asarray(result[..., 0]), 4.0, atol=1e-12)
         assert_allclose(np.asarray(result[..., 1]), 4.0, atol=1e-12)
@@ -593,7 +626,7 @@ class TestProject3D:
 
         def project_from_vec(vec_flat):
             mag_comp_first = vec_flat.reshape(3, Z, Y, X)
-            mag_ours = jnp.transpose(mag_comp_first, (1, 2, 3, 0))
+            mag_ours = jnp.transpose(mag_comp_first, (3, 2, 1, 0))
             proj = project_3d(mag_ours, axis=axis)
             return jnp.transpose(proj.value, (2, 0, 1)).reshape(-1)
 
@@ -605,6 +638,32 @@ class TestProject3D:
             atol=1e-7,
             err_msg=f"Projector Jacobian mismatch for axis={axis} against {jac_name}",
         )
+
+
+class TestProject3DTilted:
+    def test_zero_tilt_matches_simple_projector_with_explicit_dim_uv(self):
+        mag_3d = jnp.arange(4 * 5 * 6 * 3, dtype=jnp.float64).reshape(4, 5, 6, 3)
+
+        simple = project_3d(mag_3d, axis="z")
+        tilted = project_3d_tilted(mag_3d, rotation=0.0, tilt=0.0, dim_uv=(5, 4))
+
+        assert_allclose(np.asarray(tilted), np.asarray(simple), atol=1e-12)
+
+    def test_forward_zero_tilt_matches_simple_forward_with_explicit_dim_uv(self):
+        mag_3d = jnp.zeros((4, 5, 6, 3), dtype=jnp.float64)
+        mag_3d = mag_3d.at[1:3, 1:4, 2:5, 0].set(0.8)
+        mag_3d = mag_3d.at[2, 2, 3, 1].set(0.4)
+
+        simple = forward_model_3d(mag_3d, _Q(10.0, "nm"), axis="z")
+        tilted = forward_model_3d_tilted(
+            mag_3d,
+            _Q(10.0, "nm"),
+            rotation=0.0,
+            tilt=0.0,
+            dim_uv=(5, 4),
+        )
+
+        assert_allclose(np.asarray(tilted), np.asarray(simple), atol=1e-12)
 
 
 # ===================================================================
@@ -675,7 +734,10 @@ class TestForwardModels:
     def test_forward_model_3d_z_axis(self, projector_ref, phasemapper_ref):
         """forward_model_3d along z should project then map phase."""
         magdata = projector_ref["magdata"]  # (3, Z, Y, X)
-        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        mag_3d = jnp.array(np.transpose(magdata, (3, 2, 1, 0)), dtype=jnp.float64)
+        # Normalize per-voxel: reference data has arbitrary magnitudes
+        _norms = np.linalg.norm(np.asarray(mag_3d), axis=-1, keepdims=True)
+        mag_3d = jnp.where(_norms > 0, mag_3d / np.where(_norms > 0, _norms, 1.0), mag_3d)
         voxel_size = float(phasemapper_ref["voxel_size"])
 
         phase = forward_model_3d(mag_3d, _Q(voxel_size, "nm"), axis="z")
@@ -687,7 +749,10 @@ class TestForwardModels:
     def test_forward_model_3d_consistency(self, projector_ref, phasemapper_ref):
         """forward_model_3d should equal project_3d + forward_model_2d."""
         magdata = projector_ref["magdata"]
-        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        mag_3d = jnp.array(np.transpose(magdata, (3, 2, 1, 0)), dtype=jnp.float64)
+        # Normalize per-voxel: reference data has arbitrary magnitudes
+        _norms = np.linalg.norm(np.asarray(mag_3d), axis=-1, keepdims=True)
+        mag_3d = jnp.where(_norms > 0, mag_3d / np.where(_norms > 0, _norms, 1.0), mag_3d)
         voxel_size = float(phasemapper_ref["voxel_size"])
 
         for axis in ["z", "y", "x"]:
@@ -705,7 +770,10 @@ class TestForwardModels:
     def test_forward_model_3d_projection_step_size_defaults_to_pixel_size(self, projector_ref, phasemapper_ref):
         """Omitting projection_step_size must preserve the historical isotropic behavior."""
         magdata = projector_ref["magdata"]
-        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        mag_3d = jnp.array(np.transpose(magdata, (3, 2, 1, 0)), dtype=jnp.float64)
+        # Normalize per-voxel: reference data has arbitrary magnitudes
+        _norms = np.linalg.norm(np.asarray(mag_3d), axis=-1, keepdims=True)
+        mag_3d = jnp.where(_norms > 0, mag_3d / np.where(_norms > 0, _norms, 1.0), mag_3d)
         voxel_size = float(phasemapper_ref["voxel_size"])
 
         phase_default = forward_model_3d(mag_3d, _Q(voxel_size, "nm"), axis="z")
@@ -721,7 +789,10 @@ class TestForwardModels:
     def test_forward_model_3d_projection_step_size_matches_manual_scaling(self, projector_ref, phasemapper_ref):
         """Anisotropic dz support should match manual projected-field rescaling."""
         magdata = projector_ref["magdata"]
-        mag_3d = jnp.array(np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64)
+        mag_3d = jnp.array(np.transpose(magdata, (3, 2, 1, 0)), dtype=jnp.float64)
+        # Normalize per-voxel: reference data has arbitrary magnitudes
+        _norms = np.linalg.norm(np.asarray(mag_3d), axis=-1, keepdims=True)
+        mag_3d = jnp.where(_norms > 0, mag_3d / np.where(_norms > 0, _norms, 1.0), mag_3d)
         pixel_size_nm = float(phasemapper_ref["voxel_size"])
         projection_step_nm = 0.35 * pixel_size_nm
 
@@ -1477,7 +1548,7 @@ class TestUpstreamProjectorHDF5:
         )  # (3, 1, V, U)
 
         mag_3d = jnp.array(
-            np.transpose(magdata, (1, 2, 3, 0)), dtype=jnp.float64
+            np.transpose(magdata, (3, 2, 1, 0)), dtype=jnp.float64
         )
         result = project_3d(mag_3d, axis=axis)
         result_np = np.asarray(result)
@@ -1570,11 +1641,15 @@ class TestUpstreamForwardModelChain:
             my_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(my_masked)
             mz_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mz_masked)
 
-            mx_3d = mx_full.reshape(Z, Y, X)
-            my_3d = my_full.reshape(Z, Y, X)
-            mz_3d = mz_full.reshape(Z, Y, X)
-
-            mag_3d = jnp.stack([mx_3d, my_3d, mz_3d], axis=-1)  # (Z,Y,X,3)
+            mag_zyx = jnp.stack(
+                [
+                    mx_full.reshape(Z, Y, X),
+                    my_full.reshape(Z, Y, X),
+                    mz_full.reshape(Z, Y, X),
+                ],
+                axis=-1,
+            )
+            mag_3d = jnp.transpose(mag_zyx, (2, 1, 0, 3))  # (X,Y,Z,3)
 
             # Project along z (SimpleProjector default)
             proj = project_3d(mag_3d, axis="z")  # (Y, X, 2)
@@ -1626,10 +1701,11 @@ class TestUpstreamForwardModelChain:
         my_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(my_masked)
         mz_full = jnp.zeros(total, dtype=jnp.float64).at[masked_indices].set(mz_masked)
 
-        mag_3d = jnp.stack(
+        mag_zyx = jnp.stack(
             [mx_full.reshape(Z, Y, X), my_full.reshape(Z, Y, X), mz_full.reshape(Z, Y, X)],
             axis=-1,
         )
+        mag_3d = jnp.transpose(mag_zyx, (2, 1, 0, 3))
 
         proj = project_3d(mag_3d, axis="z")
         phase = voxel_size**2 * phase_mapper_rdfc(proj[..., 0], proj[..., 1], kernel)
@@ -2078,9 +2154,9 @@ class TestMBIRAnalyticRoundTrip:
         x_lo = int(center[2] - width[2] / 2)
         x_hi = int(center[2] + width[2] / 2)
 
-        mag_3d = np.zeros((z_dim, y_dim, x_dim, 3), dtype=np.float64)
-        mag_3d[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi, 0] = np.cos(s["phi"])
-        mag_3d[z_lo:z_hi, y_lo:y_hi, x_lo:x_hi, 1] = np.sin(s["phi"])
+        mag_3d = np.zeros((x_dim, y_dim, z_dim, 3), dtype=np.float64)
+        mag_3d[x_lo:x_hi, y_lo:y_hi, z_lo:z_hi, 0] = np.cos(s["phi"])
+        mag_3d[x_lo:x_hi, y_lo:y_hi, z_lo:z_hi, 1] = np.sin(s["phi"])
 
         phase_3d = np.asarray(forward_model_3d(
             jnp.array(mag_3d), _Q(s["a"], "nm"),

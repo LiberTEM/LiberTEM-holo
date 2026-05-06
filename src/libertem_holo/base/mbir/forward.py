@@ -4,7 +4,7 @@ Provides :func:`apply_ramp`, the low-level
 :func:`forward_model_single_rdfc_2d`, the user-facing
 :func:`forward_model_2d`, and the 3D volume variants
 :func:`project_3d`, :func:`forward_model_3d`, and
-:func:`forward_phase_from_density_and_magnetization`.
+:func:`phase_from_magnetisation`.
 """
 
 from __future__ import annotations
@@ -20,12 +20,15 @@ import numpy as np
 import unxt as u
 
 from .units import (
+    B_REF,
     RampCoeffs,
     _as_angle_quantity,
     _as_dimensionless_quantity,
+    _as_induction_quantity,
     _as_length_quantity,
     _as_ramp_coeffs,
     _assert_quantity_compatible,
+    _validate_normalized_magnetization_3d,
     _validate_positive,
 )
 from .kernel import build_rdfc_kernel, phase_mapper_rdfc
@@ -72,6 +75,7 @@ def forward_model_single_rdfc_2d(
     ramp_coeffs: RampCoeffs,
     rdfc_kernel: dict[str, Any],
     pixel_size: u.Quantity,
+    reference_induction: u.Quantity,
 ) -> u.Quantity:
     """RDFC forward model mapping projected magnetization to phase.
 
@@ -87,9 +91,13 @@ def forward_model_single_rdfc_2d(
         Background phase-ramp coefficients with explicit units
         (offset in rad, slopes in rad/nm).
     rdfc_kernel: dict
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+        Pre-built kernel dictionary for advanced or performance-sensitive
+        reuse.
     pixel_size: Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units.
+    reference_induction : Quantity["magnetic induction"]
+        Physical induction scale corresponding to unit normalized
+        magnetization.
 
     Returns
     -------
@@ -102,6 +110,23 @@ def forward_model_single_rdfc_2d(
         dtype=magnetization_q.value.dtype,
     )
     pixel_size_q = _as_length_quantity(pixel_size)
+    reference_induction_q = _as_induction_quantity(reference_induction)
+    _validate_positive(reference_induction_q, "reference_induction")
+
+    kernel_reference_induction = rdfc_kernel.get("reference_induction")
+    if kernel_reference_induction is not None:
+        kernel_reference_induction_q = _as_induction_quantity(kernel_reference_induction)
+        reference_induction_value = reference_induction_q.value
+        if not isinstance(reference_induction_value, jax.core.Tracer):
+            if not np.allclose(
+                np.asarray(kernel_reference_induction_q.value),
+                np.asarray(reference_induction_value),
+                rtol=1e-12,
+                atol=0.0,
+            ):
+                raise ValueError(
+                    "rdfc_kernel was built for a different reference_induction than the forward-model call"
+                )
 
     height, width = magnetization_q.shape[:2]
 
@@ -123,6 +148,7 @@ def forward_model_single_rdfc_2d(
 def forward_model_2d(
     magnetization,
     pixel_size,
+    reference_induction,
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
@@ -144,6 +170,9 @@ def forward_model_2d(
         expressed as a projected induction line integral.
     pixel_size : Quantity["length"]
         Pixel size as a ``unxt.Quantity`` with length units. Must be positive.
+    reference_induction : Quantity["magnetic induction"]
+        Physical induction scale corresponding to unit normalized
+        projected magnetization.
     ramp_coeffs : RampCoeffs, optional
         Background phase-ramp coefficients with ``unxt.Quantity`` fields
         (offset in rad, slopes in rad/nm). Defaults to zeros (no ramp).
@@ -153,8 +182,8 @@ def forward_model_2d(
     prw_vec : array_like, optional
         Projected reference wave vector ``(v, u)``.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-        Built automatically when not provided.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse. Built automatically when not provided.
 
     Returns
     -------
@@ -163,11 +192,14 @@ def forward_model_2d(
     """
     pixel_size = _as_length_quantity(pixel_size)
     _validate_positive(pixel_size, "pixel_size")
+    reference_induction = _as_induction_quantity(reference_induction)
+    _validate_positive(reference_induction, "reference_induction")
 
     magnetization = _as_dimensionless_quantity(magnetization)
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             magnetization.shape[:2],
+            reference_induction=reference_induction,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -177,7 +209,7 @@ def forward_model_2d(
     )
 
     result = forward_model_single_rdfc_2d(
-        magnetization, ramp_coeffs, rdfc_kernel, pixel_size,
+        magnetization, ramp_coeffs, rdfc_kernel, pixel_size, reference_induction,
     )
     _assert_quantity_compatible(result, "rad", "forward_model_2d result")
     return result
@@ -185,19 +217,19 @@ def forward_model_2d(
 
 _SIMPLE_PROJ = {
     "z": {
-        "sum_axis": 0,
+        "sum_axis": 2,
         "coeff": [[1, 0, 0], [0, 1, 0]],   # u=mx, v=my
-        "transpose": False,                  # (Y, X) is already (V, U)
+        "transpose": True,                   # (X, Y) -> (Y, X) = (V, U)
     },
     "y": {
         "sum_axis": 1,
         "coeff": [[1, 0, 0], [0, 0, 1]],   # u=mx, v=mz
-        "transpose": False,                  # (Z, X) is already (V, U)
+        "transpose": True,                   # (X, Z) -> (Z, X) = (V, U)
     },
     "x": {
-        "sum_axis": 2,
+        "sum_axis": 0,
         "coeff": [[0, 0, 1], [0, 1, 0]],   # u=mz, v=my
-        "transpose": True,                   # (Z, Y) -> (Y, Z) = (V, U)
+        "transpose": False,                  # (Y, Z) is already (V, U)
     },
 }
 
@@ -237,8 +269,8 @@ def _projection_coefficients(rotation, tilt, dtype):
     return _build_tilt_rotation_matrix(rotation, tilt).astype(dtype)[:2, :]
 
 
-def _compute_tilted_projection_geometry(dim_zyx, rotation, tilt, dim_uv=None):
-    dim_z, dim_y, dim_x = (int(dim) for dim in dim_zyx)
+def _compute_tilted_projection_geometry(dim_xyz, rotation, tilt, dim_uv=None):
+    dim_x, dim_y, dim_z = (int(dim) for dim in dim_xyz)
     rot = np.asarray(_build_tilt_rotation_matrix(float(rotation), float(tilt)))
 
     half_extents = np.array([dim_x, dim_y, dim_z], dtype=np.float64) / 2.0
@@ -273,13 +305,13 @@ def _tilted_detector_grid(dim_t, dim_uv, dtype):
     return jnp.stack([uu, vv, tt], axis=0)
 
 
-def _sample_tilted_volume(volume, coords_zyx, out_shape):
+def _sample_tilted_volume(volume, coords_xyz, out_shape):
     components_first = jnp.moveaxis(volume, -1, 0)
 
     def sample_component(field):
         sampled = jsnd.map_coordinates(
             field,
-            coords_zyx,
+            coords_xyz,
             order=1,
             mode="constant",
             cval=0.0,
@@ -302,7 +334,7 @@ def project_3d(
     Parameters
     ----------
     magnetization_3d : Quantity["dimensionless"]
-        3D magnetization of shape ``(Z, Y, X, 3)`` where the last
+        3D magnetization of shape ``(X, Y, Z, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
     axis : {'z', 'y', 'x'}, optional
         Projection axis, default ``'z'``.
@@ -321,7 +353,7 @@ def project_3d(
     cfg = _SIMPLE_PROJ[axis]
     magnetization_3d = _as_dimensionless_quantity(magnetization_3d)
 
-    # Sum along projection direction: (Z, Y, X, 3) -> (*, *, 3)
+    # Sum along projection direction: (X, Y, Z, 3) -> (*, *, 3)
     summed = cast(u.Quantity, qnp.sum(magnetization_3d, axis=cfg["sum_axis"]))
 
     # Mix (mx, my, mz) -> (u, v) via coefficient matrix
@@ -353,7 +385,7 @@ def project_3d_tilted(
     Parameters
     ----------
     magnetization_3d : Quantity["dimensionless"]
-        3D magnetization of shape ``(Z, Y, X, 3)`` where the last axis holds
+        3D magnetization of shape ``(X, Y, Z, 3)`` where the last axis holds
         ``(mx, my, mz)`` components.
     rotation : float
         In-plane rotation angle in radians.
@@ -377,10 +409,10 @@ def project_3d_tilted(
     if rotation_f == 0.0 and tilt_f == 0.0 and dim_uv is None:
         return project_3d(magnetization_q, axis="z")
 
-    dim_z, dim_y, dim_x, comp = magnetization_q.shape
+    dim_x, dim_y, dim_z, comp = magnetization_q.shape
     if comp != 3:
         raise ValueError(
-            f"magnetization_3d must have shape (Z, Y, X, 3); got {magnetization_q.shape!r}",
+            f"magnetization_3d must have shape (X, Y, Z, 3); got {magnetization_q.shape!r}",
         )
 
     dim_uv_resolved, dim_t = _compute_tilted_projection_geometry(
@@ -399,11 +431,11 @@ def project_3d_tilted(
     x_idx = volume_xyz[0] + dim_x / 2.0 - 0.5
     y_idx = volume_xyz[1] + dim_y / 2.0 - 0.5
     z_idx = volume_xyz[2] + dim_z / 2.0 - 0.5
-    coords_zyx = jnp.stack([z_idx, y_idx, x_idx], axis=0)
+    coords_xyz = jnp.stack([x_idx, y_idx, z_idx], axis=0)
 
     sampled = _sample_tilted_volume(
         magnetization_q.value,
-        coords_zyx,
+        coords_xyz,
         (dim_t, dim_uv_resolved[0], dim_uv_resolved[1]),
     )
     summed = jnp.sum(sampled, axis=0)
@@ -417,12 +449,14 @@ def project_3d_tilted(
 def forward_model_3d(
     magnetization_3d,
     pixel_size,
+    reference_induction,
     projection_step_size=None,
     axis="z",
     ramp_coeffs=None,
     geometry="disc",
     prw_vec=None,
     rdfc_kernel=None,
+    _skip_norm_check=False,
 ) -> u.Quantity:
     """Convenience forward model for a 3D magnetization volume.
 
@@ -433,10 +467,13 @@ def forward_model_3d(
     Parameters
     ----------
     magnetization_3d : Quantity["dimensionless"]
-        3D magnetization of shape ``(Z, Y, X, 3)`` where the last
+        3D magnetization of shape ``(X, Y, Z, 3)`` where the last
         axis holds ``(mx, my, mz)`` components.
     pixel_size : Quantity["length"]
         Image-plane pixel size as a ``unxt.Quantity`` with length units.
+    reference_induction : Quantity["magnetic induction"]
+        Physical induction scale corresponding to unit normalized
+        magnetization.
     projection_step_size : Quantity["length"], optional
         Physical step size along the projection axis. Defaults to
         ``pixel_size`` so existing isotropic behavior is unchanged.
@@ -454,8 +491,8 @@ def forward_model_3d(
     prw_vec : array_like, optional
         Projected reference wave vector ``(v, u)``.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-        Built automatically when not provided.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse. Built automatically when not provided.
 
     Returns
     -------
@@ -464,13 +501,18 @@ def forward_model_3d(
     """
     pixel_size_q = _as_length_quantity(pixel_size)
     _validate_positive(pixel_size_q, "pixel_size")
+    reference_induction_q = _as_induction_quantity(reference_induction)
+    _validate_positive(reference_induction_q, "reference_induction")
     if projection_step_size is None:
         projection_step_size_q = pixel_size_q
     else:
         projection_step_size_q = _as_length_quantity(projection_step_size)
         _validate_positive(projection_step_size_q, "projection_step_size")
 
-    projected = project_3d(magnetization_3d, axis=axis)
+    magnetization_3d_q = _as_dimensionless_quantity(magnetization_3d)
+    if not _skip_norm_check:
+        _validate_normalized_magnetization_3d(magnetization_3d_q, "magnetization_3d")
+    projected = project_3d(magnetization_3d_q, axis=axis)
     projection_scale = (
         u.uconvert("nm", projection_step_size_q).value
         / u.uconvert("nm", pixel_size_q).value
@@ -480,6 +522,7 @@ def forward_model_3d(
     return forward_model_2d(
         projected,
         pixel_size_q,
+        reference_induction_q,
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
         prw_vec=prw_vec,
@@ -487,10 +530,11 @@ def forward_model_3d(
     )
 
 
-def forward_phase_from_density_and_magnetization(
+def phase_from_density_and_magnetization(
     rho,
     magnetization_3d,
     pixel_size,
+    reference_induction,
     projection_step_size=None,
     axis="z",
     **kwargs,
@@ -504,11 +548,14 @@ def forward_phase_from_density_and_magnetization(
     Parameters
     ----------
     rho
-        Dimensionless support / density array with shape ``(Z, Y, X)``.
+        Dimensionless support / density array with shape ``(X, Y, Z)``.
     magnetization_3d
-        Dimensionless magnetization array with shape ``(Z, Y, X, 3)``.
+        Dimensionless magnetization array with shape ``(X, Y, Z, 3)``.
     pixel_size
         Image-plane pixel size.
+    reference_induction : Quantity["magnetic induction"]
+        Physical induction scale corresponding to unit normalized
+        magnetization.
     projection_step_size : Quantity["length"], optional
         Physical step size along the projection axis. Defaults to
         ``pixel_size`` for backward-compatible isotropic behavior.
@@ -526,7 +573,7 @@ def forward_phase_from_density_and_magnetization(
 
     if magnetization_q.ndim != 4 or magnetization_q.shape[-1] != 3:
         raise ValueError(
-            "magnetization_3d must have shape (Z, Y, X, 3); "
+            "magnetization_3d must have shape (X, Y, Z, 3); "
             f"got {magnetization_q.shape!r}",
         )
     if rho_q.shape != magnetization_q.shape[:-1]:
@@ -534,6 +581,7 @@ def forward_phase_from_density_and_magnetization(
             "rho must match magnetization_3d spatial shape "
             f"{magnetization_q.shape[:-1]!r}; got {rho_q.shape!r}",
         )
+    _validate_normalized_magnetization_3d(magnetization_q, "magnetization_3d")
 
     m_eff = _as_dimensionless_quantity(
         u.Quantity(rho_q.value[..., None] * magnetization_q.value, str(magnetization_q.unit)),
@@ -541,16 +589,82 @@ def forward_phase_from_density_and_magnetization(
     phase = forward_model_3d(
         m_eff,
         pixel_size,
+        reference_induction,
+        projection_step_size=projection_step_size,
+        axis=axis,
+        **kwargs,
+        _skip_norm_check=True,
+    )
+    return phase.value
+
+
+def phase_from_magnetization(
+    rho,
+    magnetization_3d,
+    pixel_size,
+    reference_induction,
+    projection_step_size=None,
+    axis="z",
+    **kwargs,
+):
+    """Alias for :func:`phase_from_density_and_magnetization`."""
+    return phase_from_density_and_magnetization(
+        rho=rho,
+        magnetization_3d=magnetization_3d,
+        pixel_size=pixel_size,
+        reference_induction=reference_induction,
         projection_step_size=projection_step_size,
         axis=axis,
         **kwargs,
     )
-    return phase.value
+
+
+def phase_from_magnetisation(
+    rho,
+    magnetization_3d,
+    pixel_size,
+    reference_induction,
+    projection_step_size=None,
+    axis="z",
+    **kwargs,
+):
+    """British-spelling alias for :func:`phase_from_magnetization`."""
+    return phase_from_magnetization(
+        rho=rho,
+        magnetization_3d=magnetization_3d,
+        pixel_size=pixel_size,
+        reference_induction=reference_induction,
+        projection_step_size=projection_step_size,
+        axis=axis,
+        **kwargs,
+    )
+
+
+def forward_phase_from_density_and_magnetization(
+    rho,
+    magnetization_3d,
+    pixel_size,
+    reference_induction,
+    projection_step_size=None,
+    axis="z",
+    **kwargs,
+):
+    """Backward-compatible alias for :func:`phase_from_magnetization`."""
+    return phase_from_magnetization(
+        rho=rho,
+        magnetization_3d=magnetization_3d,
+        pixel_size=pixel_size,
+        reference_induction=reference_induction,
+        projection_step_size=projection_step_size,
+        axis=axis,
+        **kwargs,
+    )
 
 
 def forward_model_3d_tilted(
     magnetization_3d,
     pixel_size,
+    reference_induction,
     rotation,
     tilt,
     dim_uv=None,
@@ -574,6 +688,7 @@ def forward_model_3d_tilted(
     return forward_model_2d(
         projected,
         pixel_size,
+        reference_induction,
         ramp_coeffs=ramp_coeffs,
         geometry=geometry,
         prw_vec=prw_vec,

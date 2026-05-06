@@ -18,19 +18,20 @@ import jax.numpy as jnp  # noqa: E402
 import unxt as u  # noqa: E402
 
 from libertem_holo.base.mbir import (  # noqa: E402
+    B_REF,
     RampCoeffs,
     RegConfig,
     SolverResult,
     add_units_to_inputs,
     apply_ramp,
     bootstrap_threshold_uncertainty_2d,
-    build_rdfc_kernel,
     decompose_loss,
     estimate_mip_phase_from_thickness,
     estimate_thickness_from_mip_phase,
     forward_model_2d,
     forward_model_3d,
     forward_model_single_rdfc_2d,
+    forward_phase_from_density_and_magnetization,
     lcurve_sweep,
     make_quantity,
     mbir_loss_2d,
@@ -43,6 +44,7 @@ from libertem_holo.base.mbir import (  # noqa: E402
     to_projected_induction_integral,
     to_projected_magnetization_integral,
 )
+from libertem_holo.base.mbir.kernel import build_rdfc_kernel  # noqa: E402
 
 
 def array_value(value):
@@ -184,11 +186,12 @@ def small_problem():
     gt_mag[..., 0] = mask.astype(np.float64)
     gt_mag[..., 1] = 0.5 * mask.astype(np.float64)
     gt_mag_q = u.Quantity(jnp.array(gt_mag), "")
+    reference_induction = B_REF
 
-    kernel = build_rdfc_kernel((H, W), geometry="disc")
+    kernel = build_rdfc_kernel((H, W), reference_induction=reference_induction, geometry="disc")
     ramp = RampCoeffs.zeros(dtype=jnp.float64)
     phase = forward_model_single_rdfc_2d(
-        gt_mag_q, cast(Any, ramp), kernel, pixel_size,
+        gt_mag_q, cast(Any, ramp), kernel, pixel_size, reference_induction,
     )
 
     return {
@@ -202,12 +205,24 @@ def small_problem():
         "phase": phase,
         "kernel": kernel,
         "ramp": ramp,
+        "reference_induction": reference_induction,
     }
 
 
 # ===================================================================
 # build_rdfc_kernel
 # ===================================================================
+
+
+def test_build_rdfc_kernel_is_not_reexported_from_package_root():
+    with pytest.raises(ImportError, match="build_rdfc_kernel"):
+        exec("from libertem_holo.base.mbir import build_rdfc_kernel", {})
+
+
+def test_build_rdfc_kernel_remains_available_from_kernel_submodule():
+    namespace: dict[str, Any] = {}
+    exec("from libertem_holo.base.mbir.kernel import build_rdfc_kernel", namespace)
+    assert callable(namespace["build_rdfc_kernel"])
 
 
 # ===================================================================
@@ -277,6 +292,7 @@ class TestForwardModel2DQuantity:
         result = forward_model_2d(
             sp["gt_mag_q"],
             pixel_size=sp["pixel_size"],
+            reference_induction=sp["reference_induction"],
             geometry="disc",
         )
         assert isinstance(result, u.Quantity)
@@ -289,14 +305,25 @@ class TestForwardModel2DQuantity:
         ref = forward_model_2d(
             sp["gt_mag_q"],
             pixel_size=sp["pixel_size"],
+            reference_induction=sp["reference_induction"],
             geometry="disc",
         )
         qty = forward_model_2d(
             sp["gt_mag_q"],
             pixel_size=u.Quantity(sp["voxel_size"] / 1000.0, "um"),
+            reference_induction=sp["reference_induction"],
             geometry="disc",
         )
         assert_allclose(array_value(qty), array_value(ref), atol=1e-12)
+
+    def test_requires_reference_induction(self, small_problem):
+        sp = small_problem
+        with pytest.raises(TypeError, match="reference_induction"):
+            forward_model_2d(
+                sp["gt_mag_q"],
+                pixel_size=sp["pixel_size"],
+                geometry="disc",
+            )
 
     def test_rejects_non_dimensionless_magnetization(self, small_problem):
         sp = small_problem
@@ -304,6 +331,7 @@ class TestForwardModel2DQuantity:
             forward_model_2d(
                 u.Quantity(sp["gt_mag"], "T"),
                 pixel_size=sp["pixel_size"],
+                reference_induction=sp["reference_induction"],
                 geometry="disc",
             )
 
@@ -322,6 +350,7 @@ class TestForwardModelSingleRDFCQuantity:
             cast(Any, sp["ramp"]),
             sp["kernel"],
             sp["pixel_size"],
+            sp["reference_induction"],
         )
         assert isinstance(result, u.Quantity)
         assert result.shape == sp["phase"].shape
@@ -341,6 +370,7 @@ class TestForwardModel3DQuantity:
         result = forward_model_3d(
             u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(10.0, "nm"),
+            reference_induction=B_REF,
             axis="z",
         )
         assert isinstance(result, u.Quantity)
@@ -352,14 +382,55 @@ class TestForwardModel3DQuantity:
         ref = forward_model_3d(
             u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(10.0, "nm"),
+            reference_induction=B_REF,
             axis="z",
         )
         qty = forward_model_3d(
             u.Quantity(mag_3d, ""),
             pixel_size=u.Quantity(0.01, "um"),
+            reference_induction=B_REF,
             axis="z",
         )
         assert_allclose(np.asarray(qty), np.asarray(ref), atol=1e-12)
+
+    def test_rejects_unnormalized_magnetization(self):
+        """Voxels with |m| > 1 must raise ValueError."""
+        mag_3d = np.zeros((4, 4, 4, 3), dtype=np.float64)
+        mag_3d[1:3, 1:3, 1:3, 0] = 2.0  # norm = 2.0, clearly > 1
+        with pytest.raises(ValueError, match="normalized"):
+            forward_model_3d(
+                u.Quantity(mag_3d, ""),
+                pixel_size=u.Quantity(10.0, "nm"),
+                reference_induction=B_REF,
+                axis="z",
+            )
+
+    def test_accepts_unit_normalized_magnetization(self):
+        """Voxels with exactly |m| = 1 must not raise."""
+        mag_3d = np.zeros((4, 4, 4, 3), dtype=np.float64)
+        v = 1.0 / np.sqrt(3.0)
+        mag_3d[1:3, 1:3, 1:3] = [v, v, v]  # norm == 1
+        result = forward_model_3d(
+            u.Quantity(mag_3d, ""),
+            pixel_size=u.Quantity(10.0, "nm"),
+            reference_induction=B_REF,
+            axis="z",
+        )
+        assert isinstance(result, u.Quantity)
+
+    def test_rejects_unnormalized_magnetization_in_density_forward(self):
+        """forward_phase_from_density_and_magnetization rejects |m| > 1 voxels."""
+        mag_3d = np.zeros((4, 4, 4, 3), dtype=np.float64)
+        mag_3d[1:3, 1:3, 1:3, 0] = 5.0  # clearly > 1
+        rho = np.ones((4, 4, 4), dtype=np.float64) * 0.5
+        with pytest.raises(ValueError, match="normalized"):
+            forward_phase_from_density_and_magnetization(
+                rho,
+                u.Quantity(mag_3d, ""),
+                pixel_size=u.Quantity(10.0, "nm"),
+                reference_induction=B_REF,
+                axis="z",
+            )
 
 
 # ===================================================================

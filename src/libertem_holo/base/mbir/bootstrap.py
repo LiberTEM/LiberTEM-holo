@@ -206,8 +206,8 @@ def bootstrap_threshold_uncertainty_2d(
     prw_vec : array_like, optional
         Projected reference wave vector ``(v, u)``.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-        Built automatically when ``None``.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse. Built automatically when ``None``.
     solver_config : SolverConfig, optional
         Explicit solver configuration object.
     thickness : Quantity["length"], optional

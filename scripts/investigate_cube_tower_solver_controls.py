@@ -75,14 +75,6 @@ LLG_MAX_STEPS = 300
 LLG_TOL = 5e8
 LLG_DT_S = 3e-12
 FINE_DEMAG_P = 3
-
-
-def _xyz_to_zyx(values: np.ndarray) -> np.ndarray:
-    array = np.asarray(values)
-    axes = (2, 1, 0) if array.ndim == 3 else (2, 1, 0, 3)
-    return np.transpose(array, axes)
-
-
 def normalize_on_support(m_xyz: np.ndarray, rho_xyz: np.ndarray, threshold: float = 0.5) -> np.ndarray:
     m_xyz = np.asarray(m_xyz, dtype=np.float32)
     rho_xyz = np.asarray(rho_xyz, dtype=np.float32)
@@ -273,8 +265,8 @@ def run_native_bb(nm, state) -> tuple[np.ndarray, dict[str, float | int | bool]]
 def phase_from_xyz(rho_xyz: np.ndarray, m_xyz: np.ndarray, *, cellsize_nm: float) -> np.ndarray:
     return np.asarray(
         forward_phase_from_density_and_magnetization(
-            rho=_xyz_to_zyx(np.asarray(rho_xyz, dtype=np.float32)),
-            magnetization_3d=_xyz_to_zyx(np.asarray(m_xyz, dtype=np.float32)),
+            rho=np.asarray(rho_xyz, dtype=np.float32),
+            magnetization_3d=np.asarray(m_xyz, dtype=np.float32),
             pixel_size=u.Quantity(cellsize_nm, "nm"),
             axis="z",
             geometry="disc",

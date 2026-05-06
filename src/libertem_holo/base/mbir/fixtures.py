@@ -5,9 +5,10 @@ from pathlib import Path
 import numpy as np
 import unxt as u
 
-from .forward import forward_phase_from_density_and_magnetization
+from .forward import phase_from_density_and_magnetization
 from .neuralmag_adapter import mbir_rho_m_to_neuralmag
 from .synthetic import soft_disc_support, vortex_magnetization
+from .units import B_REF
 
 
 DEFAULT_VORTEX_RADIUS_FRACTION = 0.32
@@ -85,7 +86,7 @@ def generate_vortex_disc_fixture(
     m0 = np.asarray(
         vortex_magnetization(
             (size, size, size),
-            support_zyx=rho_true,
+            support_xyz=rho_true,
             core_radius=max(1.5, size / 32.0),
             dtype=np.float32,
         )
@@ -101,10 +102,11 @@ def generate_vortex_disc_fixture(
     m_true = np.asarray(state.m.to_cell().tensor)
     rho_true = np.asarray(state.rho.tensor)
     phi_true = np.asarray(
-        forward_phase_from_density_and_magnetization(
+        phase_from_density_and_magnetization(
             rho=rho_true,
             magnetization_3d=m_true,
             pixel_size=u.Quantity(voxel_size_nm, "nm"),
+            reference_induction=B_REF,
             axis="z",
         )
     )

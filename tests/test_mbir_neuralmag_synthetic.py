@@ -6,6 +6,7 @@ import pytest
 import unxt as u
 
 from libertem_holo.base.mbir import (
+    B_REF,
     forward_model_2d,
     load_vortex_disc_fixture,
     vortex_magnetization,
@@ -24,7 +25,7 @@ def test_neuralmag_vortex_ground_truth_smoke():
     assert np.isfinite(m_true).all()
     assert np.isfinite(rho_true).all()
 
-    m_projected = np.sum(rho_true[..., None] * m_true, axis=0)[..., :2]
+    m_projected = np.sum(rho_true[..., None] * m_true, axis=2)[..., :2]
     converted = u.Quantity(m_projected, "")
     assert converted.shape[-1] == 2
     assert np.isfinite(np.asarray(converted.value)).all()
@@ -33,6 +34,7 @@ def test_neuralmag_vortex_ground_truth_smoke():
         phi_true = forward_model_2d(
             converted,
             pixel_size=u.Quantity(pixel_size_nm, "nm"),
+            reference_induction=B_REF,
             geometry="disc",
         )
     except TypeError as exc:
@@ -52,16 +54,17 @@ def test_relaxed_fixture_differs_from_analytic_vortex_phase():
     m_analytic = np.asarray(
         vortex_magnetization(
             rho_true.shape,
-            support_zyx=rho_true,
+            support_xyz=rho_true,
             core_radius=max(1.5, rho_true.shape[0] / 32.0),
             dtype=np.float32,
         )
     )
-    analytic_projected = u.Quantity(np.sum(rho_true[..., None] * m_analytic, axis=0)[..., :2], "")
+    analytic_projected = u.Quantity(np.sum(rho_true[..., None] * m_analytic, axis=2)[..., :2], "")
     phi_analytic = np.asarray(
         forward_model_2d(
             analytic_projected,
             pixel_size=u.Quantity(fixture["pixel_size_nm"], "nm"),
+            reference_induction=B_REF,
             geometry="disc",
         ).value
     )

@@ -17,8 +17,8 @@ class _DummyReconstruction:
 
 
 def test_support_center_yx_finds_disc_center():
-    rho = np.zeros((4, 9, 9), dtype=np.float32)
-    rho[:, 3:6, 2:7] = 1.0
+    rho = np.zeros((9, 9, 4), dtype=np.float32)
+    rho[2:7, 3:6, :] = 1.0
     assert support_center_yx(rho) == (4, 4)
 
 

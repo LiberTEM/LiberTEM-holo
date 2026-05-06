@@ -317,6 +317,63 @@ def _validate_all_positive_quantity(value: u.Quantity, name: str) -> None:
         raise ValueError(f"{name} must be strictly positive everywhere, got {value}")
 
 
+def _validate_normalized_magnetization_3d(
+    magnetization: u.Quantity,
+    name: str = "magnetization_3d",
+    *,
+    tol: float = 1e-5,
+) -> None:
+    """Raise ValueError if any voxel of a 3D magnetization has |m| > 1 + tol.
+
+    The MBIR forward model requires normalized, unitless magnetization: each
+    voxel vector must satisfy ``|m| ≤ 1``.  Physical amplitude is carried
+    entirely by ``reference_induction``; the magnetization itself is only
+    a direction field scaled by the support density.
+
+    Skips validation silently when called inside a JAX JIT trace where
+    concrete values are unavailable.
+
+    Parameters
+    ----------
+    magnetization : Quantity["dimensionless"]
+        Array of shape ``(..., 3)`` where the last axis holds the
+        ``(mx, my, mz)`` vector components.
+    name : str
+        Parameter name to use in error messages.
+    tol : float
+        Absolute tolerance above 1.0 before the check fires (default 1e-5).
+        This accommodates floating-point rounding while catching any voxel
+        that has been accidentally pre-scaled by a physical amplitude.
+    """
+    inner = magnetization.value
+
+    def _check(arr: np.ndarray) -> None:
+        if arr.ndim < 1 or arr.shape[-1] != 3:
+            # Shape validation is performed separately; skip here.
+            return
+        per_voxel_norm = np.linalg.norm(arr, axis=-1)
+        max_norm = float(np.max(per_voxel_norm))
+        if max_norm > 1.0 + tol:
+            raise ValueError(
+                f"{name} contains voxels with |m| > 1 (max |m| = {max_norm:.6f}). "
+                "Each voxel must hold a normalized unitless magnetization vector "
+                "with |m| ≤ 1. "
+                "Did you accidentally pre-scale the magnetization by Msat or "
+                "reference_induction? "
+                "Pass the physical amplitude via the reference_induction argument "
+                "instead."
+            )
+
+    if isinstance(inner, jax.core.Tracer):
+        # Under JIT the array is abstract at trace time; schedule the check to
+        # run at *execution* time with the concrete values via debug.callback.
+        # This avoids silently swallowing the invariant inside jitted code.
+        jax.debug.callback(_check, inner)
+        return
+
+    _check(np.asarray(inner))
+
+
 def _broadcast_thickness_like(projected: u.Quantity, thickness: u.Quantity) -> u.Quantity:
     """Append singleton axes so thickness maps broadcast against projected fields."""
     projected_shape = projected.shape

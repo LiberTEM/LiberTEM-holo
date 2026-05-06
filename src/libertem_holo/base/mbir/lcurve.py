@@ -12,6 +12,7 @@ import quaxed.numpy as qnp
 import unxt as u
 
 from .units import (
+    B_REF,
     RampCoeffs,
     _as_angle_quantity,
     _as_dimensionless_quantity,
@@ -67,7 +68,8 @@ def decompose_loss(
         Regularization mask of shape ``(N, M)`` passed to
         :func:`exchange_loss_fn`.
     rdfc_kernel : dict
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Pre-built kernel dictionary for advanced or performance-sensitive
+        reuse.
     pixel_size : Quantity["length"]
         Pixel size converted to nanometres internally.
 
@@ -94,7 +96,7 @@ def decompose_loss(
     masked_mag = make_quantity(magnetization.value * mask[..., None], "")
 
     predicted = forward_model_single_rdfc_2d(
-        masked_mag, ramp_coeffs, rdfc_kernel, pixel_size,
+        masked_mag, ramp_coeffs, rdfc_kernel, pixel_size, B_REF,
     )
     residuals = predicted.value - phase.value
     data_misfit = make_quantity(jnp.sum(residuals * residuals), "rad2")
@@ -224,6 +226,7 @@ def lcurve_sweep(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
+            reference_induction=B_REF,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -354,6 +357,7 @@ def lcurve_sweep_vmap(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
+            reference_induction=B_REF,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -397,7 +401,7 @@ def lcurve_sweep_vmap(
     def _decompose_single(mag, ramp):
         masked_mag = make_quantity(mag * mask[..., None], "")
         predicted = forward_model_single_rdfc_2d(
-            masked_mag, _ramp_coeffs_from_array(ramp), rdfc_kernel, pixel_size,
+            masked_mag, _ramp_coeffs_from_array(ramp), rdfc_kernel, pixel_size, B_REF,
         )
         residuals = predicted.value - phase.value
         dm = jnp.sum(residuals * residuals)

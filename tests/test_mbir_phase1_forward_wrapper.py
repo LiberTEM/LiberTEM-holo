@@ -12,7 +12,7 @@ import unxt as u
 
 
 def _make_vortex_disc_problem(z=3, y=32, x=32):
-    yy, xx = jnp.meshgrid(jnp.arange(y), jnp.arange(x), indexing="ij")
+    xx, yy = jnp.meshgrid(jnp.arange(x), jnp.arange(y), indexing="ij")
     cy = (y - 1) / 2.0
     cx = (x - 1) / 2.0
     dy = yy - cy
@@ -22,23 +22,27 @@ def _make_vortex_disc_problem(z=3, y=32, x=32):
     radius = 0.35 * min(y, x)
     disc = r <= radius
     rho2d = disc.astype(jnp.float64)
-    rho = jnp.broadcast_to(rho2d[None, ...], (z, y, x))
+    rho = jnp.broadcast_to(rho2d[..., None], (x, y, z))
 
     r_safe = jnp.where(r > 0, r, 1.0)
     mx2d = jnp.where(disc, -dy / r_safe, 0.0)
     my2d = jnp.where(disc, dx / r_safe, 0.0)
     mz2d = jnp.zeros_like(mx2d)
     m2d = jnp.stack([mx2d, my2d, mz2d], axis=-1)
-    m = jnp.broadcast_to(m2d[None, ...], (z, y, x, 3))
+    # Explicitly re-normalise to guard against fp overshoot from sqrt
+    _norms = jnp.linalg.norm(m2d, axis=-1, keepdims=True)
+    m2d = jnp.where(_norms > 0, m2d / jnp.where(_norms > 0, _norms, 1.0), m2d)
+    m = jnp.broadcast_to(m2d[..., None, :], (x, y, z, 3))
 
     return rho, m
 
 
 def _phase_energy(rho, m, pixel_size, axis="z"):
-    phase = mbir.forward_phase_from_density_and_magnetization(
+    phase = mbir.phase_from_magnetisation(
         rho=rho,
         magnetization_3d=m,
         pixel_size=pixel_size,
+        reference_induction=mbir.B_REF,
         axis=axis,
     )
     return jnp.mean(phase**2)
@@ -46,13 +50,14 @@ def _phase_energy(rho, m, pixel_size, axis="z"):
 
 def test_forward_phase_uniform_out_of_plane_is_near_zero():
     z, y, x = 3, 24, 24
-    rho = jnp.ones((z, y, x), dtype=jnp.float64)
-    m = jnp.zeros((z, y, x, 3), dtype=jnp.float64).at[..., 2].set(1.0)
+    rho = jnp.ones((x, y, z), dtype=jnp.float64)
+    m = jnp.zeros((x, y, z, 3), dtype=jnp.float64).at[..., 2].set(1.0)
 
-    phase = mbir.forward_phase_from_density_and_magnetization(
+    phase = mbir.phase_from_magnetisation(
         rho=rho,
         magnetization_3d=m,
         pixel_size=u.Quantity(1.0, "nm"),
+        reference_induction=mbir.B_REF,
         axis="z",
     )
 
@@ -62,10 +67,11 @@ def test_forward_phase_uniform_out_of_plane_is_near_zero():
 
 def test_forward_phase_vortex_disc_has_antisymmetric_nontrivial_pattern():
     rho, m = _make_vortex_disc_problem()
-    phase = mbir.forward_phase_from_density_and_magnetization(
+    phase = mbir.phase_from_magnetisation(
         rho=rho,
         magnetization_3d=m,
         pixel_size=u.Quantity(1.0, "nm"),
+        reference_induction=mbir.B_REF,
         axis="z",
         prw_vec=jnp.array([0.2, 0.0], dtype=jnp.float64),
     )
@@ -99,7 +105,7 @@ def test_forward_phase_gradient_fd_spot_check():
     pixel_size = u.Quantity(1.0, "nm")
 
     grad_rho = jax.grad(lambda r: _phase_energy(r, m, pixel_size, axis="z"))(rho)
-    idx = (0, 10, 13)
+    idx = (13, 10, 0)
     eps = 1e-4
 
     perturb = jnp.zeros_like(rho).at[idx].set(1.0)
@@ -108,3 +114,41 @@ def test_forward_phase_gradient_fd_spot_check():
     fd = (f_plus - f_minus) / (2.0 * eps)
 
     assert_allclose(float(fd), float(grad_rho[idx]), rtol=5e-2, atol=2e-4)
+
+
+def test_forward_phase_aliases_match():
+    rho, m = _make_vortex_disc_problem(z=2, y=20, x=20)
+    pixel_size = u.Quantity(1.0, "nm")
+
+    phase_requested = mbir.phase_from_magnetisation(
+        rho=rho,
+        magnetization_3d=m,
+        pixel_size=pixel_size,
+        reference_induction=mbir.B_REF,
+        axis="z",
+    )
+    phase_us = mbir.phase_from_magnetization(
+        rho=rho,
+        magnetization_3d=m,
+        pixel_size=pixel_size,
+        reference_induction=mbir.B_REF,
+        axis="z",
+    )
+    phase_density = mbir.phase_from_density_and_magnetization(
+        rho=rho,
+        magnetization_3d=m,
+        pixel_size=pixel_size,
+        reference_induction=mbir.B_REF,
+        axis="z",
+    )
+    phase_old = mbir.forward_phase_from_density_and_magnetization(
+        rho=rho,
+        magnetization_3d=m,
+        pixel_size=pixel_size,
+        reference_induction=mbir.B_REF,
+        axis="z",
+    )
+
+    assert_allclose(np.asarray(phase_requested), np.asarray(phase_us))
+    assert_allclose(np.asarray(phase_requested), np.asarray(phase_density))
+    assert_allclose(np.asarray(phase_requested), np.asarray(phase_old))

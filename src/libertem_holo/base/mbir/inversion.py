@@ -10,9 +10,9 @@ import numpy as np
 import unxt as u
 
 from .energy_backend import NeuralMagEnergyBackend
-from .forward import forward_phase_from_density_and_magnetization
+from .forward import phase_from_density_and_magnetization
 from .synthetic import vortex_magnetization
-from .units import RampCoeffs, make_quantity
+from .units import B_REF, RampCoeffs, make_quantity
 
 
 def _as_jax_array(value, *, dtype=jnp.float32):
@@ -195,8 +195,8 @@ def projected_m_error(m_recon, m_true, rho=None) -> float:
         weight = 1.0
     else:
         weight = (np.asarray(rho, dtype=np.float32) > 0.5)[..., None]
-    proj_recon = np.sum(weight * m_recon, axis=0)
-    proj_true = np.sum(weight * m_true, axis=0)
+    proj_recon = np.sum(weight * m_recon, axis=2)
+    proj_true = np.sum(weight * m_true, axis=2)
     denom = max(float(np.linalg.norm(proj_true)), np.finfo(np.float32).eps)
     return float(np.linalg.norm(proj_recon - proj_true) / denom)
 
@@ -244,17 +244,17 @@ def equilibrium_residual(m, backend: Any, *, rho) -> float:
 
 
 def support_center_yx(rho) -> tuple[int, int]:
-    support = np.argwhere(np.max(np.asarray(rho, dtype=np.float32), axis=0) > 0.5)
+    support = np.argwhere(np.max(np.asarray(rho, dtype=np.float32), axis=2) > 0.5)
     if support.size == 0:
         raise ValueError("Support mask is empty.")
-    center = np.round(np.mean(support, axis=0)).astype(int)
-    return int(center[0]), int(center[1])
+    center_xy = np.round(np.mean(support, axis=0)).astype(int)
+    return int(center_xy[1]), int(center_xy[0])
 
 
 def analytic_vortex_init(rho) -> jax.Array:
     rho = np.asarray(rho, dtype=np.float32)
     support = (rho > 0.5).astype(np.float32)
-    m0 = vortex_magnetization(rho.shape, support_zyx=jnp.asarray(support), dtype=jnp.float32)
+    m0 = vortex_magnetization(rho.shape, support_xyz=jnp.asarray(support), dtype=jnp.float32)
     return project_unit_norm(m0, rho)
 
 
@@ -363,10 +363,11 @@ def invert_magnetization(
     supports_jax = bool(getattr(backend, "supports_jax", False))
 
     def _predict_with_optional_ramp(m_current):
-        phi_base = forward_phase_from_density_and_magnetization(
+        phi_base = phase_from_density_and_magnetization(
             rho=rho,
             magnetization_3d=m_current,
             pixel_size=pixel_size_q,
+            reference_induction=B_REF,
             axis="z",
         )
         if fit_ramp:
@@ -466,10 +467,11 @@ def run_with_scaled_rho(
     rho_scaled = np.clip(scale * rho, 0.0, 1.0).astype(np.float32)
     m_scaled_truth = np.asarray(project_unit_norm(m_true, rho_scaled), dtype=np.float32)
     phi_scaled = np.asarray(
-        forward_phase_from_density_and_magnetization(
+        phase_from_density_and_magnetization(
             rho=rho_scaled,
             magnetization_3d=m_scaled_truth,
             pixel_size=pixel_size,
+            reference_induction=B_REF,
             axis="z",
         ),
         dtype=np.float32,

@@ -19,6 +19,7 @@ import unxt as u
 from jax.flatten_util import ravel_pytree
 
 from .units import (
+    B_REF,
     RampCoeffs,
     _as_angle_quantity,
     _as_dimensionless_quantity,
@@ -80,7 +81,8 @@ def mbir_loss_2d(
     phase
         Observed phase image of shape ``(H, W)`` as a ``Quantity["angle"]``.
     rdfc_kernel
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+        Pre-built kernel dictionary for advanced or performance-sensitive
+        reuse.
     pixel_size
         Pixel size as a ``Quantity["length"]``.
     reg_config
@@ -119,6 +121,7 @@ def mbir_loss_2d(
         ramp_coeffs_q,
         rdfc_kernel,
         pixel_size_q,
+        B_REF,
     )
 
     residuals = predictions - phase_q
@@ -173,7 +176,8 @@ def _run_newton_cg_solver_2d(
         Regularization configuration (see :func:`mbir_loss_2d`).
         Defaults to :class:`RegConfig` with zero exchange weight.
     rdfc_kernel
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+        Pre-built kernel dictionary for advanced or performance-sensitive
+        reuse.
     cg_tol
         Tolerance for the CG solver, default 1e-8.
     cg_maxiter
@@ -207,7 +211,7 @@ def _run_newton_cg_solver_2d(
     if reg_config is None:
         reg_config = RegConfig()
     if rdfc_kernel is None:
-        rdfc_kernel = build_rdfc_kernel(phase_q.shape)
+        rdfc_kernel = build_rdfc_kernel(phase_q.shape, reference_induction=B_REF)
     kernel = cast(dict[str, Any], rdfc_kernel)
 
     x0_tree = (init_mag_q, init_ramp_coeffs_q)
@@ -294,7 +298,8 @@ def solve_mbir_2d(
         Regularization configuration.  Pass a :class:`RegConfig` or a dict
         (e.g. ``{"lambda_exchange": 1.0}``) for backwards compatibility.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse.
     init_ramp_coeffs : RampCoeffs, optional
         Initial ramp coefficients. Defaults to zeros.
     reg_mask : array_like, optional
@@ -406,8 +411,8 @@ def reconstruct_2d(
     prw_vec : array_like, optional
         Projected reference wave vector ``(v, u)``.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-        Built automatically when not provided.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse. Built automatically when not provided.
     solver_config : SolverConfig, optional
         Explicit solver configuration object.  When provided,
         the *solver* string argument is ignored.
@@ -431,6 +436,7 @@ def reconstruct_2d(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
+            reference_induction=B_REF,
             geometry=geometry,
             prw_vec=prw_vec,
         )
@@ -497,8 +503,8 @@ def reconstruct_2d_ensemble(
     prw_vec : array_like, optional
         Projected reference wave vector ``(v, u)``.
     rdfc_kernel : dict, optional
-        Pre-built RDFC kernel from :func:`build_rdfc_kernel`.
-        Built automatically when not provided.
+        Optional pre-built RDFC kernel dictionary for advanced or
+        performance-sensitive reuse. Built automatically when not provided.
     solver_config : SolverConfig, optional
         Explicit solver configuration object.  When provided,
         the *solver* string argument is ignored.
@@ -523,6 +529,7 @@ def reconstruct_2d_ensemble(
     if rdfc_kernel is None:
         rdfc_kernel = build_rdfc_kernel(
             phase.shape,
+            reference_induction=B_REF,
             geometry=geometry,
             prw_vec=prw_vec,
         )

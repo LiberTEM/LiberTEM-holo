@@ -24,7 +24,7 @@ def test_smoothness_backend_zero_for_uniform_and_positive_for_vortex():
     rho = np.asarray(soft_disc_support((8, 8, 8), radius=2.8, edge_width=1.2), dtype=np.float32)
     uniform_m = np.zeros((8, 8, 8, 3), dtype=np.float32)
     uniform_m[..., 0] = 1.0
-    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_zyx=jnp.asarray(rho)), dtype=np.float32)
+    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_xyz=jnp.asarray(rho)), dtype=np.float32)
 
     backend = SmoothnessBackend()
 
@@ -37,7 +37,7 @@ def test_smoothness_backend_zero_for_uniform_and_positive_for_vortex():
 
 def test_combined_backend_merges_distinct_energy_terms():
     rho = np.asarray(soft_disc_support((8, 8, 8), radius=2.8, edge_width=1.2), dtype=np.float32)
-    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_zyx=jnp.asarray(rho)), dtype=np.float32)
+    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_xyz=jnp.asarray(rho)), dtype=np.float32)
 
     class ConstantBackend:
         def prepare(self, rho, m) -> FieldState:
@@ -56,7 +56,7 @@ def test_combined_backend_merges_distinct_energy_terms():
 
 def test_weighted_backend_scales_energy_terms():
     rho = np.asarray(soft_disc_support((8, 8, 8), radius=2.8, edge_width=1.2), dtype=np.float32)
-    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_zyx=jnp.asarray(rho)), dtype=np.float32)
+    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_xyz=jnp.asarray(rho)), dtype=np.float32)
 
     base_backend = SmoothnessBackend()
     weighted_backend = WeightedBackend(base_backend, weight=0.125)
@@ -71,7 +71,7 @@ def test_equilibrium_torque_backend_zero_for_uniform_and_positive_for_vortex():
     rho = np.asarray(soft_disc_support((8, 8, 8), radius=2.8, edge_width=1.2), dtype=np.float32)
     uniform_m = np.zeros((8, 8, 8, 3), dtype=np.float32)
     uniform_m[..., 0] = 1.0
-    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_zyx=jnp.asarray(rho)), dtype=np.float32)
+    vortex_m = np.asarray(vortex_magnetization((8, 8, 8), support_xyz=jnp.asarray(rho)), dtype=np.float32)
 
     backend = EquilibriumTorqueBackend(SmoothnessBackend())
 

@@ -2,8 +2,9 @@
 
 Implements the Real-space Decomposition of the Fourier-space Convolution
 kernel that maps a 2D projected magnetization field to its magnetic phase
-shift. Exposes :func:`build_rdfc_kernel`, :func:`phase_mapper_rdfc` and
-the FFT frequency-grid helper :func:`get_freq_grid`.
+shift. This module contains the low-level kernel builder
+:func:`build_rdfc_kernel`, :func:`phase_mapper_rdfc`, and the FFT
+frequency-grid helper :func:`get_freq_grid`.
 """
 
 from __future__ import annotations
@@ -15,10 +16,12 @@ import jax.numpy as jnp
 import unxt as u
 
 from .units import (
-    KERNEL_COEFF,
+    PHI_0,
     _as_dimensionless_quantity,
+    _as_induction_quantity,
     _as_length_quantity,
     _assert_quantity_compatible,
+    _validate_positive,
     make_quantity,
 )
 
@@ -100,13 +103,14 @@ def _rdfc_elementary_phase(
 
 def build_rdfc_kernel(
     dim_uv: tuple[int, int],
+    reference_induction: u.Quantity,
     geometry: str = "disc",
     prw_vec: jax.Array | None = None,
     dtype: type = jnp.float64,
 ) -> dict[str, Any]:
     """Build an RDFC phase-mapping kernel in Fourier space (JIT-compiled).
 
-    The kernel coefficient is ``KERNEL_COEFF`` = :math:`B_{\\text{ref}} / (2 \\Phi_0)`
+    The kernel coefficient is :math:`B_{\\text{ref}} / (2 \\Phi_0)`
     with units of :math:`1/\\text{nm}^2`.  When multiplied by voxel-area
     sums in the elementary-phase functions and by ``pixel_size²``
     in the forward model, the result is dimensionless (radians).
@@ -115,6 +119,9 @@ def build_rdfc_kernel(
     ----------
     dim_uv : tuple[int, int]
         Image dimensions ``(height, width)``.
+    reference_induction : Quantity["magnetic induction"]
+        Physical induction scale corresponding to unit normalized
+        magnetization.
     geometry : str, optional
         ``"disc"`` or ``"slab"``, default ``"disc"``.
     prw_vec : jax.Array or None, optional
@@ -136,7 +143,12 @@ def build_rdfc_kernel(
     v_coords = jnp.linspace(-(height - 1), height - 1, num=dim_kern[0]).astype(dtype)
     uu, vv = jnp.meshgrid(u_coords, v_coords, indexing="xy")
 
-    coeff = KERNEL_COEFF
+    reference_induction_q = _as_induction_quantity(reference_induction)
+    _validate_positive(reference_induction_q, "reference_induction")
+    coeff = u.Quantity(
+        reference_induction_q.value / (2.0 * PHI_0.value),
+        "1 / nm2",
+    )
     coeff_val = jnp.asarray(coeff.value, dtype=dtype)
     
     # Compute elementary phases once
@@ -177,6 +189,7 @@ def build_rdfc_kernel(
         "v_fft": u.Quantity(jnp.fft.rfft2(v_pad.value), kernel_unit),
         "dim_uv": dim_uv,
         "dim_pad": dim_pad,
+        "reference_induction": reference_induction_q,
     }
     _assert_quantity_compatible(cast(u.Quantity, result["u_fft"]), "1 / nm2", "kernel['u_fft']")
     _assert_quantity_compatible(cast(u.Quantity, result["v_fft"]), "1 / nm2", "kernel['v_fft']")
@@ -190,8 +203,8 @@ def phase_mapper_rdfc(
 ) -> jax.Array:
     """Map (u, v) magnetization components to a phase image via RDFC.
 
-    Uses a precomputed Fourier-space kernel from
-    :func:`build_rdfc_kernel`.
+    Uses a precomputed Fourier-space kernel dictionary, typically built via
+    the low-level :func:`build_rdfc_kernel` helper.
 
     Parameters
     ----------
@@ -200,7 +213,8 @@ def phase_mapper_rdfc(
     v_field
         In-plane magnetization component along y, shape ``(H, W)``.
     rdfc_kernel
-        Kernel dictionary as returned by :func:`build_rdfc_kernel`.
+        Pre-built kernel dictionary for advanced or performance-sensitive
+        reuse.
 
     Returns
     -------
