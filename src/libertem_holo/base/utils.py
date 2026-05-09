@@ -33,6 +33,7 @@ from functools import lru_cache
 from typing import Any, Literal
 import typing
 import logging
+import warnings
 
 try:
     import cupy as cp
@@ -301,8 +302,12 @@ class HoloParams(typing.NamedTuple):
             sb_size = estimate_sideband_size(sb_position, hologram.shape, xp=xp)
 
         if out_shape is None:
-            out_side = 2 * int(sb_size) + 16
-            out_shape = (out_side, out_side)
+            orig_shape = hologram.shape
+            out_shape = (orig_shape[0]//4, orig_shape[1]//4)
+        elif out_shape[0]/out_shape[1] != hologram.shape[0]/hologram.shape[1]:
+            warnings.warn(
+                "out_shape should have the same aspect ratio as the hologram shape"
+                " to preserve the correct pixel size in both dimensions.")
 
         fft_slice = get_slice_fft(out_shape, hologram.shape)
 

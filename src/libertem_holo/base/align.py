@@ -12,8 +12,12 @@ import numpy as np
 import numpy.typing as npt
 import matplotlib.pyplot as plt
 from sparseconverter import NUMPY, for_backend
-from scipy.ndimage import gaussian_filter
 import logging
+
+from scipy.signal.windows import hann
+from scipy.ndimage import rotate, gaussian_gradient_magnitude, shift, gaussian_filter
+from scipy.optimize import minimize_scalar
+from skimage.filters import sobel
 
 from libertem_holo.base.reconstr import (
     get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
@@ -24,7 +28,7 @@ log = logging.getLogger(__name__)
 
 
 def _hanning_2d(img, xp):
-    return img * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
+    return xp.asarray(img) * xp.outer(xp.hanning(img.shape[0]), xp.hanning(img.shape[1]))
 
 
 def _upsampled_dft(
@@ -467,6 +471,7 @@ class PhaseImageCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
+        img = self._xp.asarray(img)
         phase = get_phase(img, holoparams, xp=self._xp)
 
         # apply hanning filter:
@@ -798,3 +803,201 @@ def stack_alignment_quality(wave_stack: np.ndarray, shifts):
     std_image = np.std(np.abs(wave_stack), axis=0)
     offset = math.ceil(shifts.max()) + 1
     return std_image[offset:-offset, offset:-offset]
+
+
+def prepare_edge_image(img, edge_enhancement='sobel', sigma_window=True):
+    """
+    Compute edge-enhanced version of an image and optionally apply apodization.
+
+    Parameters
+    ----------
+    img : 2D array
+        Input phase or amplitude image.
+    sigma_window : bool
+        If True, applies Hann window apodization to reduce boundary artifacts.
+
+    Returns
+    -------
+    img_edge_windowed : 2D array
+        Edge-enhanced and windowed image.
+    """
+    if edge_enhancement == 'sobel':
+        # Edge enhancement (Sobel is more robust for cube-like objects)
+        edges = sobel(gaussian_filter(img, sigma=10))
+    if edge_enhancement == 'gradient':
+        edges = gaussian_gradient_magnitude(img, sigma=10)
+    if edge_enhancement == 'threshold':
+        edges = img > np.mean(img)
+        edges = gaussian_filter(edges*1, sigma=1)
+    if sigma_window:
+        wy = hann(edges.shape[0])
+        wx = hann(edges.shape[1])
+        window = np.outer(wy, wx)
+        edges = edges * window
+    return edges
+
+
+def register_rotation_translation(img1_edges, img2_edges, img1, img2):
+    """
+    Estimate rotation and translation between two images using edge-based registration.
+
+    Workflow:
+    1. Estimate rotation by minimizing MSE on edge images.
+    2. Apply rotation to original image.
+    3. Estimate translation using phase cross-correlation on edges.
+
+    Parameters
+    ----------
+    img1 : 2D array
+        Reference image (original phase).
+    img2_edges : 2D array
+        Edge-enhanced version of second image.
+
+    Returns
+    -------
+    img_aligned : 2D array
+        Registered version of second image aligned to img1.
+    angle : float
+        Estimated rotation angle (degrees).
+    shift_xy : tuple
+        Estimated translation vector.
+    """
+    def rotation_error(angle):
+        rotated = rotate(
+            img2_edges,
+            angle,
+            reshape=False,
+            order=3
+        )
+        return np.mean((img1_edges - rotated) ** 2)
+
+    # ---- optimize rotation ----
+    res = minimize_scalar(
+        rotation_error,
+        bounds=(-90, 90),
+        method='bounded'
+    )
+    angle = res.x
+    # ---- apply rotation to full image ----
+    img2_rot = rotate(
+        img2,
+        angle,
+        reshape=False,
+        order=3
+    )
+    # ---- translation (on edges) ----
+    correlator = ImageCorrelator(
+        hanning=True, binning=2, upsample_factor=10, normalization='phase'
+    )
+    f1 = correlator.prepare_input(gaussian_filter(sobel(img1), sigma=2))
+    f2 = correlator.prepare_input(gaussian_filter(sobel(img2_rot), sigma=2))
+    corr_res = correlator.correlate(f1, f2)
+    shift_xy = corr_res.shift
+    return angle, shift_xy
+
+
+def plot_registration_results(
+    img1: np.ndarray,
+    img2: np.ndarray,
+    angle: float,
+    shift_xy: tuple[float, float],
+) -> None:
+    """
+    Plot registration results including:
+    - reference (initial)
+    - input (misaligned)
+    - aligned result
+    - difference map
+
+    Parameters
+    ----------
+    img1 : 2D array
+        Reference image.
+    img2 : 2D array
+        Original unaligned image.
+    angle : float
+        Estimated rotation (degrees).
+    shift_xy : tuple
+        Estimated translation vector.
+    """
+    img_rot = rotate(img2, angle, reshape=False, order=3)
+    img_final = shift(img_rot, shift_xy, order=3)
+
+    diff = img1 - img_final
+
+    vmin = np.percentile(img1, 1)
+    vmax = np.percentile(img1, 99)
+
+    dlim = np.percentile(np.abs(diff), 99)
+
+    fig, ax = plt.subplots(2, 2, figsize=(8, 4))
+
+    ax[0, 0].imshow(img1, cmap='gray', vmin=vmin, vmax=vmax)
+    ax[0, 0].set_title("Reference (phase1)")
+    ax[0, 0].axis("off")
+
+    ax[0, 1].imshow(img2, cmap='gray', vmin=vmin, vmax=vmax)
+    ax[0, 1].set_title("Input (phase2)")
+    ax[0, 1].axis("off")
+
+    ax[1, 0].imshow(img_final, cmap='gray', vmin=vmin, vmax=vmax)
+    ax[1, 0].set_title(f"Aligned (θ={angle:.3f}°)")
+    ax[1, 0].axis("off")
+
+    im = ax[1, 1].imshow(diff, cmap='seismic', vmin=-dlim, vmax=dlim)
+    ax[1, 1].set_title("Difference")
+    ax[1, 1].axis("off")
+    plt.colorbar(im, ax=ax[1, 1], fraction=0.046)
+    plt.tight_layout()
+    plt.show()
+
+
+def corr_rotation(
+        img1: np.ndarray, img2: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """
+    Compute the best rotation angle between two images using normalized cross-correlation.
+
+    Parameters
+    ----------
+    img1 : np.ndarray
+        Reference image.
+    img2 : np.ndarray
+        Image to rotate.
+
+    Returns
+    -------
+    best_angle : float
+        The angle that maximizes the correlation.
+    angles : np.ndarray
+        Array of angles tested.
+    corr : np.ndarray
+        Correlation values for each angle.
+    """
+    angles = np.linspace(-75, 85, 401)
+    corr = []
+    for angle in angles:
+        rot = rotate(
+            img2,
+            angle,
+            reshape=False,
+            order=0
+        )
+        c = np.sum(img1 * rot)
+        norm = np.sqrt(np.sum(img1**2) * np.sum(rot**2))
+        corr.append(c / norm)
+    corr = np.array(corr)
+    best_angle = angles[np.argmax(corr)]
+    return best_angle, angles, corr
+
+
+def rotate_and_shift(p1, p2):
+    """To be used iteratively."""
+    p1_edges = prepare_edge_image(p1, edge_enhancement='threshold', sigma_window=False)
+    p2_edges = prepare_edge_image(p2, edge_enhancement='threshold', sigma_window=False)
+    angle, shift_xy = register_rotation_translation(
+        img1_edges=p1_edges, img2_edges=p2_edges, img1=p1, img2=p2
+    )
+    p2_rotated = rotate(p2, angle, reshape=False, order=3)
+    p2_shifted = shift(p2_rotated, shift=shift_xy)
+    return p2_shifted
