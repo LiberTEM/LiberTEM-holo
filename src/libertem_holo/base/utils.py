@@ -314,7 +314,7 @@ class HoloParams(typing.NamedTuple):
             int(c)
             for c in sb_position
         )
-        if line_filter_width is None:
+        if line_filter_width is None or np.isclose(line_filter_width, 0):
             aperture = np.fft.fftshift(aperture[fft_slice])
         else:
             lf = butterworth_line(
