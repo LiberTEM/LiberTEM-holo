@@ -28,6 +28,7 @@ dependencies = [
     "sparse",
     "sparseconverter",
     "scikit-image",
+    "natsort",
     "empyre",  # used in example notebook(s)
 ]
 keywords = ["electron microscopy", "holography", "off-axis holography"]
