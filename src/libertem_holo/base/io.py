@@ -1,7 +1,13 @@
 """Basic I/O for holography data.
 
 We mostly want to support loading holograms from DM{3,4} files, and save
-results as numpy .npz files
+results as numpy .npz files.
+
+Use cases:
+
+- Load a stack from a single dm3/dm4 file
+- Load a stack from a list or a glob of files
+- Construct InputData manually (potentially with missing parts)
 """
 
 from __future__ import annotations
@@ -92,8 +98,9 @@ class Results:
         if params is not None and input_data.pixelsize is not None:
             pxs = input_data.pixelsize / params.scale_factor
             self.metadata["effective_pixelsize"] = pxs
-        if input_data.tags is not None:
-            ft = input_data.tags.get("DataBar Acquisition Time (OS)")
+        tags = input_data.tags_for_slice(0)
+        if tags is not None:
+            ft = tags.get("DataBar Acquisition Time (OS)")
             if ft is not None:
                 ft = int(ft)
                 dt = dt_from_filetime(ft)
@@ -152,16 +159,39 @@ class InputData:
     files: list[InputFile]
     """ordered list of input files"""
 
+    @property
+    def pixelsize(self) -> float | None:
+        """Pixel size in nm."""
+        return self.files[0].pixelsize
+
     def zslice(self, z: int) -> np.ndarray:
         """From a 3D stack, load a single image/slice."""
         # translate z into two indices:
         # 1) the correct InputFile in self.files
         # 2) the index in that file
-        raise NotImplementedError
+        offset = 0
+        for i_f in self.files:
+            if z >= offset and z < offset + i_f.shape_3d[0]:
+                in_file_offset = z - offset
+                return i_f.data_3d[in_file_offset]
+            offset += i_f.shape_3d[0]
+        msg = f"z out of bounds: {z}"
+        raise ValueError(msg)
 
-    def tags_for_slice(self, z: int) -> dict[str, Any]:
+    def tags_for_slice(self, z: int) -> dict[str, Any] | None:
+        """Raw dictionary of tags for slize `z`."""
         # which InputFile does z lie in? return its tags
-        raise NotImplementedError
+        i_f = self._file_for_z(z)
+        return i_f.tags
+
+    def _file_for_z(self, z: int) -> InputFile:
+        offset = 0
+        for i_f in self.files:
+            if z >= offset and z < offset + i_f.shape_3d[0]:
+                return i_f
+            offset += i_f.shape_3d[0]
+        msg = f"z out of bounds: {z}"
+        raise ValueError(msg)
 
     @property
     def data(self) -> InputSlicer:
@@ -177,8 +207,15 @@ class InputData:
         return InputSlicer(self)
 
     @property
-    def shape(self) -> list[int]:
-        raise NotImplementedError
+    def shape(self) -> tuple[int, int, int]:
+        """The 3D shape of the data."""
+        shapes = [
+            file.shape_3d
+            for file in self.files
+        ]
+        sig_shape = shapes[0][1:]
+        nav_shape = sum(s[0] for s in shapes)
+        return (nav_shape,  *sig_shape)
 
     @property
     def exposure_time(self) -> float:
@@ -197,6 +234,25 @@ class InputData:
                 raise ValueError(msg)
             exp_sum += in_file.exposure_time
         return exp_sum
+
+    @classmethod
+    def from_array(
+        cls,
+        data: np.ndarray,
+        pixelsize: float | None = None,
+        exposure_time: float | None = None,
+        tags: dict[str, Any] | None = None,
+    ) -> InputData:
+        """Create InputData from an array."""
+        i_f = InputFile.from_array(
+            data=data,
+            pixelsize=pixelsize,
+            exposure_time=exposure_time,
+            tags=tags,
+        )
+        return InputData(
+            files=[i_f],
+        )
 
     @classmethod
     def load_from_dm(cls, path: str | pathlib.Path) -> InputData:
@@ -256,7 +312,7 @@ class InputFile:
     data: np.ndarray
     """the data array"""
 
-    path: pathlib.Path
+    path: pathlib.Path | None = None
     """the path to the file on the filesystem"""
 
     pixelsize: float | None = None
@@ -267,6 +323,42 @@ class InputFile:
 
     exposure_time: float | None = None
     """in seconds, for the whole stack in the 3D case"""
+
+    @property
+    def data_3d(self) -> np.ndarray:
+        """Data as a 3D shape."""
+        return self.data.reshape(self.shape_3d)
+
+    @property
+    def shape_3d(self) -> tuple[int, int, int]:
+        """Shape as 3D.
+
+        In the 2D case, the first dimension will have shape 1.
+        """
+        shape = self.data.shape
+        if len(shape) == 3:
+            return shape
+        elif len(shape) == 2:
+            return (1, *tuple(shape))
+        else:
+            msg = f"shape should be 2d or 3d; is {shape}"
+            raise ValueError(msg)
+
+    @classmethod
+    def from_array(
+        cls,
+        data: np.ndarray,
+        pixelsize: float | None = None,
+        exposure_time: float | None = None,
+        tags: dict[str, Any] | None = None,
+    ) -> InputFile:
+        """Create InputFile from an array."""
+        return cls(
+            data=data,
+            pixelsize=pixelsize,
+            exposure_time=exposure_time,
+            tags=tags,
+        )
 
     @classmethod
     def load_from_dm(cls, path: str | pathlib.Path) -> InputFile:
