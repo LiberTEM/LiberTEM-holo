@@ -31,7 +31,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Choose Python version ${{ matrix.python.version }}
         uses: actions/setup-python@v6
         with:
@@ -52,7 +52,7 @@ jobs:
         envs: ["numba_coverage", "docs-check"]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: 'Choose Python version 3.11'
         uses: actions/setup-python@v6
         with:
@@ -71,7 +71,7 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: 'Choose Python version 3.11'
         uses: actions/setup-python@v6
         with:
@@ -114,7 +114,7 @@ jobs:
       LT_RELEASE_UPLOAD_ZENODO_TOKEN: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_TOKEN }}
       LT_RELEASE_UPLOAD_ZENODO_PARENT: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_PARENT }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Choose Python version 3.11
         uses: actions/setup-python@v6
         with:
