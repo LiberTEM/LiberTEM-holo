@@ -61,3 +61,18 @@ def test_pixelsize_micrometer(dm_testdata_path: pathlib.Path):
     assert np.isclose(input_data.pixelsize, 0.0010295984e-6)
     tags = input_data.tags_for_slice(0)
     assert tags is not None
+
+
+def test_dm3_data(dm_testdata_path: pathlib.Path):
+    input_data = InputData.load_from_dm(
+        dm_testdata_path / "NF100_fil10_04_malika.dm3",
+    )
+    assert input_data.shape == (1, 2048, 2048)
+    assert input_data.dtype == np.dtype("int32")
+    assert np.isclose(input_data.pixelsize, 0.4504859e-9)
+    assert input_data.exposure_time == 1.0
+    tags = input_data.tags_for_slice(0)
+    assert tags is not None
+    assert tags["DataBar Device Name"] == "BM-UltraScan"
+
+    assert input_data.data[0].shape == (2048, 2048)

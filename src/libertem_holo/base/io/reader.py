@@ -13,8 +13,8 @@ import pathlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import natsort
+import numpy as np
 from ncempy.io.dm import fileDM
 
 if TYPE_CHECKING:
