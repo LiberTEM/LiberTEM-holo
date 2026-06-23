@@ -97,6 +97,10 @@ class InputData:
         return (nav_shape,  *sig_shape)
 
     @property
+    def dtype(self) -> np.dtype[Any]:
+        return self.files[0].data.dtype
+
+    @property
     def exposure_time(self) -> float:
         """Exposure time, in seconds.
 
