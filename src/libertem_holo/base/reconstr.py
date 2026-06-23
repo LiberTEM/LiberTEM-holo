@@ -374,7 +374,6 @@ def reconstruct_bf(
     Please use :func:`libertem_holo.base.filter.central_line_filter` to
     filter out fresnel fringes as appropriate.
     """
-    aperture += aperture[::-1, ::-1]
     frame = xp.array(frame)
     fft_frame = xp.fft.fft2(frame)
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
