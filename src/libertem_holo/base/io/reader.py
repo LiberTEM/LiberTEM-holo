@@ -77,8 +77,8 @@ class InputData:
         """Access slices of the input data.
 
         Example:
-        -------
-        >>> i = InputData.load_from_dm(path="something.dm4")
+        --------
+        >>> i = InputData.load_from_dm(path="something.dm4")  # doctest: +SKIP
         >>> i.data[8]  # return the 8th slice of the input data
         array([...])
 
@@ -178,7 +178,9 @@ class InputData:
 
         Example
         -------
-        >>> InputData.load_from_glob(base_path="/data/stack-1/", pattern="*.dm4")
+        >>> InputData.load_from_glob(
+        ...     base_path="/data/stack-1/",
+        ...     pattern="*.dm4")  # doctest: +SKIP
 
         """
         base_path = pathlib.Path(base_path)
