@@ -78,7 +78,7 @@ class InputData:
         Example:
         --------
         >>> i = InputData.load_from_dm(path="something.dm4")  # doctest: +SKIP
-        >>> i.data[8]  # return the 8th slice of the input data
+        >>> i.data[8]  # return the 8th slice of the input data  # doctest: +SKIP
         array([...])
 
         """
