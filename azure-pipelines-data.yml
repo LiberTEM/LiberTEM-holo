@@ -58,7 +58,7 @@ stages:
         - bash: $(Agent.TempDirectory)/venv/bin/tox -e notebooks -- notebooks/*.ipynb -v
           displayName: 'Run nbval tests $(Agent.OS)'
 
-      - bash: ./scripts/codecov.sh -f ./coverage.xml
+      - bash: ./scripts/codecov.sh -f ./coverage.xml --slug LiberTEM/LiberTEM-holo
         displayName: 'Submit coverage to codecov.io'
         ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
           env:
@@ -104,7 +104,7 @@ stages:
       - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && $(Agent.TempDirectory)/venv/bin/pytest --durations=10 --cov=libertem_holo --cov-report=term --cov-report=html --cov-report=xml --cov-config=setup.cfg --junitxml=junit.xml tests/
         displayName: 'run LiberTEM-holo tests'
 
-      - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && ./scripts/codecov.sh -f ./coverage.xml
+      - bash: cd $(Build.SourcesDirectory)/LiberTEM-holo/ && ./scripts/codecov.sh -f ./coverage.xml --slug LiberTEM/LiberTEM-holo
         displayName: 'Submit coverage to codecov.io'
         ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
           env:
@@ -130,7 +130,7 @@ stages:
       - bash: $(Agent.TempDirectory)/venv/bin/tox -r
         displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
 
-      - bash: ./scripts/codecov.sh -f ./coverage.xml
+      - bash: ./scripts/codecov.sh -f ./coverage.xml --slug LiberTEM/LiberTEM-holo
         displayName: 'Submit coverage to codecov.io'
         ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
           env:
@@ -175,7 +175,7 @@ stages:
       - bash: $(Agent.TempDirectory)/venv/bin/tox -r
         displayName: 'Run tox tests $(TOXENV) $(Agent.OS)'
 
-      - bash: ./scripts/codecov.sh -f ./coverage.xml
+      - bash: ./scripts/codecov.sh -f ./coverage.xml --slug LiberTEM/LiberTEM-holo
         displayName: 'Submit coverage to codecov.io'
         ${{ if and(not(eq(variables['Build.Reason'], 'PullRequest')), eq(variables['Build.SourceBranch'], 'refs/heads/master')) }}:
           env:
