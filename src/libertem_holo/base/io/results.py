@@ -43,9 +43,9 @@ class Results:
 
     """
 
-    complex_wave: np.ndarray
-    unwrapped_phase: np.ndarray | None = None
-    brightfield: np.ndarray | None = None
+    complex_wave: np.ndarray[tuple[int, int]]
+    unwrapped_phase: np.ndarray[tuple[int, int]] | None = None
+    brightfield: np.ndarray[tuple[int, int]] | None = None
     metadata: dict[str, Any] | None = None
 
     def metadata_from_input(
