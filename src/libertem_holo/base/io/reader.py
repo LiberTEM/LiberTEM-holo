@@ -13,13 +13,12 @@ import pathlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import natsort
 from ncempy.io.dm import fileDM
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import numpy as np
 
 
 class InputSlicer:
@@ -40,7 +39,7 @@ class InputData:
 
     @property
     def pixelsize(self) -> float | None:
-        """Pixel size in nm."""
+        """Pixel size in m."""
         return self.files[0].pixelsize
 
     def zslice(self, z: int) -> np.ndarray:
@@ -201,7 +200,7 @@ class InputFile:
     """the path to the file on the filesystem"""
 
     pixelsize: float | None = None
-    """in nm"""
+    """in m"""
 
     tags: dict[str, Any] | None = None
     """raw tags from the DM file"""
@@ -255,11 +254,29 @@ class InputFile:
         units = ds["pixelUnit"][-2:]
         sizes = ds["pixelSize"][-2:]
 
-        assert units[0] == "nm", f'pixelUnit should be nm, is {ds["pixelUnit"]}'
-        assert sizes[0] == sizes[1]
+        if sizes[0] != sizes[1]:
+            msg = "pixel size should be the same for both axes"
+            raise ValueError(msg)
         pixelsize = sizes[0]
-        assert len(ds["data"].shape) in (2, 3), "data should be 2D or 3D"
-        exposure_time = dm.getMetadata(0)["DataBar Exposure Time (s)"]
+        if units[0] == "nm":
+            pix_mult = 1e-9
+        elif units[0] == "µm":
+            pix_mult = 1e-6
+        else:
+            msg = (
+                'pixelUnit should be nm or µm,'
+                f' is {ds["pixelUnit"]}'
+            )
+            raise ValueError(msg)
+        pixelsize = float(pixelsize) * pix_mult
+
+        if len(ds["data"].shape) not in (2, 3):
+            msg = "data should be 2D or 3D"
+            raise ValueError(msg)
+
+        tags = dm.getMetadata(0)
+
+        exposure_time = tags.get("DataBar Exposure Time (s)")
         if len(ds["data"].shape) == 3:
             exposure_time *= ds["data"].shape[0]
         return cls(
