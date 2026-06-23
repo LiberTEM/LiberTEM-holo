@@ -16,6 +16,8 @@ import numpy as np
 if TYPE_CHECKING:
     import pathlib
 
+    from numpy import dtypes as npd
+
     from libertem_holo.base.io.reader import InputData
     from libertem_holo.base.utils import HoloParams
 
@@ -43,9 +45,18 @@ class Results:
 
     """
 
-    complex_wave: np.ndarray[tuple[int, int]]
-    unwrapped_phase: np.ndarray[tuple[int, int]] | None = None
-    brightfield: np.ndarray[tuple[int, int]] | None = None
+    complex_wave: np.ndarray[
+        tuple[int, int],
+        npd.Complex64DType | npd.Complex128DType,
+    ]
+    unwrapped_phase: np.ndarray[
+        tuple[int, int],
+        npd.Float16DType | npd.Float32DType | npd.Float64DType,
+    ] | None = None
+    brightfield: np.ndarray[
+        tuple[int, int],
+        npd.Float16DType | npd.Float32DType | npd.Float64DType,
+    ] | None = None
     metadata: dict[str, Any] | None = None
 
     def metadata_from_input(
@@ -102,9 +113,9 @@ class Results:
             msg = "path should have an .npz file extension"
             raise ValueError(msg)
 
-        arrays = {
+        arrays: dict[str, np.ndarray] = {
             "complex_wave": self.complex_wave,
-            "metadata": json.dumps(self.metadata or {}),
+            "metadata": np.array(json.dumps(self.metadata or {})),
         }
         if self.unwrapped_phase is not None:
             arrays["unwrapped_phase"] = self.unwrapped_phase
