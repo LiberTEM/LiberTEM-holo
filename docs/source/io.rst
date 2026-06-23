@@ -5,9 +5,10 @@
    base_path = os.environ.get('TESTDATA_BASE_PATH')
    if base_path is None:
       path_to_data = None
+      glob_base_path = None
    else:
       path_to_data = pathlib.Path(base_path) / 'dm' / '3D' / 'alpha-50_obj.dm3'
-   glob_base_path = pathlib.Path(base_path) / 'dm'
+      glob_base_path = pathlib.Path(base_path) / 'dm'
 
 
 Input and Output
