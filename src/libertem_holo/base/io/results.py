@@ -6,18 +6,18 @@ custom metadata fields.
 
 from __future__ import annotations
 
-import json
-import pathlib
 import datetime
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
-from libertem_holo.base.utils import HoloParams
-from libertem_holo.base.io.reader import InputData
 
 if TYPE_CHECKING:
-    pass
+    import pathlib
+
+    from libertem_holo.base.io.reader import InputData
+    from libertem_holo.base.utils import HoloParams
 
 
 @dataclass
@@ -60,6 +60,7 @@ class Results:
          - `exposure_time`
          - `effective_pixelsize` if `params` are given and `input_data` has a pixel size
          - `acquisition_timestamp` if available in the input data tags
+           (formatted in ISO format)
 
         Parameters
         ----------

@@ -1,10 +1,12 @@
 API Reference
 =============
 
-Holography UDFs
----------------
+.. _`io api`:
 
-.. automodule:: libertem_holo.udf
+Input/output
+------------
+
+.. automodule:: libertem_holo.base.io
     :members:
 
 Base holography functions
@@ -28,6 +30,12 @@ Stack alignment
 .. automodule:: libertem_holo.base.align
     :members:
 
+Holography UDFs
+---------------
+
+.. automodule:: libertem_holo.udf
+    :members:
+
 Simulation
 ~~~~~~~~~~
 
@@ -40,10 +48,3 @@ Utility functions
 .. automodule:: libertem_holo.base.utils
     :members:
 
-.. _`io api`:
-
-Input/output
-~~~~~~~~~~~~
-
-.. automodule:: libertem_holo.base.io
-    :members:
