@@ -33,3 +33,19 @@ def test_load_2d(dm_testdata_path: pathlib.Path):
     tags = input_data.tags_for_slice(0)
     assert tags is not None
     assert tags["DataBar Device Name"] == "K2-0001"
+
+
+def test_load_from_glob(dm_testdata_path: pathlib.Path):
+    input_data = InputData.load_from_glob(
+        base_path=dm_testdata_path,
+        pattern="2018-7-17 15_29_*.dm4",
+    )
+    assert input_data.shape == (10, 3838, 3710)
+    assert input_data.dtype == np.dtype("float32")
+    assert input_data.pixelsize == 0.4504859
+    assert input_data.exposure_time == 20.0
+    tags = input_data.tags_for_slice(9)
+    assert tags is not None
+    assert tags["DataBar Device Name"] == "K2-0001"
+
+    assert input_data.data[7].shape == (3838, 3710)
