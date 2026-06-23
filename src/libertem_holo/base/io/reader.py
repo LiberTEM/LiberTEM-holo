@@ -97,6 +97,7 @@ class InputData:
 
     @property
     def dtype(self) -> np.dtype[Any]:
+        """The numpy dtype of the data."""
         return self.files[0].data.dtype
 
     @property
@@ -222,11 +223,10 @@ class InputFile:
         shape = self.data.shape
         if len(shape) == 3:
             return shape
-        elif len(shape) == 2:
+        if len(shape) == 2:
             return (1, *tuple(shape))
-        else:
-            msg = f"shape should be 2d or 3d; is {shape}"
-            raise ValueError(msg)
+        msg = f"shape should be 2d or 3d; is {shape}"
+        raise ValueError(msg)
 
     @classmethod
     def from_array(
