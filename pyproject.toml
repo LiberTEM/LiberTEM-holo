@@ -106,4 +106,5 @@ select = [
     "ANN201",  # missing return type annotation
     "ANN001",  # missing argument annotation
     "INP001",  # "implicit namespace package" doesn't make sense for tests
+    "PLR2004",  # magic values are useful in testcases
 ]
