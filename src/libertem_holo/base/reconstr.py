@@ -49,7 +49,7 @@ XPType = typing.Any  # Union[Module("numpy"), Module("cupy")]
 
 
 def reconstruct_frame(
-    frame: np.ndarray,
+    frame: np.ndarray[tuple[int, int]],
     sb_pos: tuple[float, float],
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
@@ -177,9 +177,9 @@ def estimate_omega(
 
 
 def reconstruct_direct_euler(
-    image: np.ndarray,
+    stack: np.ndarray[tuple[int, int, int]],
     omega: tuple[float, float],
-) -> np.ndarray:
+) -> np.ndarray[tuple[int, int]]:
     """Reconstruct a stack of phase shifted holograms.
 
     This is using the direct reconstruction method by Ru et.al. 1994 (euler
@@ -187,9 +187,9 @@ def reconstruct_direct_euler(
 
     Parameters
     ----------
-    image : array
+    stack
         Holographic data array
-    omega: tuple
+    omega
         frequency carrier in y and x axis
 
     Returns
@@ -198,7 +198,7 @@ def reconstruct_direct_euler(
         the reconstructed phase image
 
     """
-    number_of_images = image.shape[1]
+    number_of_images = stack.shape[1]
     phase_initial_euler = np.zeros(number_of_images, dtype="complex128")
 
     n = np.arange(number_of_images)
@@ -207,11 +207,11 @@ def reconstruct_direct_euler(
 
     c22 = 0
     for i in range(number_of_images):
-        c22 = c22 + (image[i] * phase_initial_euler[i])
+        c22 = c22 + (stack[i] * phase_initial_euler[i])
     c22 = c22 / number_of_images
 
-    x = np.linspace(0, omega[1], image.shape[2], endpoint=False)
-    y = np.linspace(0, omega[0], image.shape[1], endpoint=False)
+    x = np.linspace(0, omega[1], stack.shape[2], endpoint=False)
+    y = np.linspace(0, omega[0], stack.shape[1], endpoint=False)
     irow, icol = np.meshgrid(x, y, indexing="xy")
 
     ramp_carrier = np.exp(1j * 2 * np.pi * (irow + icol))
@@ -221,7 +221,7 @@ def reconstruct_direct_euler(
 
 
 def reconstruct_direct(
-    stack: np.ndarray,
+    stack: np.ndarray[tuple[int, int, int]],
     omega: tuple[float, float],
 ) -> np.ndarray:
     """Reconstruct a stack of phase shifted holograms.
@@ -232,8 +232,6 @@ def reconstruct_direct(
     ----------
     stack : array_like
         Stack of holograms
-    number_of_images : int
-        The number of images inside the stack
     omega: tuple
         frequency carrier in y and x axis
 
@@ -245,12 +243,13 @@ def reconstruct_direct(
     """
     xspace = omega[1]
     yspace = omega[0]
-    compfront = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
-    compcar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
-    sin_value_sum = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
-    cos_value_sum = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
-    coscar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
-    sincar = np.zeros((stack.shape[1], stack.shape[2]), dtype="complex64")
+    sig_shape = stack.shape[1:]
+    compfront = np.zeros(sig_shape, dtype="complex64")
+    compcar = np.zeros(sig_shape, dtype="complex64")
+    sin_value_sum = np.zeros(sig_shape, dtype="complex64")
+    cos_value_sum = np.zeros(sig_shape, dtype="complex64")
+    coscar = np.zeros(sig_shape, dtype="complex64")
+    sincar = np.zeros(sig_shape, dtype="complex64")
 
     number_of_images = stack.shape[0]
     cos_value_sum = np.array(0)
@@ -279,7 +278,7 @@ def reconstruct_direct(
 
 def display_fft_image(
     image: np.ndarray,
-    sb_position: tuple,
+    sb_position: tuple[int, int],
     slice_fft: np.ndarray,
     mask: np.ndarray = 1,
     detail: bool = True,
@@ -344,7 +343,7 @@ def get_phase(
         sb_pos=params.sb_position,
         aperture=params.aperture,
         slice_fft=slice_fft,
-        xp=xp
+        xp=xp,
     )
 
     # phase_unwrap is numpy-only:
@@ -364,7 +363,7 @@ def get_phase(
 
 
 def reconstruct_bf(
-    frame: np.ndarray,
+    frame: np.ndarray[tuple[int, int]],
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
     *,
@@ -385,14 +384,15 @@ def reconstruct_bf(
 
 
 def phase_offset_correction(
-    aligned_stack,
-    wtype: Literal['weighted'] | Literal['unweighted'] = 'weighted',
+    aligned_stack: np.ndarray[tuple[int, int, int]],
+    wtype: Literal["weighted", "unweighted"] = "weighted",
     threshold: float = 1e-12,
     return_stack: bool = False,
     xp=np,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """
-    This part of the code is to correct for the phase drift in the holograms due
+    """Correct for phase offset in a stack of complex images.
+
+    This corrects for the phase drift in the holograms due
     to the biprism drift with time.  Since we are dealing with the phase of the
     image which wraps from -pi to pi a simple scalar correction of the phase
     doesnt work as the phase wraps around the phase axis. So the options for a
@@ -408,8 +408,8 @@ def phase_offset_correction(
     https://github.com/Ptychography-4-0/ptychography/blob/master/src/ptychography40/stitching/stitching.py
     for more details, see https://arxiv.org/pdf/2005.02032.pdf
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     aligned_stack
         Array of shape (N, sy, sx) where N is the number of complex images;
         should have dtype complex64 or complex128.
@@ -421,7 +421,7 @@ def phase_offset_correction(
     wtype
         Selected type of weights to be used in the angular synchronization
         There are 2 possible choices:
-        'unweighted' or 'weighted', depending on usage or not of the weights for
+        "unweighted" or "weighted", depending on usage or not of the weights for
         angular synchronization (explained above)
 
     return_stack
@@ -430,6 +430,7 @@ def phase_offset_correction(
 
     xp
         Either numpy or cupy for GPU support
+
     """
     aligned_stack = xp.asarray(aligned_stack)
     R = aligned_stack.shape[0]
@@ -452,21 +453,21 @@ def phase_offset_correction(
 
     for r1 in range(R):
         for r2 in range(r1+1, R):
-            ph_diff[r1, r2] = np.einsum('ij,ij', aligned_stack[r1], aligned_stack[r2].conj())
+            ph_diff[r1, r2] = np.einsum("ij,ij", aligned_stack[r1], aligned_stack[r2].conj())
             ph_diff[r2, r1] = ph_diff[r1, r2].conj()
 
-    if wtype == 'weighted':
+    if wtype == "weighted":
         weights = np.abs(ph_diff)
-    elif wtype == 'unweighted':
+    elif wtype == "unweighted":
         weights = (np.abs(ph_diff) > threshold).astype(float)
 
     idx = weights > 0
     ph_diff[idx] = ph_diff[idx]/np.abs(ph_diff[idx])
     degree = np.sum(weights, axis=1)
     laplacian = np.diag(degree) - ph_diff * weights
-    # because cupyx.scipy.sparse.linalg.eigsh doesn't support which='SM',
+    # because cupyx.scipy.sparse.linalg.eigsh doesn't support which="SM",
     # we transfer to CPU here (see also https://github.com/cupy/cupy/issues/4692):
-    _, phases = eigsh(for_backend(laplacian, NUMPY), 1, which='SM')
+    _, phases = eigsh(for_backend(laplacian, NUMPY), 1, which="SM")
     phases = xp.asarray(phases)
     idx = np.abs(phases) > threshold
     phases[idx] = phases[idx]/np.abs(phases[idx])
