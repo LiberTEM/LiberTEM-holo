@@ -1,3 +1,4 @@
+"""2D Laplacian Phase Unwrapping."""
 from dataclasses import dataclass
 
 import numpy as np
@@ -5,6 +6,8 @@ import numpy as np
 
 @dataclass
 class LaplaceParams:
+    """Container for reusable unwrapping parameters."""
+
     del_op: np.ndarray
     del_inv: np.ndarray
 
@@ -38,11 +41,29 @@ def unwrap_phase_laplacian(
 ) -> np.ndarray[tuple[int, int]]:
     """2D Laplacian Phase Unwrapping.
 
-    `params` can be pre-computed using `prepare_unwrap_for_shape`.
+    Note that the result is qualitative and not guaranteed to be
+    an integer multiple of 2π from the original phase. A potential use
+    case is a quick phase preview, as this method is GPU-accelerated
+    by passing in `xp=cp`. The result can also be used as a starting
+    point for further processing.
 
     Implements part of: Marvin A. Schofield and Yimei Zhu, "Fast phase
     unwrapping algorithm for interferometric applications," Opt. Lett. 28,
     1194-1196 (2003) https://doi.org/10.1364/OL.28.001194
+
+    Parameters:
+    -----------
+    wrapped_phase
+        The input phase, wrapped between -π and +π
+
+    params
+        Optional pre-computed parameters using `prepare_laplacian_unwrap`,
+        useful if many phases of the same shape need to be
+        unwrapped.
+
+    xp
+        numpy or cupy array module
+
     """
     fft2 = xp.fft.fft2
     ifft2 = xp.fft.ifft2

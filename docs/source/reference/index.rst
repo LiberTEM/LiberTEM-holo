@@ -30,21 +30,27 @@ Stack alignment
 .. automodule:: libertem_holo.base.align
     :members:
 
-Holography UDFs
----------------
+Phase unwrapping
+~~~~~~~~~~~~~~~~
 
-.. automodule:: libertem_holo.udf
+.. automodule:: libertem_holo.base.unwrap
+    :members:
+
+Utility functions
+-----------------
+
+.. automodule:: libertem_holo.base.utils
     :members:
 
 Simulation
-~~~~~~~~~~
+----------
 
 .. automodule:: libertem_holo.base.generate
     :members:
 
-Utility functions
-~~~~~~~~~~~~~~~~~
+Holography UDFs
+---------------
 
-.. automodule:: libertem_holo.base.utils
+.. automodule:: libertem_holo.udf
     :members:
 
