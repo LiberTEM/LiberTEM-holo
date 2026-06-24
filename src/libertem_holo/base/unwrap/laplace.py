@@ -1,5 +1,6 @@
-import numpy as np
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass
@@ -8,10 +9,14 @@ class LaplaceParams:
     del_inv: np.ndarray
 
 
-def prepare_unwrap_for_shape(shape: tuple[int, int], xp=np) -> LaplaceParams:
-    """
+def prepare_laplacian_unwrap(shape: tuple[int, int], xp=np) -> LaplaceParams:
+    """Prepare unwrap parameteres for a given shape.
+
     Create the analytical discrete laplace operator and it's inverse
-    in the frequency domain
+    in the frequency domain.
+
+    You can use this if you plan to repeatedly unwrap
+    phases of the same shape.
     """
     rows, cols = shape
     u = xp.arange(rows)[:, xp.newaxis]
@@ -27,13 +32,13 @@ def prepare_unwrap_for_shape(shape: tuple[int, int], xp=np) -> LaplaceParams:
 
 
 def unwrap_phase_laplacian(
-    wrapped_phase: np.ndarray,
+    wrapped_phase: np.ndarray[tuple[int, int]],
     params: LaplaceParams | None = None,
     xp=np,
-):
-    """
-    2D Laplacian Phase Unwrapping. `params` are pre-computed
-    using `prepare_unwrap_for_shape`.
+) -> np.ndarray[tuple[int, int]]:
+    """2D Laplacian Phase Unwrapping.
+
+    `params` can be pre-computed using `prepare_unwrap_for_shape`.
 
     Implements part of: Marvin A. Schofield and Yimei Zhu, "Fast phase
     unwrapping algorithm for interferometric applications," Opt. Lett. 28,
@@ -43,7 +48,7 @@ def unwrap_phase_laplacian(
     ifft2 = xp.fft.ifft2
 
     if params is None:
-        params = prepare_unwrap_for_shape(wrapped_phase.shape)
+        params = prepare_laplacian_unwrap(wrapped_phase.shape)
     del_op = params.del_op
     del_inv = params.del_inv
 
