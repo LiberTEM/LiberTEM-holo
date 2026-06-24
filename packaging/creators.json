@@ -16,6 +16,14 @@
         "orcid": "0009-0006-3796-9466"
     },
     {
+        "displayname": "Matthew Bryan",
+        "authorname": "Bryan, Matthew",
+        "affiliation": "CEA-Leti",
+        "github": "matbryan52",
+        "orcid": "0000-0001-9134-384X",
+        "contribution": "Quality based unwrapping, finde adjust UI"
+    },
+    {
         "displayname": "Alexander Clausen",
         "authorname": "Clausen, Alexander",
         "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
