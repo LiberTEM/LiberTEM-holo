@@ -1,30 +1,28 @@
 import functools
 from typing import Optional
+
 import numpy as np
 import panel as pn
 import skimage.transform as sktransform
-from skimage.transform import AffineTransform
-
-from bokeh.plotting import figure
-from bokeh.models.widgets import CheckboxGroup, Spinner, Slider
-from bokeh.models import CustomJS
-from bokeh.models import Scatter, Image
-from bokeh.models import ColumnDataSource
+from bokeh.models import ColumnDataSource, CustomJS, Image, Scatter
 from bokeh.models.tools import PointDrawTool
+from bokeh.models.widgets import CheckboxGroup, Slider, Spinner
 from bokeh.palettes import Blues256, Reds256
+from bokeh.plotting import figure
+from skimage.transform import AffineTransform
 
 pn.extension()
 
 
 class ImageTransformer:
-    """
-    Provides method to compute image transformations
+    """Provides method to compute image transformations
     Supports chaining multiple transforms and changes to output shape
     Provides the final transformation matrix via the
     :code:`get_combined_transform()` method
 
     Based entirely on `skimage.transform`
     """
+
     def __init__(self, image):
         self._image = image
         self._transforms = []
@@ -92,11 +90,10 @@ class ImageTransformer:
                       else t for t in transforms]
         if not transforms:
             return ImageTransformer._null_transform()
-        elif len(transforms) == 1:
+        if len(transforms) == 1:
             return transforms[0]
-        else:
-            transform_mat = functools.reduce(np.matmul, [t.params for t in transforms])
-            return sktransform.AffineTransform(matrix=transform_mat)
+        transform_mat = functools.reduce(np.matmul, [t.params for t in transforms])
+        return sktransform.AffineTransform(matrix=transform_mat)
 
     def get_transformed_image(self, preserve_range=True, order=None, cval=np.nan, **kwargs):
         if not self.transforms:
@@ -105,7 +102,7 @@ class ImageTransformer:
         return sktransform.warp(self._image,
                                 combined_transform,
                                 order=order,
-                                output_shape=kwargs.pop('output_shape', self.current_shape()),
+                                output_shape=kwargs.pop("output_shape", self.current_shape()),
                                 preserve_range=preserve_range,
                                 cval=cval,
                                 **kwargs)
@@ -124,13 +121,13 @@ class ImageTransformer:
 
     def rotate_about_point(self, point_yx, rotation_degrees=None, rotation_rad=None):
         if rotation_degrees and rotation_rad:
-            raise ValueError('Cannot specify both degrees and radians')
-        elif rotation_degrees:
+            raise ValueError("Cannot specify both degrees and radians")
+        if rotation_degrees:
             rotation_rad = np.deg2rad(rotation_degrees)
         if not rotation_rad:
             if rotation_rad == 0.:
                 return
-            raise ValueError('Must specify one of degrees or radians')
+            raise ValueError("Must specify one of degrees or radians")
 
         transform = sktransform.EuclideanTransform(rotation=rotation_rad)
         self._operation_with_origin(point_yx, transform)
@@ -161,13 +158,13 @@ class ImageTransformer:
     @staticmethod
     def available_transforms():
         """The transformation types which can be estimated, compatible with this class"""
-        return ['affine', 'euclidean', 'similarity', 'projective']
+        return ["affine", "euclidean", "similarity", "projective"]
 
     def estimate_transform(self, static_points, moving_points,
-                           method='affine', output_shape=None, clear=False):
+                           method="affine", output_shape=None, clear=False):
         assert method in self.available_transforms()
-        assert static_points.size and moving_points.size, 'Need points to match'
-        assert static_points.size == moving_points.size, 'Must supply matching pointsets'
+        assert static_points.size and moving_points.size, "Need points to match"
+        assert static_points.size == moving_points.size, "Must supply matching pointsets"
         transform = sktransform.estimate_transform(method,
                                                    static_points.reshape(-1, 2),
                                                    moving_points.reshape(-1, 2))
@@ -199,9 +196,9 @@ def adapt_figure(fig: figure, shape, maxdim: int | None = 450, mindim: int | Non
     fh, fw = set_frame_height(fig, shape, maxdim, mindim)
 
     if fh > 0.8 * fw:
-        location = 'right'
+        location = "right"
     else:
-        location = 'below'
+        location = "below"
     fig.toolbar_location = location
 
     fig.x_range.range_padding = 0.
@@ -227,30 +224,29 @@ def format_transform_md(transform: AffineTransform):
 
 
 # Unicode arrow codes used for defining UI buttons
-LEFT_ARROW = '\u25C1'
-UP_ARROW = '\u25B3'
-RIGHT_ARROW = '\u25B7'
-DOWN_ARROW = '\u25BD'
-ROTATE_RIGHT_ARROW = '\u21B7'
-ROTATE_LEFT_ARROW = '\u21B6'
-SHEAR_MORE = '+'
-SHEAR_LESS = '-'
+LEFT_ARROW = "\u25C1"
+UP_ARROW = "\u25B3"
+RIGHT_ARROW = "\u25B7"
+DOWN_ARROW = "\u25BD"
+ROTATE_RIGHT_ARROW = "\u21B7"
+ROTATE_LEFT_ARROW = "\u21B6"
+SHEAR_MORE = "+"
+SHEAR_LESS = "-"
 
 
 def translate_buttons(cb, width: int = 40, height: int = 40, margin: tuple[int, int] = (2, 2)):
-    """
-    A button array for up/down/left/right
+    """A button array for up/down/left/right
     Configured for y-axis pointing down!!
     """
     kwargs = {
-        'width': width,
-        'height': height,
-        'margin': margin,
-        'sizing_mode': 'fixed',
+        "width": width,
+        "height": height,
+        "margin": margin,
+        "sizing_mode": "fixed",
     }
     get_sp = lambda: pn.Spacer(**kwargs)  # noqa
     button_kwargs = {
-        'button_type': 'primary',
+        "button_type": "primary",
         **kwargs,
     }
     left = pn.widgets.Button(name=LEFT_ARROW, **button_kwargs)
@@ -270,18 +266,17 @@ def translate_buttons(cb, width: int = 40, height: int = 40, margin: tuple[int, 
 
 
 def shear_buttons(cb, width: int = 40, height: int = 40, margin: tuple[int, int] = (2, 2)):
-    """
-    Buttons for x and y shear
+    """Buttons for x and y shear
     """
     kwargs = {
-        'width': width,
-        'height': height,
-        'margin': margin,
-        'sizing_mode': 'fixed',
+        "width": width,
+        "height": height,
+        "margin": margin,
+        "sizing_mode": "fixed",
     }
     get_sp = lambda: pn.Spacer(**kwargs)  # noqa
     button_kwargs = {
-        'button_type': 'primary',
+        "button_type": "primary",
         **kwargs,
     }
     left = pn.widgets.Button(name=SHEAR_LESS, **button_kwargs)
@@ -305,7 +300,7 @@ def rotate_buttons(cb):
     width = height = 40
     margin = (2, 2)
     sp = pn.Spacer(width=width, height=height, margin=margin)
-    kwargs = {'width': width, 'height': height, 'margin': margin, 'button_type': 'primary'}
+    kwargs = {"width": width, "height": height, "margin": margin, "button_type": "primary"}
     acw_btn = pn.widgets.Button(name=ROTATE_LEFT_ARROW, **kwargs)
     acw_btn.on_click(functools.partial(cb, dir=-1))
     cw_btn = pn.widgets.Button(name=ROTATE_RIGHT_ARROW, **kwargs)
@@ -317,30 +312,30 @@ def scale_buttons(cb):
     """A button array for scaling x / y / xy up and down"""
     width = height = 40
     margin = (2, 2)
-    text_kwargs = {'width': width // 2,
-                   'height': height // 2,
-                   'margin': margin,
-                   'align': ('end', 'center')}
-    button_kwargs = {'width': width,
-                     'height': height,
-                     'margin': margin,
-                     'button_type': 'primary'}
-    x_row = up_down_pair('X:',
+    text_kwargs = {"width": width // 2,
+                   "height": height // 2,
+                   "margin": margin,
+                   "align": ("end", "center")}
+    button_kwargs = {"width": width,
+                     "height": height,
+                     "margin": margin,
+                     "button_type": "primary"}
+    x_row = up_down_pair("X:",
                          cb,
-                         {'xdir': 1},
-                         {'xdir': -1},
+                         {"xdir": 1},
+                         {"xdir": -1},
                          text_kwargs,
                          button_kwargs)
-    y_row = up_down_pair('Y:',
+    y_row = up_down_pair("Y:",
                          cb,
-                         {'ydir': 1},
-                         {'ydir': -1},
+                         {"ydir": 1},
+                         {"ydir": -1},
                          text_kwargs,
                          button_kwargs)
-    xy_row = up_down_pair('XY:',
+    xy_row = up_down_pair("XY:",
                           cb,
-                          {'xdir': 1, 'ydir': 1},
-                          {'xdir': -1, 'ydir': -1},
+                          {"xdir": 1, "ydir": 1},
+                          {"xdir": -1, "ydir": -1},
                           text_kwargs,
                           button_kwargs)
     lo = pn.Column(x_row,
@@ -352,24 +347,24 @@ def scale_buttons(cb):
 def up_down_pair(name, cb, upkwargs, downkwargs, text_kwargs, button_kwargs):
     sp = pn.Spacer(**text_kwargs)
     text = pn.widgets.StaticText(value=name, **text_kwargs)
-    compress = pn.widgets.Button(name=f'{RIGHT_ARROW} {LEFT_ARROW}', **button_kwargs)
+    compress = pn.widgets.Button(name=f"{RIGHT_ARROW} {LEFT_ARROW}", **button_kwargs)
     compress.on_click(functools.partial(cb, **downkwargs))
-    expand = pn.widgets.Button(name=f'{LEFT_ARROW} {RIGHT_ARROW}', **button_kwargs)
+    expand = pn.widgets.Button(name=f"{LEFT_ARROW} {RIGHT_ARROW}", **button_kwargs)
     expand.on_click(functools.partial(cb, **upkwargs))
     return pn.Row(sp, text, compress, expand, margin=(0, 0))
 
 
-def _create_image(fig, array, palette='Viridis256'):
+def _create_image(fig, array, palette="Viridis256"):
     glyph = Image(
-        image='image', x='x', y='y', dw='dw', dh='dh'
+        image="image", x="x", y="y", dw="dw", dh="dh",
     )
     height, width = array.shape
     cds_dict = {
-        'x': [0 - 0.5],
-        'y': [0 - 0.5],
-        'dw': [width],
-        'dh': [height],
-        'image': [array],
+        "x": [0 - 0.5],
+        "y": [0 - 0.5],
+        "dw": [width],
+        "dh": [height],
+        "image": [array],
     }
     cds = ColumnDataSource(cds_dict)
     fig.add_glyph(cds, glyph)
@@ -379,10 +374,9 @@ def _create_image(fig, array, palette='Viridis256'):
 def fine_adjust(
     static: np.ndarray,
     moving: np.ndarray,
-    initial_transform: Optional['AffineTransform'] = None
+    initial_transform: Optional["AffineTransform"] = None,
 ):
-    """
-    Provides a UI panel to manually align the image moving onto static
+    """Provides a UI panel to manually align the image moving onto static
     Optionally provide a skimage.transform.GeometricTransform object
     to pre-transform moving
     """
@@ -394,7 +388,7 @@ def fine_adjust(
         transformer_moving.add_null_transform(output_shape=static.shape)
 
     # static_name = 'Static'
-    moving_name = 'Moving'
+    moving_name = "Moving"
 
     fig = figure()
     fig_lo = pn.pane.Bokeh(fig)
@@ -402,7 +396,7 @@ def fine_adjust(
 
     static_im, _ = _create_image(fig, static)
     moving_im, moving_cds = _create_image(
-        fig, transformer_moving.get_transformed_image(cval=np.nan)
+        fig, transformer_moving.get_transformed_image(cval=np.nan),
     )
 
     static_im.color_mapper.palette = Reds256
@@ -412,7 +406,7 @@ def fine_adjust(
     moving_im.global_alpha = 0.5
 
     overlay_alpha = Slider(
-        title=f'{moving_name} alpha',
+        title=f"{moving_name} alpha",
         start=0.,
         end=1.,
         value=moving_im.global_alpha,
@@ -421,22 +415,22 @@ def fine_adjust(
         max_width=200,
     )
     alpha_callback = CustomJS(
-        args={'glyph': moving_im},
+        args={"glyph": moving_im},
         code="""glyph.global_alpha = cb_obj.value;""",
     )
-    overlay_alpha.js_on_change('value', alpha_callback)
+    overlay_alpha.js_on_change("value", alpha_callback)
 
     wobble_alpha_cbox = CheckboxGroup(
-        labels=['Wobble alpha, step:'],
+        labels=["Wobble alpha, step:"],
         active=[],
-        align='center',
+        align="center",
     )
     wobble_step_input = Spinner(
         low=0.05,
         high=0.25,
         value=0.1,
         step=0.05,
-        align='end',
+        align="end",
         width=100,
         format="0.2f",
     )
@@ -445,7 +439,7 @@ def fine_adjust(
             alpha_slider=overlay_alpha,
             wobble_step=wobble_step_input,
         ),
-        code=R'''
+        code=R"""
 const TIMEOUT = 25
 var RUNNING = false
 var DIRECTION = 1
@@ -472,21 +466,21 @@ export default async function (args, obj, data, context) {
         await new Promise(r => setTimeout(r, TIMEOUT));
     }
 }
-'''
+""",
     )
-    wobble_alpha_cbox.js_on_change('active', wobble_callback)
+    wobble_alpha_cbox.js_on_change("active", wobble_callback)
 
-    show_diff_cbox = pn.widgets.Checkbox(name='Show image difference',
+    show_diff_cbox = pn.widgets.Checkbox(name="Show image difference",
                                          value=False,
-                                         align='center')
+                                         align="center")
 
-    translate_step_input = pn.widgets.FloatInput(name='Translate step (px):',
+    translate_step_input = pn.widgets.FloatInput(name="Translate step (px):",
                                                  value=1.,
                                                  start=0.1,
                                                  end=100.,
                                                  width=125)
 
-    shear_step_input = pn.widgets.FloatInput(name='Shear step (deg):',
+    shear_step_input = pn.widgets.FloatInput(name="Shear step (deg):",
                                              value=1.,
                                              start=0.1,
                                              end=10.,
@@ -507,7 +501,7 @@ export default async function (args, obj, data, context) {
         else:
             to_display = moving
         moving_cds.data.update(
-            dict(image=[to_display])
+            dict(image=[to_display]),
         )
         pn.io.push_notebook(fig_lo)
         transform_md.object = _transform_md()
@@ -519,7 +513,7 @@ export default async function (args, obj, data, context) {
             overlay_alpha.value = 0.5
         update_moving()
 
-    show_diff_cbox.param.watch(switch_diff_image, 'value')
+    show_diff_cbox.param.watch(switch_diff_image, "value")
 
     def fine_translate(event, x=0, y=0):
         if not x and not y:
@@ -540,11 +534,11 @@ export default async function (args, obj, data, context) {
 
     def _cursor_pos(cursor_cds):
         data = cursor_cds.data
-        return data['x'][0], data['y'][0]
+        return data["x"][0], data["y"][0]
 
     cursor = Scatter(
-        marker='circle_dot',
-        line_color='cyan',
+        marker="circle_dot",
+        line_color="cyan",
         line_width=2,
         line_alpha=0.,
         fill_alpha=0,
@@ -565,16 +559,16 @@ export default async function (args, obj, data, context) {
     fig.add_tools(cursor_drag)
     # fig.toolbar.active_multi = cursor_drag
 
-    about_center_cbox = pn.widgets.Checkbox(name='Center-origin',
+    about_center_cbox = pn.widgets.Checkbox(name="Center-origin",
                                             value=True,
                                             width=125)
 
     def _set_cursor_alpha(event):
         cursor.line_alpha = float(not event.new)
 
-    about_center_cbox.param.watch(_set_cursor_alpha, 'value')
+    about_center_cbox.param.watch(_set_cursor_alpha, "value")
 
-    rotate_step_input = pn.widgets.FloatInput(name='Rotate step (deg):',
+    rotate_step_input = pn.widgets.FloatInput(name="Rotate step (deg):",
                                               value=1.,
                                               start=0.1,
                                               end=100.,
@@ -592,7 +586,7 @@ export default async function (args, obj, data, context) {
             transformer_moving.rotate_about_point((cy, cx), rotation_degrees=true_rotate)
         update_moving()
 
-    scale_step_input = pn.widgets.FloatInput(name='Scale step (%):',
+    scale_step_input = pn.widgets.FloatInput(name="Scale step (%):",
                                              value=1.,
                                              start=0.1,
                                              end=100.,
@@ -615,9 +609,9 @@ export default async function (args, obj, data, context) {
         transformer_moving.remove_transform()
         update_moving()
 
-    undo_button = pn.widgets.Button(name='Undo',
+    undo_button = pn.widgets.Button(name="Undo",
                                     max_width=125,
-                                    button_type='primary')
+                                    button_type="primary")
     undo_button.on_click(_undo)
 
     def getter() -> AffineTransform:
@@ -646,6 +640,6 @@ export default async function (args, obj, data, context) {
                 scale_buttons(fine_scale),
                 shear_step_input,
                 shear_buttons(fine_shear),
-            )
-        )
+            ),
+        ),
     ), getter

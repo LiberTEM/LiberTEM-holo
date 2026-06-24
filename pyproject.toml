@@ -68,6 +68,10 @@ gpu = [
     # with core numba:
     "numba-cuda",  
 ]
+gui = [
+    "bokeh",
+    "panel",
+]
 
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 "content-type" = "text/x-rst"
