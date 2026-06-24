@@ -123,6 +123,15 @@ def quality_unwrap(
 ):
     """Unwrap phase guided by a quality map.
 
+    Examples:
+    ---------
+    >>> import numpy as np
+    >>> from libertem_holo.base.unwrap import derivative_variance, quality_unwrap
+    >>> rng = np.random.default_rng()
+    >>> phase = rng.random(128*128).reshape(128, 128)
+    >>> dv = derivative_variance(phase)
+    >>> unwrapped = quality_unwrap(phase, dv)
+
     Parameters:
     -----------
     phase
