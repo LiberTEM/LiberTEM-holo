@@ -11,7 +11,7 @@ except ImportError:
 import numpy as np
 import numpy.typing as npt
 import matplotlib.pyplot as plt
-from sparseconverter import NUMPY, for_backend
+from .utils import to_cpu
 from scipy.ndimage import gaussian_filter
 import logging
 
@@ -57,13 +57,13 @@ def _upsampled_dft(
 
 
 def _plot_cross_correlate(*, shifted_corr, pos, plot_title, src, target):
-    pos = tuple(for_backend(i, NUMPY) for i in pos)
+    pos = tuple(to_cpu(i) for i in pos)
     fig, ax = plt.subplots(3, sharex=True, sharey=True)
-    ax[0].imshow(for_backend(shifted_corr, NUMPY))
+    ax[0].imshow(to_cpu(shifted_corr))
     ax[0].plot(pos[1], pos[0], 'x', color='red')
-    ax[1].imshow(for_backend(src, NUMPY))
+    ax[1].imshow(to_cpu(src))
     ax[1].plot(pos[1], pos[0], 'x', color='red')
-    ax[2].imshow(for_backend(target, NUMPY))
+    ax[2].imshow(to_cpu(target))
     ax[2].plot(pos[1], pos[0], 'x', color='red')
     fig.suptitle(plot_title)
 
@@ -162,7 +162,7 @@ def cross_correlate(
     if xp is np:
         shift = tuple(float(x) for x in shift)
     else:
-        shift = tuple(float(for_backend(x, NUMPY)) for x in shift)
+        shift = tuple(float(to_cpu(x)) for x in shift)
 
     # for "backwards compat", return correlation maxima and not shift
     pos = xp.array(shift) + midpoint
@@ -660,7 +660,7 @@ class GradXYCorrelator(Correlator):
         if xp is np:
             pos = tuple(float(x) for x in pos)
         else:
-            pos = tuple(float(for_backend(x, NUMPY)) for x in pos)
+            pos = tuple(float(to_cpu(x)) for x in pos)
         pos_rel = (
             pos[0] - (moving_image_y.shape[0]) // 2,
             pos[1] - (moving_image_y.shape[1]) // 2,
