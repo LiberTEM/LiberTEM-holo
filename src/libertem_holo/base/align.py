@@ -214,6 +214,10 @@ class RegResult(NamedTuple):
     shift: tuple[float, float]
     corrmap: np.ndarray
 
+    @property
+    def shift_tuple(self):
+        return tuple(for_backend(x, NUMPY) for x in self.shift)
+
 
 class Correlator:
     def prepare_input(
