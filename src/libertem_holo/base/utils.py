@@ -43,13 +43,16 @@ import numpy as np
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import least_squares
-from sparseconverter import NUMPY, for_backend
 
 
 log = logging.getLogger(__name__)
 
 XPType = Any  # Union[Module("numpy"), Module("cupy")]
 
+def to_cpu(arr):
+    if arr.device == 'cpu':
+        return arr
+    return arr.get()
 
 def freq_array(
     shape: tuple[int, int],
@@ -349,7 +352,7 @@ class HoloParams(typing.NamedTuple):
         )
 
     def filter_aperture_gaussian(self, sigma: float) -> HoloParams:
-        aperture = for_backend(self.aperture, NUMPY)
+        aperture = to_cpu(self.aperture)
         new_aperture = self.xp.asarray(gaussian_filter(aperture, sigma=sigma))
         return HoloParams(
             sb_size=self.sb_size,
