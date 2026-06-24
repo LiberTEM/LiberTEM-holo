@@ -1,8 +1,7 @@
-import numba
 import heapq
+
+import numba
 import numpy as np
-from skimage.restoration import unwrap_phase
-from typing_extensions import Literal
 
 
 @numba.njit
@@ -11,7 +10,19 @@ def wrap(val: np.ndarray | float):
     return np.angle(np.exp(val * 1j))
 
 
-def derivative_variance(array: np.ndarray, k: int = 3):
+def derivative_variance(
+    array: np.ndarray[tuple[int, int]],
+    k: int = 3,
+) -> np.ndarray[tuple[int, int]]:
+    """Calculate variance of the derivative of `array`.
+
+    Parameters:
+    -----------
+    array
+        Input phase with a float dtype
+    k
+        Window size
+    """
     # Adapted from
     # https://github.com/theilen/PyMRR/tree/master/mrr/unwrapping/
     diff = np.stack((
@@ -103,51 +114,33 @@ def unwrap_heap(heap, flat_phase, flat_q, flat_to_q, height, width, uw_phase, co
 
 
 def quality_unwrap(
-    phase: np.ndarray,
-    quality: np.ndarray,
-    seed: np.ndarray | tuple[int, int] | None = None,
-    mask: np.ndarray | None = None,
-    connectivity: Literal[8, 4] = 8,
+    phase: np.ndarray[tuple[int, int]],
+    quality: np.ndarray[tuple[int, int]],
 ):
+    """Unwrap phase guided by a quality map.
+
+    Parameters:
+    -----------
+    phase
+        Input phase as a 2D ndarray
+    quality
+        Inverse score: lower values are higher quality
+    """
     # quality is lowest => best
     assert -np.pi <= phase.min() <= np.pi
     assert -np.pi <= phase.max() <= np.pi
     assert phase.ndim == 2
     assert phase.shape == quality.shape
     img_shape = phase.shape
-    assert connectivity in (8, 4)
 
     # Flat views and results array
     flat_quality = quality.ravel()
     flat_phase = phase.ravel()
     flat_uw_phase = phase.copy().ravel()  # result array
-    if mask is None:
-        flat_to_q = np.ones(flat_phase.shape, dtype=np.int8)
-    else:
-        assert mask.shape == img_shape
-        flat_to_q = mask.astype(np.int8).ravel()
-        # need to do this to ensure auto seed point is in mask
-        flat_quality[~flat_to_q] = np.inf
+    flat_to_q = np.ones(flat_phase.shape, dtype=np.int8)
 
-    # Initialise heap
-    if isinstance(seed, np.ndarray):
-        # If the seed mask has disjoint regions then only
-        # the one containing the best quality pixel is unwrapped first,
-        # the remaining seed regions are converted to normal pixels
-        flat_seed = seed.astype(bool).ravel()
-        inv_seed = ~flat_seed
-        # This puts other pixels into a 'postponed' state which
-        # means they are processed on the second pass
-        flat_to_q[inv_seed] = -1
-        (nonzero_seed,) = np.nonzero(flat_seed)
-        pos = nonzero_seed[np.argmin(flat_quality[flat_seed])]
-    elif seed is None:
-        pos = np.argmin(flat_quality)
-    else:
-        pos = np.ravel_multi_index(seed, img_shape)
-
+    pos = np.argmin(flat_quality)
     heap = [(flat_quality[pos], pos, pos)]
-    assert flat_to_q[pos] > 0, "Starting point must be in mask"
     flat_to_q[pos] = 0  # first position already in q
 
     unwrap_heap(
@@ -157,29 +150,10 @@ def quality_unwrap(
         flat_to_q,
         *img_shape,
         flat_uw_phase,
-        connectivity,
+        connectivity=8,
     )
 
     return flat_uw_phase.reshape(img_shape)
 
 
-def phase_unwrap(image: np.ndarray) -> np.ndarray:
-    """Unwrap the complex / wrapped phase image.
-
-    Parameters
-    ----------
-    image : 2d nd array
-        Complex or Wrapped phase image
-
-    Returns
-    -------
-        2d nd array of the unwrapped phase image
-
-    """
-    if image.dtype.kind != 'c':
-        image_new = unwrap_phase(image)
-    else:
-        angle = np.angle(image)
-        image_new = unwrap_phase(angle)
-
-    return image_new
+__all__ = ["derivative_variance", "quality_unwrap"]
