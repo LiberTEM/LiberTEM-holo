@@ -69,7 +69,7 @@ def unwrap_phase_laplacian(
     ifft2 = xp.fft.ifft2
 
     if params is None:
-        params = prepare_laplacian_unwrap(wrapped_phase.shape)
+        params = prepare_laplacian_unwrap(wrapped_phase.shape, xp=xp)
     del_op = params.del_op
     del_inv = params.del_inv
 
