@@ -1,3 +1,4 @@
+"""2D quality-guided unwrapping."""
 import heapq
 
 import numba
@@ -15,6 +16,9 @@ def derivative_variance(
     k: int = 3,
 ) -> np.ndarray[tuple[int, int]]:
     """Calculate variance of the derivative of `array`.
+
+    Can be used as a quality map for
+    :func:`libertem_holo.base.unwrap.quality_unwrap`.
 
     Parameters:
     -----------
