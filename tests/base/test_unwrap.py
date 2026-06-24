@@ -12,7 +12,8 @@ from libertem_holo.base.unwrap import (
 
 @pytest.mark.with_numba
 def test_quality_unwrap_smoketest():
-    phase = np.random.random(128*128).reshape(128, 128)
+    rng = np.random.default_rng()
+    phase = rng.random(128*128).reshape(128, 128)
     dv = derivative_variance(phase)
     _ = quality_unwrap(phase, dv)
 
