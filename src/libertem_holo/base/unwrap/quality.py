@@ -120,7 +120,7 @@ def unwrap_heap(heap, flat_phase, flat_q, flat_to_q, height, width, uw_phase, co
 def quality_unwrap(
     phase: np.ndarray[tuple[int, int]],
     quality: np.ndarray[tuple[int, int]],
-):
+) -> np.ndarray[tuple[int, int]]:
     """Unwrap phase guided by a quality map.
 
     Examples:
@@ -137,7 +137,8 @@ def quality_unwrap(
     phase
         Input phase as a 2D ndarray
     quality
-        Inverse score: lower values are higher quality
+        Inverse score quality map for each pixel of the phase:
+        lower values are higher quality
     """
     # quality is lowest => best
     assert -np.pi <= phase.min() <= np.pi
