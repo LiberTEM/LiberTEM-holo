@@ -33,6 +33,7 @@ from functools import lru_cache
 from typing import Any, Literal
 import typing
 import logging
+import warnings
 
 try:
     import cupy as cp
@@ -42,13 +43,16 @@ import numpy as np
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import least_squares
-from sparseconverter import NUMPY, for_backend
 
 
 log = logging.getLogger(__name__)
 
 XPType = Any  # Union[Module("numpy"), Module("cupy")]
 
+def to_cpu(arr):
+    if arr.device == 'cpu':
+        return arr
+    return arr.get()
 
 def freq_array(
     shape: tuple[int, int],
@@ -301,8 +305,12 @@ class HoloParams(typing.NamedTuple):
             sb_size = estimate_sideband_size(sb_position, hologram.shape, xp=xp)
 
         if out_shape is None:
-            out_side = 2 * int(sb_size) + 16
-            out_shape = (out_side, out_side)
+            orig_shape = hologram.shape
+            out_shape = (orig_shape[0]//4, orig_shape[1]//4)
+        elif out_shape[0]/out_shape[1] != hologram.shape[0]/hologram.shape[1]:
+            warnings.warn(
+                "out_shape should have the same aspect ratio as the hologram shape"
+                " to preserve the correct pixel size in both dimensions.")
 
         fft_slice = get_slice_fft(out_shape, hologram.shape)
 
@@ -344,7 +352,7 @@ class HoloParams(typing.NamedTuple):
         )
 
     def filter_aperture_gaussian(self, sigma: float) -> HoloParams:
-        aperture = for_backend(self.aperture, NUMPY)
+        aperture = to_cpu(self.aperture)
         new_aperture = self.xp.asarray(gaussian_filter(aperture, sigma=sigma))
         return HoloParams(
             sb_size=self.sb_size,

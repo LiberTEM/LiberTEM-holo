@@ -29,6 +29,10 @@ class InputSlicer:
         """Return slice `z` of the input data."""
         return self._data.zslice(z)
 
+    def __len__(self) -> int:
+        """Return number of slices of the input data."""
+        return self._data.shape[0]
+
 
 @dataclass
 class InputData:
