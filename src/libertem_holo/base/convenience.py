@@ -4,7 +4,7 @@ from libertem_holo.base.align import ImageCorrelator, Correlator
 from libertem_holo.base.reconstr import phase_offset_correction
 from scipy.ndimage import shift, gaussian_filter
 from cupyx.scipy.ndimage import shift as shiftcp
-from skimage.measure import block_reduce as br 
+from skimage.measure import block_reduce as br
 import empyre as emp
 import numpy as np
 from tqdm import tqdm
@@ -125,7 +125,7 @@ def reconstruct_stack(
         for i in tqdm(range(len(stack_ref.data))):
             ref = stack_ref.data[i]
             wave_ref = reconstruct_frame(
-                frame=ref, sb_pos=holoparams.sb_position, 
+                frame=ref, sb_pos=holoparams.sb_position,
                 aperture=holoparams.aperture, slice_fft=holoparams.slice_fft,
                 xp=xp,
             )
@@ -140,14 +140,14 @@ def reconstruct_stack(
 def plot_mag_induction(phase, axis, mask=None, clipper = 1e-3, binning = 1, gain = 8, smooth = 5):
     phase_binned = br(phase, (binning, binning), np.mean)
     vmin, vmax = np.min(phase_binned), np.max(phase_binned)
-    
+
     # Represent the unwrap phase image with the 'field' class
     phase_field = emp.fields.Field(data=gaussian_filter(phase_binned, sigma=smooth), scale=1, vector=False)
-    
+
     #Display the curl
     cmap = emp.vis.colors.cmaps.cyclic_cubehelix
     emp.vis.colorvec(phase_field.curl().clip(vmax = clipper), vmin=vmin, vmax=vmax, cmap=cmap, axis=axis, origin='upper')
-    
+
     #Display the cosine contours
     emp.vis.cosine_contours(phase_field, gain=gain, axis=axis, origin='upper')
     emp.vis.colorwheel(cmap=cmap, axis = axis)
