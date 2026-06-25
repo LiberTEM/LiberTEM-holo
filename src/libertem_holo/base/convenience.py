@@ -107,7 +107,7 @@ def reconstruct_stack(
 
         waves_aligned[i] = wave_shifted
         bfs_aligned[i] = np.abs(bf_shifted)
-        drifts[i] = shifts
+        drifts[i] = xp.asarray(shifts)
 
     wave_avg, _, _ = phase_offset_correction(waves_aligned, xp=xp)
     bf_avg = np.mean(bfs_aligned, axis=0)
@@ -137,7 +137,9 @@ def reconstruct_stack(
     return wave, bf_avg, holoparams, px_size, drifts
 
 
-def plot_mag_induction(phase, axis, mask=None, clipper = 1e-3, binning = 1, gain = 8, smooth = 5):
+def plot_mag_induction(
+        phase, axis, mask=None, clipper = 1e-3, binning = 1, gain = 8, smooth = 5
+        ):
     phase_binned = br(phase, (binning, binning), np.mean)
     vmin, vmax = np.min(phase_binned), np.max(phase_binned)
 
