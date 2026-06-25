@@ -50,6 +50,51 @@ def holo_data():
 
 
 @pytest.fixture
+def holo_stack():
+    from libertem_holo.base.generate import hologram_frame
+    N = 10 # number of frames
+
+    def amp_phase(X_center, Y_center, radius):
+        # Define grid
+        sx, sy = (256, 256)
+        mx, my = np.meshgrid(np.arange(sx), np.arange(sy))
+        # Define sphere region
+        radius = 20
+        MAG = 0.1 * 1/256
+        MIP = 10 * 1/256
+        sphere = (mx - X_center)**2 + (my - Y_center)**2 < radius**2
+        #phase = np.ones((sx, sy))
+        # Calculate long-range contribution to the phase
+        phase = ((mx - X_center)**2 + (my - Y_center)**2) * MAG
+        # Add mean inner potential contribution to the phase
+        phase[sphere] += (-((mx[sphere] - X_center)**2 \
+                           + (my[sphere] - Y_center)**2)  * MIP )
+        # Calculate amplitude of the phase
+        amp = np.ones_like(phase)
+        amp[sphere] = ((mx[sphere] - X_center)**2 \
+                       + (my[sphere] - Y_center)**2) * MIP
+        return phase, amp
+        
+    phase_stack = np.stack(
+        [amp_phase(X, Y, radius=20)[0] for (X, Y) in zip(np.linspace(33, 63, N), np.linspace(153, 103, N)) ]
+    )
+    amp_stack = np.stack(
+        [amp_phase(X, Y, radius=20)[1] for (X, Y) in zip(np.linspace(33, 63, N), np.linspace(153, 103, N)) ]
+    )
+    
+    # Generate holograms    
+    holo = np.zeros((N, sx, sy))
+    ref = np.zeros((N, sx, sy))
+
+    for i in range(N):
+        phase_stack[i] += np.ones((sx,sy)) * i * np.pi / 10
+        holo[i] = hologram_frame(amp=amp_stack[i], phi=phase_stack[i])
+        ref[i] = hologram_frame(amp=np.ones((sy, sx)), phi=np.zeros((sy, sx)))
+
+    return holo, ref, phase_stack, amp_stack
+
+
+@pytest.fixture
 def large_holo_data(tmpdir, lt_ctx):
     d = detect()
     if not d['cudas'] or not d['has_cupy']:
