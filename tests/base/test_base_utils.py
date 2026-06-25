@@ -4,6 +4,7 @@ import pytest
 from libertem_holo.base.utils import remove_phase_ramp, HoloParams
 from libertem_holo.base.reconstr import reconstruct_frame
 
+
 @pytest.mark.parametrize(
     "method", ["gradient", "fit"],
 )
@@ -94,6 +95,7 @@ def test_remove_phase_ramp_with_roi(shape, ramp_yx, method, roi_method):
         assert not np.allclose(img_without_ramp, 0)
     assert np.allclose(detected_ramp[slice_in_shape], ramp)
 
+
 def test_line_filter_width_0(holo_data) -> None:
     holo, ref, phase_ref, slice_crop = holo_data
 
@@ -106,7 +108,7 @@ def test_line_filter_width_0(holo_data) -> None:
     )
 
     wave = reconstruct_frame(
-        ref[0,0], sb_pos=p.sb_position, aperture=p.aperture,
+        ref[0, 0], sb_pos=p.sb_position, aperture=p.aperture,
         slice_fft=p.slice_fft,
     )
 
