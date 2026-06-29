@@ -4,7 +4,10 @@ from libertem_holo.base.reconstr import reconstruct_frame, reconstruct_bf
 from libertem_holo.base.align import ImageCorrelator, Correlator
 from libertem_holo.base.reconstr import phase_offset_correction
 from scipy.ndimage import shift, gaussian_filter
-from cupyx.scipy.ndimage import shift as shiftcp
+try:
+    from cupyx.scipy.ndimage import shift as shiftcp
+except ImportError:
+    shiftcp = None
 from skimage.measure import block_reduce as br
 from matplotlib.axes import Axes
 import empyre as emp
@@ -53,6 +56,8 @@ def reconstruct_stack(
         The pixel size in the reconstructed wave.
 
     """
+    if shiftcp is None:
+        raise RuntimeError("Need Cupy for this stack reconstruction function.")
     sig_shape = stack.data[0].shape
     out_shape = (sig_shape[0]//8, sig_shape[1]//8)
     if holoparams is None:
