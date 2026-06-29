@@ -49,10 +49,12 @@ log = logging.getLogger(__name__)
 
 XPType = Any  # Union[Module("numpy"), Module("cupy")]
 
+
 def to_cpu(arr):
-    if arr.device == 'cpu':
+    if arr.device == "cpu":
         return arr
     return arr.get()
+
 
 def freq_array(
     shape: tuple[int, int],
