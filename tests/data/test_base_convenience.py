@@ -1,10 +1,13 @@
 import pathlib
+
 import numpy as np
 import pytest
-from libertem_holo.base.io import InputData, Results
-from libertem_holo.base.utils import remove_phase_ramp
-from libertem_holo.base.unwrap import phase_unwrap
+
 from libertem_holo.base.convenience import reconstruct_stack
+from libertem_holo.base.io import InputData, Results
+from libertem_holo.base.unwrap import phase_unwrap
+from libertem_holo.base.utils import remove_phase_ramp
+
 try:
     import cupy as cp
 except ImportError:
@@ -19,7 +22,7 @@ def test_reconstruct_stack(dm_testdata_path: pathlib.Path):
     stack_obj = InputData.load_from_dm(path_obj)
     stack_ref = InputData.load_from_dm(path_ref)
     res = reconstruct_stack(
-        stack=stack_obj, stack_ref=stack_ref, xp=cp
+        stack=stack_obj, stack_ref=stack_ref,
     )
     wave = res.complex_wave
     drifts = np.vstack([res.metadata['drifts_x'], res.metadata['drifts_y']]).T
