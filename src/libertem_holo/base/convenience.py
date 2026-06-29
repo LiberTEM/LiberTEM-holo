@@ -136,10 +136,10 @@ def reconstruct_stack(
         wave_ref, _, _ = phase_offset_correction(waves_ref, xp=xp)
 
     wave = wave_avg / wave_ref
-    res = Results(complex_wave=wave, brightfield=bf_avg)
+    res = Results(complex_wave=wave.get(), brightfield=bf_avg.get())
     res.metadata_from_input(stack, holoparams)
-    res.metadata['drifts_x'] = list(np.array(drifts[..., 0]))
-    res.metadata['drifts_y'] = list(np.array(drifts[..., 1]))
+    res.metadata['drifts_x'] = list(drifts[..., 0].get())
+    res.metadata['drifts_y'] = list(drifts[..., 1].get())
     return res
 
 
