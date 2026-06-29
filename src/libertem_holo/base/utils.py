@@ -458,7 +458,7 @@ def remove_phase_ramp(
     img: np.ndarray,
     *,
     roi=None,
-    method: Literal['gradient'] | Literal['fit'] = 'gradient',
+    method: Literal["gradient" | "fit"] = "gradient",
 ) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
     """Remove a phase ramp from `img`.
 
@@ -489,6 +489,7 @@ def remove_phase_ramp(
 
     (ramp_y, ramp_x)
         The ramp slopes
+
     """
     # select the correct ROI:
     if roi is None:
