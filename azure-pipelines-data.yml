@@ -32,7 +32,7 @@ stages:
   - stage: test
     jobs:
     - job: check_example_notebooks
-      pool: DataAccess
+      pool: GPUTests
       variables:
         TESTDATA_BASE_PATH: '/data/'
       steps:
