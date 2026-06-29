@@ -1,3 +1,4 @@
+from libertem_holo.base.io import Results
 from libertem_holo.base.utils import HoloParams
 from libertem_holo.base.reconstr import reconstruct_frame, reconstruct_bf
 from libertem_holo.base.align import ImageCorrelator, Correlator
@@ -135,7 +136,11 @@ def reconstruct_stack(
         wave_ref, _, _ = phase_offset_correction(waves_ref, xp=xp)
 
     wave = wave_avg / wave_ref
-    return wave, bf_avg, holoparams, px_size, drifts
+    res = Results(complex_wave=wave, brightfield=bf_avg)
+    res.metadata_from_input(stack, holoparams)
+    res.metadata['drifts_x'] = list(np.array(drifts[..., 0]))
+    res.metadata['drifts_y'] = list(np.array(drifts[..., 1]))
+    return res
 
 
 def plot_mag_induction(
