@@ -123,10 +123,6 @@ def reconstruct_stack(
     if stack_ref is None:
         wave_ref = np.ones_like(wave_avg)
     else:
-        if holoparams is None:
-            holoparams = HoloParams.from_hologram(
-                stack_ref.data[0], out_shape=out_shape, xp=xp, line_filter_width=5, line_filter_length=0.9, central_band_mask_radius=100,
-            )
         waves_ref = xp.zeros((len(stack_ref.data),) + holoparams.out_shape, dtype=np.complex128)
 
         for i in tqdm(range(len(stack_ref.data))):
