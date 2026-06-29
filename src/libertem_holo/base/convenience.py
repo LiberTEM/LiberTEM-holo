@@ -61,7 +61,7 @@ def reconstruct_stack(
         raise RuntimeError(msg)
     xp = cp
     sig_shape = stack.data[0].shape
-    out_shape = (sig_shape[0]//4, sig_shape[1]//4)
+    out_shape = (sig_shape[0]//8, sig_shape[1]//8)
     if holoparams is None:
         holoparams = HoloParams.from_hologram(
             stack.data[0],
