@@ -1,13 +1,19 @@
 import pathlib
 import numpy as np
+import pytest
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.utils import remove_phase_ramp
 from libertem_holo.base.unwrap import phase_unwrap
 from libertem_holo.base.convenience import reconstruct_stack
-import cupy as cp
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 
 
-def test_reconstruct_stack(dm_testdata_path: pathlib.Path):    
+def test_reconstruct_stack(dm_testdata_path: pathlib.Path):
+    if cp is None:
+        pytest.skip("no cupy")
     path_obj = dm_testdata_path /  "holo/reconstr/stack_obj_minus.dm4"
     path_ref = dm_testdata_path /  "holo/reconstr/stack_ref_minus.dm4"
     stack_obj = InputData.load_from_dm(path_obj)
