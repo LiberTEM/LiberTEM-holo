@@ -36,6 +36,15 @@ Phase unwrapping
 .. automodule:: libertem_holo.base.unwrap
     :members:
 
+Convenience functions
+~~~~~~~~~~~~~~~~~~~~~
+
+High-level helper functions for reconstruction and visualization.
+
+.. automodule:: libertem_holo.base.convenience
+    :members:
+
+
 Utility functions
 -----------------
 
@@ -46,14 +55,6 @@ Simulation
 ----------
 
 .. automodule:: libertem_holo.base.generate
-    :members:
-
-Convenience functions
-~~~~~~~~~~~~~~~~~~~~~
-
-High-level helper functions for reconstruction and visualization.
-
-.. automodule:: libertem_holo.base.convenience
     :members:
 
 Holography UDFs
