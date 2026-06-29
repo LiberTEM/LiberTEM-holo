@@ -18,13 +18,14 @@ XPType = typing.Any  # Union[Module("numpy"), Module("cupy")]
 
 
 def reconstruct_stack(
-        stack: np.ndarray,
-        stack_ref: np.ndarray = None,
-        holoparams: HoloParams = None,
-        correlator: Correlator = None,
-        xp: XPType = np,
-    ) -> tuple:
-    """Reconstruct a stack of holograms, aligning them and optionally using a reference stack for phase correction.
+    stack: np.ndarray,
+    stack_ref: np.ndarray = None,
+    holoparams: HoloParams = None,
+    correlator: Correlator = None,
+    xp: XPType = np,
+) -> tuple:
+    """Reconstruct a stack of holograms, aligning them
+    and optionally using a reference stack for phase correction.
 
     Parameters
     ----------
@@ -69,7 +70,7 @@ def reconstruct_stack(
             central_band_mask_radius=100,
             xp=xp,
         )
-    px_size = stack.pixelsize * holoparams.scale_factor
+
     if correlator is None:
         correlator = ImageCorrelator(
             hanning=True,
@@ -90,7 +91,9 @@ def reconstruct_stack(
             xp=xp,
         )
         if i == 0:
-            bf_obj_0 = reconstruct_bf(frame=obj, aperture=holoparams.aperture, slice_fft=holoparams.slice_fft, xp=xp)
+            bf_obj_0 = reconstruct_bf(
+                frame=obj, aperture=holoparams.aperture, slice_fft=holoparams.slice_fft, xp=xp
+            )
             f1 = correlator.prepare_input(bf_obj_0)
 
         bf_obj = reconstruct_bf(
@@ -118,7 +121,6 @@ def reconstruct_stack(
 
     wave_avg, _, _ = phase_offset_correction(waves_aligned, xp=xp)
     bf_avg = np.mean(bfs_aligned, axis=0)
-
 
     if stack_ref is None:
         wave_ref = np.ones_like(wave_avg)
