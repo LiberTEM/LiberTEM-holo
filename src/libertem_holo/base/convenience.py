@@ -5,6 +5,7 @@ from libertem_holo.base.reconstr import phase_offset_correction
 from scipy.ndimage import shift, gaussian_filter
 from cupyx.scipy.ndimage import shift as shiftcp
 from skimage.measure import block_reduce as br
+from matplotlib.axes import Axes
 import empyre as emp
 import numpy as np
 from tqdm import tqdm
@@ -138,23 +139,107 @@ def reconstruct_stack(
 
 
 def plot_mag_induction(
-        phase, axis, mask=None, clipper = 1e-3, binning = 1, gain = 8, smooth = 5
-        ):
+    phase: np.ndarray,
+    axis: Axes,
+    mask: np.ndarray | None = None,
+    clip: float = 1e-3,
+    binning: int = 1,
+    gain: float = 8,
+    smooth: float = 5,
+    cmap=None,
+    **kwargs,
+) -> Axes:
+    """Plot a magnetic induction map from a magnetic phase image.
+
+    This function combines a color-encoded visualization of the magnetic
+    induction (obtained from the curl of the phase) with cosine contours of the
+    smoothed phase image. The induction direction is encoded using
+    :func:`colorvec`, while the cosine contours provide a visual representation
+    of the phase. Optionally, a mask outline can be overlaid.
+
+    Parameters
+    ----------
+    phase : ndarray
+        Two-dimensional magnetic phase image.
+    axis : `matplotlib.axes.Axes`
+        Axis on which to draw the visualization.
+    mask : ndarray, optional
+        Binary mask whose boundary is overlaid as a white contour, by default
+        None.
+    clip : float, optional
+        Maximum induction magnitude to display. Larger values are clipped before
+        color encoding, by default 1e-3.
+    binning : int, optional
+        Spatial binning factor applied to the phase image and mask before
+        processing, by default 1.
+    gain : float, optional
+        Gain factor applied when computing the cosine contours, by default 8.
+    smooth : float, optional
+        Standard deviation of the Gaussian filter applied to the phase image
+        before computing the induction field, by default 5.
+    cmap : str or `matplotlib.colors.Colormap`, optional
+        Colormap used for the induction map. By default,
+        ``emp.vis.colors.cmaps.cyclic_cubehelix`` is used.
+    **kwargs
+        Additional keyword arguments passed to
+        :func:`empyre.vis.colorvec` and
+        :func:`empyre.vis.cosine_contours`.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The plotting axis.
+
+    Notes
+    -----
+    The visualization consists of
+
+    - a color-encoded induction map computed from the curl of the smoothed
+      phase image,
+    - cosine contours of the smoothed phase image,
+    - a color wheel indicating the direction encoding,
+    - an optional white contour showing the supplied mask.
+    """
     phase_binned = br(phase, (binning, binning), np.mean)
-    vmin, vmax = np.min(phase_binned), np.max(phase_binned)
 
-    # Represent the unwrap phase image with the 'field' class
-    phase_field = emp.fields.Field(data=gaussian_filter(phase_binned, sigma=smooth), scale=1, vector=False)
+    phase_field = emp.fields.Field(
+        data=gaussian_filter(phase_binned, sigma=smooth),
+        scale=1,
+        vector=False,
+    )
 
-    #Display the curl
-    cmap = emp.vis.colors.cmaps.cyclic_cubehelix
-    emp.vis.colorvec(phase_field.curl().clip(vmax = clipper), vmin=vmin, vmax=vmax, cmap=cmap, axis=axis, origin='upper')
+    if cmap is None:
+        cmap = emp.vis.colors.cmaps.cyclic_cubehelix
 
-    #Display the cosine contours
-    emp.vis.cosine_contours(phase_field, gain=gain, axis=axis, origin='upper')
-    emp.vis.colorwheel(cmap=cmap, axis = axis)
+    emp.vis.colorvec(
+        phase_field.curl().clip(vmax=clip),
+        cmap=cmap,
+        axis=axis,
+        origin="upper",
+        **kwargs,
+    )
+
+    emp.vis.cosine_contours(
+        phase_field,
+        gain=gain,
+        axis=axis,
+        origin="upper",
+        **kwargs,
+    )
+
+    emp.vis.colorwheel(cmap=cmap, axis=axis)
 
     if mask is not None:
-        mask_binned  = br(mask, (binning, binning), np.mean)
-        mask_field  = emp.fields.Field(data=mask_binned, scale=1, vector=False)
-        emp.vis.contour(mask_field[::-1], axis=axis, origin='upper', colors='white', linewidths=1.0, linestyles='-')
+        mask_binned = br(mask, (binning, binning), np.mean)
+        mask_field = emp.fields.Field(data=mask_binned, scale=1, vector=False)
+
+        emp.vis.contour(
+            mask_field[::-1],
+            axis=axis,
+            origin="upper",
+            colors="white",
+            linewidths=1.0,
+            linestyles="-",
+        )
+
+    return axis
