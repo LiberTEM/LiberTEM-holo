@@ -48,6 +48,14 @@ Simulation
 .. automodule:: libertem_holo.base.generate
     :members:
 
+Convenience functions
+~~~~~~~~~~~~~~~~~~~~~
+
+High-level helper functions for reconstruction and visualization.
+
+.. automodule:: libertem_holo.base.convenience
+    :members:
+
 Holography UDFs
 ---------------
 
