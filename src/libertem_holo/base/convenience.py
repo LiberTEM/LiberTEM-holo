@@ -255,6 +255,7 @@ def plot_mag_induction(
             colors="white",
             linewidths=1.0,
             linestyles="-",
+            **kwargs,
         )
 
     return axis
