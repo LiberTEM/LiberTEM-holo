@@ -181,7 +181,7 @@ def test_correlator_prepare_should_coerce_input():
         lambda: PhaseImageCorrelator(xp=xp, holoparams=params),
         lambda: GradAngleCorrelator(xp=xp, holoparams=params),
         lambda: GradXYCorrelator(xp=xp, holoparams=params),
-        lambda: NoopCorrelator(),
+        NoopCorrelator,
     ]
 
     for fn in factories:

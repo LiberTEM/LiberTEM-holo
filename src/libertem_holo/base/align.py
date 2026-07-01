@@ -381,7 +381,7 @@ class BrightFieldCorrelator(Correlator):
         self,
         holoparams: HoloParams,
         upsample_factor: int = 1,
-        normalization: Literal['phase'] | None = 'phase',
+        normalization: Literal["phase"] | None = "phase",
         hanning: bool = True,
         xp: typing.Any = np,
     ) -> None:
@@ -401,20 +401,22 @@ class BrightFieldCorrelator(Correlator):
             out_shape=holoparams.out_shape,
             orig_shape=img.shape,
             length_ratio=0.95,
-            width=20
+            width=20,
+            crop_to_out_shape=True,
         )
-        aperture = disk_aperture(out_shape=holoparams.out_shape, radius=holoparams.sb_size//3)
-        slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
-        line_filter = line_filter[slice_fft]
+        aperture = disk_aperture(
+            out_shape=holoparams.out_shape,
+            radius=holoparams.sb_size//3,
+        )
         aperture[line_filter] = 0
         aperture = np.fft.fftshift(gaussian_filter(aperture, sigma=6))
         holo_bf = np.abs(
             reconstruct_bf(
                 frame=img,
                 aperture=aperture,
-                slice_fft=slice_fft,
-                xp=self._xp
-            )
+                slice_fft=holoparams.slice_fft,
+                xp=self._xp,
+            ),
         )
         holo_bf = np.gradient(holo_bf)[0]
         # apply hanning filter:

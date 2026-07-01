@@ -2,10 +2,10 @@ import pathlib
 
 import numpy as np
 import pytest
+from skimage.restoration import unwrap_phase
 
 from libertem_holo.base.convenience import reconstruct_stack
 from libertem_holo.base.io import InputData, Results
-from libertem_holo.base.unwrap import phase_unwrap
 from libertem_holo.base.utils import remove_phase_ramp
 
 try:
@@ -25,8 +25,8 @@ def test_reconstruct_stack(dm_testdata_path: pathlib.Path):
         stack=stack_obj, stack_ref=stack_ref,
     )
     wave = res.complex_wave
-    drifts = np.vstack([res.metadata['drifts_x'], res.metadata['drifts_y']]).T
-    phase = phase_unwrap(np.angle(wave))
+    drifts = np.vstack([res.metadata["drifts_x"], res.metadata["drifts_y"]]).T
+    phase = unwrap_phase(np.angle(wave), rng=42)
     roi = np.s_[50:150, 250:400]
     phase, _, _ = remove_phase_ramp(phase, roi=roi)
     phase -= np.mean(phase[roi])
