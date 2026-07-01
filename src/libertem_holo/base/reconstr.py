@@ -33,7 +33,7 @@ from __future__ import annotations
 import typing
 from typing import Literal
 import time
-from sparseconverter import NUMPY, for_backend
+from .utils import to_cpu
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm
@@ -347,7 +347,7 @@ def get_phase(
     )
 
     # phase_unwrap is numpy-only:
-    phase = for_backend(np.angle(phase_amp), NUMPY)
+    phase = to_cpu(np.angle(phase_amp))
 
     t1 = time.perf_counter()
 
@@ -380,7 +380,7 @@ def reconstruct_bf(
 
     fft_frame = fft_frame * xp.array(aperture)
 
-    return xp.fft.ifft2(fft_frame)
+    return xp.abs(xp.fft.ifft2(fft_frame))
 
 
 def phase_offset_correction(
@@ -467,7 +467,7 @@ def phase_offset_correction(
     laplacian = np.diag(degree) - ph_diff * weights
     # because cupyx.scipy.sparse.linalg.eigsh doesn't support which="SM",
     # we transfer to CPU here (see also https://github.com/cupy/cupy/issues/4692):
-    _, phases = eigsh(for_backend(laplacian, NUMPY), 1, which="SM")
+    _, phases = eigsh(to_cpu(laplacian), 1, which='SM')
     phases = xp.asarray(phases)
     idx = np.abs(phases) > threshold
     phases[idx] = phases[idx]/np.abs(phases[idx])

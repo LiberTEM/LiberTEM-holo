@@ -42,12 +42,17 @@ import numpy as np
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import least_squares
-from sparseconverter import NUMPY, for_backend
 
 
 log = logging.getLogger(__name__)
 
 XPType = Any  # Union[Module("numpy"), Module("cupy")]
+
+
+def to_cpu(arr):
+    if arr.device == "cpu":
+        return arr
+    return arr.get()
 
 
 def freq_array(
@@ -211,9 +216,10 @@ def estimate_sideband_size(
 class HoloParams(typing.NamedTuple):
     """HoloParams class contians all parameters necessary for reconstruction."""
 
-    sb_size: tuple[float, float]
+    sb_size: float
     sb_position: tuple[float, float]
-    aperture: np.ndarray  # actually can be a cupy ndarray, too! hm...
+    aperture: np.ndarray[tuple[int, int]]  # actually can be a cupy ndarray, too! hm...
+    aperture_bf: np.ndarray[tuple[int, int]]
     orig_shape: tuple[int, int]
     out_shape: tuple[int, int]
     scale_factor: float  # by how much is the phase image scaled down
@@ -233,7 +239,7 @@ class HoloParams(typing.NamedTuple):
         hologram: np.ndarray,
         *,
         central_band_mask_radius: float | None = None,
-        out_shape: tuple = None,
+        out_shape: tuple[int, int] | None = None,
         sb_size: float | None = None,
         sb_position: tuple[float, float] | None = None,
         circle_filter_order: int = 20,
@@ -286,7 +292,11 @@ class HoloParams(typing.NamedTuple):
         xp
             Pass in either the numpy or cupy module to select CPU or GPU processing
         """
-        from .filters import butterworth_line, butterworth_disk
+        from .filters import (  # noqa: PLC0415
+            butterworth_disk,
+            butterworth_line,
+            central_line_filter,
+        )
         hologram = xp.asarray(hologram)
 
         if sb_position is None:
@@ -300,9 +310,16 @@ class HoloParams(typing.NamedTuple):
         if sb_size is None:
             sb_size = estimate_sideband_size(sb_position, hologram.shape, xp=xp)
 
+        cb_size = estimate_sideband_size(
+            sb_position,
+            hologram.shape,
+            xp=xp,
+            sb_size_ratio=0.7,
+        )
+
         if out_shape is None:
-            out_side = 2 * int(sb_size) + 16
-            out_shape = (out_side, out_side)
+            orig_shape = hologram.shape
+            out_shape = (orig_shape[0]//4, orig_shape[1]//4)
 
         fft_slice = get_slice_fft(out_shape, hologram.shape)
 
@@ -313,6 +330,12 @@ class HoloParams(typing.NamedTuple):
             order=circle_filter_order,
             xp=xp,
         )
+        aperture_bf = butterworth_disk(
+            hologram.shape,
+            radius=cb_size,
+            order=circle_filter_order,
+            xp=xp,
+        )
 
         sb_position_int = tuple(
             int(c)
@@ -320,23 +343,36 @@ class HoloParams(typing.NamedTuple):
         )
         if line_filter_width is None or np.isclose(line_filter_width, 0):
             aperture = np.fft.fftshift(aperture[fft_slice])
+            aperture_bf = np.fft.fftshift(aperture_bf[fft_slice])
         else:
             lf = butterworth_line(
                 shape=hologram.shape,
                 width=line_filter_width,
                 sb_position=fft_shift_coords(
-                    sb_position_int, shape=hologram.shape
+                    sb_position_int,
+                    shape=hologram.shape,
                 ),
                 length_ratio=line_filter_length,
                 order=line_filter_order,
                 xp=xp,
             )
+            lf_bf = central_line_filter(
+                sb_position=sb_position_int,
+                out_shape=out_shape,
+                orig_shape=hologram.shape,
+                length_ratio=line_filter_length,
+                width=int(line_filter_width),
+                crop_to_out_shape=False,
+            )
+            lf_bf = xp.asarray(lf_bf)
             aperture = xp.fft.fftshift(aperture[fft_slice] * lf[fft_slice])
+            aperture_bf = xp.fft.fftshift(aperture_bf[fft_slice] * lf_bf[fft_slice])
 
         return cls(
             sb_size=sb_size,
             sb_position=sb_position,
             aperture=aperture,
+            aperture_bf=aperture_bf,
             out_shape=out_shape,
             orig_shape=hologram.shape,
             scale_factor=out_shape[0] / hologram.shape[0],
@@ -344,12 +380,14 @@ class HoloParams(typing.NamedTuple):
         )
 
     def filter_aperture_gaussian(self, sigma: float) -> HoloParams:
-        aperture = for_backend(self.aperture, NUMPY)
+        """Apply gaussian filtering to sb aperture and return new parameters."""
+        aperture = to_cpu(self.aperture)
         new_aperture = self.xp.asarray(gaussian_filter(aperture, sigma=sigma))
         return HoloParams(
             sb_size=self.sb_size,
             sb_position=self.sb_position,
             aperture=new_aperture,
+            aperture_bf=self.aperture_bf,
             orig_shape=self.orig_shape,
             out_shape=self.out_shape,
             scale_factor=self.scale_factor,

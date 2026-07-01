@@ -8,17 +8,20 @@ try:
     import cupy as cp
 except ImportError:
     cp = None
-import numpy as np
-import numpy.typing as npt
-import matplotlib.pyplot as plt
-from sparseconverter import NUMPY, for_backend
-from scipy.ndimage import gaussian_filter
 import logging
 
+import matplotlib.pyplot as plt
+import numpy as np
+import numpy.typing as npt
+
 from libertem_holo.base.reconstr import (
-    get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
+    HoloParams,
+    get_phase,
+    reconstruct_bf,
+    reconstruct_frame,
 )
-from libertem_holo.base.filters import central_line_filter, disk_aperture
+
+from .utils import to_cpu
 
 log = logging.getLogger(__name__)
 
@@ -57,13 +60,13 @@ def _upsampled_dft(
 
 
 def _plot_cross_correlate(*, shifted_corr, pos, plot_title, src, target):
-    pos = tuple(for_backend(i, NUMPY) for i in pos)
+    pos = tuple(to_cpu(i) for i in pos)
     fig, ax = plt.subplots(3, sharex=True, sharey=True)
-    ax[0].imshow(for_backend(shifted_corr, NUMPY))
+    ax[0].imshow(to_cpu(shifted_corr))
     ax[0].plot(pos[1], pos[0], 'x', color='red')
-    ax[1].imshow(for_backend(src, NUMPY))
+    ax[1].imshow(to_cpu(src))
     ax[1].plot(pos[1], pos[0], 'x', color='red')
-    ax[2].imshow(for_backend(target, NUMPY))
+    ax[2].imshow(to_cpu(target))
     ax[2].plot(pos[1], pos[0], 'x', color='red')
     fig.suptitle(plot_title)
 
@@ -162,7 +165,7 @@ def cross_correlate(
     if xp is np:
         shift = tuple(float(x) for x in shift)
     else:
-        shift = tuple(float(for_backend(x, NUMPY)) for x in shift)
+        shift = tuple(float(to_cpu(x)) for x in shift)
 
     # for "backwards compat", return correlation maxima and not shift
     pos = xp.array(shift) + midpoint
@@ -381,7 +384,7 @@ class BrightFieldCorrelator(Correlator):
         self,
         holoparams: HoloParams,
         upsample_factor: int = 1,
-        normalization: Literal['phase'] | None = 'phase',
+        normalization: Literal["phase"] | None = "phase",
         hanning: bool = True,
         xp: typing.Any = np,
     ) -> None:
@@ -396,25 +399,13 @@ class BrightFieldCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
-        line_filter = central_line_filter(
-            sb_position=holoparams.sb_position_int,
-            out_shape=holoparams.out_shape,
-            orig_shape=img.shape,
-            length_ratio=0.95,
-            width=20
-        )
-        aperture = disk_aperture(out_shape=holoparams.out_shape, radius=holoparams.sb_size//3)
-        slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
-        line_filter = line_filter[slice_fft]
-        aperture[line_filter] = 0
-        aperture = np.fft.fftshift(gaussian_filter(aperture, sigma=6))
         holo_bf = np.abs(
             reconstruct_bf(
                 frame=img,
-                aperture=aperture,
-                slice_fft=slice_fft,
-                xp=self._xp
-            )
+                aperture=holoparams.aperture_bf,
+                slice_fft=holoparams.slice_fft,
+                xp=self._xp,
+            ),
         )
         holo_bf = np.gradient(holo_bf)[0]
         # apply hanning filter:
@@ -521,7 +512,7 @@ class AmplitudeCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
-        slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
+        slice_fft = holoparams.slice_fft
         amp = np.abs(
             reconstruct_frame(
                 img, sb_pos=holoparams.sb_position,
@@ -660,7 +651,7 @@ class GradXYCorrelator(Correlator):
         if xp is np:
             pos = tuple(float(x) for x in pos)
         else:
-            pos = tuple(float(for_backend(x, NUMPY)) for x in pos)
+            pos = tuple(float(to_cpu(x)) for x in pos)
         pos_rel = (
             pos[0] - (moving_image_y.shape[0]) // 2,
             pos[1] - (moving_image_y.shape[1]) // 2,
