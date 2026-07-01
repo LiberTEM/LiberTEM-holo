@@ -269,41 +269,36 @@ def line_filter(
 
 
 def central_line_filter(
-    sb_position,
-    out_shape,
-    orig_shape,
-    length_ratio=0.9,
-    width=20,
-    crop_to_out_shape=True,
-):
+    sb_position: tuple[int, int],
+    out_shape: tuple[int, int],
+    orig_shape: tuple[int, int],
+    length_ratio: float = 0.9,
+    width: float = 10.0,
+    crop_to_out_shape: bool = True,
+    order: int = 2,
+) -> np.ndarray[int, int]:
+    """Return a line filter for the central band.
+
+    It can be applied by multiplying it with the aperture.
     """
-    Return a line filter for the central band, that can be applied
-    by multiplying it with the aperture.
-    """
-    # we are working in non-fft-shifted space, meaning with the zero
-    # frequency at the center of the image. we work in original shape,
-    # and crop at the end.
-    dest = np.zeros(orig_shape, dtype=bool)
-
-    # approx. positions of both sidebands (inferred from symmetry):
-    sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
-
-    other_sb_pos = fft_shift_coords(other_sb(sb_position, orig_shape), orig_shape)
-
-    draw_lf_rect(
-        dest,
-        orig_shape=orig_shape,
-        sb_position_shifted=sb_pos_shifted,
-        length_ratio=length_ratio,
+    lf = butterworth_line(
+        shape=orig_shape,
         width=width,
-    )
-    draw_lf_rect(
-        dest,
-        orig_shape=orig_shape,
-        sb_position_shifted=other_sb_pos,
+        sb_position=fft_shift_coords(sb_position, orig_shape),
         length_ratio=length_ratio,
-        width=width,
+        order=order,
+        xp=np,
     )
+    lf2 = butterworth_line(
+        shape=orig_shape,
+        width=width,
+        sb_position=fft_shift_coords(other_sb(sb_position, orig_shape), orig_shape),
+        length_ratio=length_ratio,
+        order=order,
+        xp=np,
+    )
+
+    dest = lf * lf2
 
     if crop_to_out_shape:
         slice_fft = get_slice_fft(out_shape=out_shape, sig_shape=orig_shape)

@@ -98,7 +98,7 @@ def reconstruct_stack(
         if i == 0:
             bf_obj_0 = reconstruct_bf(
                 frame=obj,
-                aperture=holoparams.aperture,
+                aperture=holoparams.aperture_bf,
                 slice_fft=holoparams.slice_fft,
                 xp=xp,
             )
@@ -106,7 +106,7 @@ def reconstruct_stack(
 
         bf_obj = reconstruct_bf(
             frame=obj,
-            aperture=holoparams.aperture,
+            aperture=holoparams.aperture_bf,
             slice_fft=holoparams.slice_fft,
             xp=xp,
         )

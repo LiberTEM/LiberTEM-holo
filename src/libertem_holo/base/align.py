@@ -8,17 +8,20 @@ try:
     import cupy as cp
 except ImportError:
     cp = None
-import numpy as np
-import numpy.typing as npt
-import matplotlib.pyplot as plt
-from .utils import to_cpu
-from scipy.ndimage import gaussian_filter
 import logging
 
+import matplotlib.pyplot as plt
+import numpy as np
+import numpy.typing as npt
+
 from libertem_holo.base.reconstr import (
-    get_slice_fft, HoloParams, get_phase, reconstruct_bf, reconstruct_frame
+    HoloParams,
+    get_phase,
+    reconstruct_bf,
+    reconstruct_frame,
 )
-from libertem_holo.base.filters import central_line_filter, disk_aperture
+
+from .utils import to_cpu
 
 log = logging.getLogger(__name__)
 
@@ -396,24 +399,10 @@ class BrightFieldCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
-        line_filter = central_line_filter(
-            sb_position=holoparams.sb_position_int,
-            out_shape=holoparams.out_shape,
-            orig_shape=img.shape,
-            length_ratio=0.95,
-            width=20,
-            crop_to_out_shape=True,
-        )
-        aperture = disk_aperture(
-            out_shape=holoparams.out_shape,
-            radius=holoparams.sb_size//3,
-        )
-        aperture[line_filter] = 0
-        aperture = np.fft.fftshift(gaussian_filter(aperture, sigma=6))
         holo_bf = np.abs(
             reconstruct_bf(
                 frame=img,
-                aperture=aperture,
+                aperture=holoparams.aperture_bf,
                 slice_fft=holoparams.slice_fft,
                 xp=self._xp,
             ),
@@ -523,7 +512,7 @@ class AmplitudeCorrelator(Correlator):
         img: np.ndarray,
     ) -> typing.Any:
         holoparams = self._holoparams
-        slice_fft = get_slice_fft(out_shape=holoparams.out_shape, sig_shape=img.shape)
+        slice_fft = holoparams.slice_fft
         amp = np.abs(
             reconstruct_frame(
                 img, sb_pos=holoparams.sb_position,
