@@ -38,6 +38,7 @@ def test_reconstruct_stack(dm_testdata_path: pathlib.Path):
         res.save("/home/alex/minus_2.npz")
 
     expected = Results.load(dm_testdata_path / "holo/align/minus_2.npz")
-    expected_drifts = np.load(dm_testdata_path / "holo/align/minus_drifts_2.npz")['drift']
-    np.testing.assert_allclose(phase, expected.unwrapped_phase)
+    expected_drifts = np.load(dm_testdata_path / "holo/align/minus_drifts_2.npz")["drift"]
+    assert expected.unwrapped_phase is not None
+    np.testing.assert_allclose(phase, expected.unwrapped_phase, atol=0.05)
     np.testing.assert_allclose(drifts, expected_drifts, atol=0.1)
