@@ -14,15 +14,15 @@ dependencies = [
     "numpy",
     # Minimum constraints of numba for all Python versions we support
     # See https://numba.readthedocs.io/en/stable/release-notes-overview.html
-    "numba>=0.55;python_version < '3.11'",
-    "numba>=0.57;python_version < '3.12'",
-    "numba>=0.59;python_version < '3.13'",
-    "numba>=0.61;python_version < '3.14' and python_version >= '3.10'",
-    "numba>=0.63;python_version < '3.15' and python_version >= '3.14'",
+    "numba>=0.55,<0.66;python_version < '3.11'",
+    "numba>=0.57,<0.66;python_version < '3.12'",
+    "numba>=0.59,<0.66;python_version < '3.13'",
+    "numba>=0.61,<0.66;python_version < '3.14' and python_version >= '3.10'",
+    "numba>=0.63,<0.66;python_version < '3.15' and python_version >= '3.14'",
     # for any future Python release, constrain numba to a recent version,
     # otherwise, version resolution might try to install an ancient version
     # that isn't constrained properly:
-    "numba>=0.61;python_version >= '3.15'",  
+    "numba>=0.61,<0.66;python_version >= '3.15'",  
     "ncempy",
     "scipy",
     "sparse",
