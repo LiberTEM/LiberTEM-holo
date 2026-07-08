@@ -175,4 +175,7 @@ def dm_testdata_path(scope='module'):
 def pytest_collectstart(collector):
     # nbval: ignore some output types
     if collector.fspath and collector.fspath.ext == '.ipynb':
-        collector.skip_compare += 'text/html', 'application/javascript', 'stderr',
+        collector.skip_compare += (
+            'text/html', 'application/javascript', 'stderr',
+            'application/vnd.holoviews_exec.v0+json'
+        )
