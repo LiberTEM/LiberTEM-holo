@@ -20,6 +20,10 @@ First stable release. Features include:
 
 - Reconstruction functions for single holograms
 - Stack reconstruction functions including alignment and phase offset correction
+- Image correlation class for various alignment strategies
+- Three phase unwrapping algorithms
+- Convenience functions for stack reconstruction and magnetic phase plots
+- Bright field reconstruction
 - GPU-Accelerated reconstruction and filtering
 - Input/Output helpers for ...
     - loading dm3/dm4 stacks and single holograms
