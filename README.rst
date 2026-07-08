@@ -57,9 +57,13 @@ reconstruct the electron holograms to phase images are:
 (3) Phase image processing and visualization - residual phase ramps
     can be removed at this stage and the phase and the contour can be plotted.
 
-A sample jupyter notebook is available `in the GitHub repository
-<https://github.com/LiberTEM/LiberTEM-holo/tree/master/notebooks>`_. The data
-collected from a magnetic TEM lamella used for the example is available
+Example jupyter notebooks are available `in the GitHub repository
+<https://github.com/LiberTEM/LiberTEM-holo/tree/master/notebooks>`_. The `Alignement.ipynb` and `Reconstruction.ipynb`
+notebooks are using GPU-accelerated reconstruction on a stack of holograms collected on a iron oxide 
+nanoparticles, showing the different functionalities for reconstruction and alignment of phase images for MIP removal.
+The datasets are available `on Zenodo <https://zenodo.org/records/21108532>`.
+The `UDF/stack-reconstruction.ipynb` notebook is based on User Defined Function and using efficient CPU
+parallelization for large stack reconstruction and the data was collected from a magnetic YIG lamella. The dataset is available
 `on Zenodo <https://zenodo.org/records/15222400>`_.
 
 Installation
