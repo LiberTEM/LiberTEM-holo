@@ -4,7 +4,7 @@
         "authorname": "Khelfallah Malika",
         "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
         "github": "malika576",
-        "contribution": "Reconstruction and alignment functions",
+        "contribution": "Reconstruction and alignment functions, example notebooks, ...",
         "orcid": "0000-0001-6940-5792"
     },
     {            
@@ -30,5 +30,13 @@
         "github": "sk1p",
         "contribution": "Code structure and repository management, GPU support, tests, UDF implementation, performance optimization and benchmarks, ...",
         "orcid": "0000-0002-9555-7455"
+    },
+    {
+        "displayname": "David Landers",
+        "authorname": "Landers, David",
+        "affiliation": "CEA-IRIG",
+        "contributions": "Discussions, model-based iterative reconstruction prototypes",
+        "github": "DavidLanders95",
+        "orcid": "0000-0002-3295-9473"
     }
 ]
