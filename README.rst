@@ -18,7 +18,7 @@
 LiberTEM-holo
 =============
 
-LiberTEM-holo is a Python project for holography reconstruction using LiberTEM.
+LiberTEM-holo is an open source Python library for holography reconstruction using LiberTEM.
 Electron Holograms are captured by interfering two parts of a coherent electron
 beam passing through (1) vacuum and (2) a sample. An electron biprism is used
 to interfere the two parts of this electron beam. The interference pattern is
@@ -29,6 +29,18 @@ determine the magnetic signal from the sample.
 More information can be found on `Wikipedia 
 <https://en.wikipedia.org/wiki/Electron_holography>`_ or the `Handbook of
 Microscopy <https://doi.org/10.1007/978-3-030-00069-1_16>`_.
+
+Goals
+-----
+- Support good Open Science practices (open source, reproducibility, interoperability)
+- Fast workflows for a faster turn-around time; support full reconstruction on the GPU
+- Suitability for live- near-live reconstruction and integration into automated acquisition workflows
+- Platform for developments in this area (example: phase unwrapping implementations)
+- Full- or semi-automatic operation from hologram stack to phase image
+- Include analyses that follow reconstruction of the phase image
+
+Workflow
+--------
 
 This software focuses on the steps required to reconstruct the electron phase
 from stacks of electron holograms. In general, the steps required to
@@ -44,7 +56,8 @@ reconstruct the electron holograms to phase images are:
     the sample drift and biprism drift can be compensated. The
     sample drift is calculated using cross-correlation. The `cross correlation
     <https://en.wikipedia.org/wiki/Cross-correlation>`_ is usually performed on the
-    real part of the image and the drift is applied on the complex stack. The
+    amplitude of the complex images, or a separate brightfield reconstruction of
+    the holograms. The drift is applied on the complex stack. The
     biprism drift appears as a phase drift in the complex image. This phase drift
     is compensated using the `angular synchronization
     <https://arxiv.org/pdf/2005.02032>`_ method by `Filbir et al.
@@ -54,8 +67,9 @@ reconstruct the electron holograms to phase images are:
     sample - this signal could be due to electric or magnetic field (as per
     `Aharonov Bohm effect <https://en.wikipedia.org/wiki/Aharonov%E2%80%93Bohm_effect>`_).
 
-(3) Phase image processing and visualization - residual phase ramps
-    can be removed at this stage and the phase and the contour can be plotted.
+(3) Phase image processing and visualization - phase unwrapping is performend
+    and residual phase ramps can be removed at this stage.
+    The phase and the contour can then be plotted.
 
 Example jupyter notebooks are available `in the GitHub repository
 <https://github.com/LiberTEM/LiberTEM-holo/tree/master/notebooks>`_. 
