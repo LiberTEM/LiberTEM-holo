@@ -11,6 +11,9 @@ LiberTEM-holo has implementations for both :ref:`hologram simulation <holo-sim>`
 .. toctree::
    usage/sim
 
+To run these notebooks yourself, clone this repository or download the notebooks,
+and make sure to download the matching input data, as documented in the notebook.
+
 Hologram reconstruction
 -----------------------
 

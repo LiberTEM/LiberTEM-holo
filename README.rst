@@ -93,6 +93,12 @@ Make sure to pick a CUDA version that works with your GPU and its drivers.
 For more details, please check the
 `CuPy installation guide <https://docs.cupy.dev/en/latest/install.html>`_.
 
+For using the GUI components, install the :code:`gui` extra:
+
+.. code-block:: shell
+
+  $ pip install libertem-holo[gui]
+
 Input File formats
 ------------------
 LiberTEM-holo was designed specfically for working on larger stacks of images

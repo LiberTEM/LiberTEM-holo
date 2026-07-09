@@ -1,8 +1,23 @@
 [
     {
-        "displayname": "TODO",
-        "authorname": "TODO",
-        "affiliation": "TODO",
-        "contribution": "TODO"
+        "displayname": "Rafal E. Dunin-Borkowski",
+        "authorname": "Dunin-Borkowski, Rafal E.",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "contribution": "Scientific advisory, resources, discussion, publications",
+        "orcid": "0000-0001-8082-0647"
+    },
+    {
+        "displayname": "Thibaud Denneulin",
+        "authorname": "Denneulin, Thibaud",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "contribution": "Discussion, data, feedback",
+        "orcid": "0000-0001-7350-7943"
+    },
+    {
+        "displayname": "András Kovács",
+        "authorname": "Kovács, András",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "contribution": "Discussion, data, feedback",
+        "orcid": "0000-0001-8485-991X"
     }
 ]
