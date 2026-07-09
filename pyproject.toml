@@ -33,7 +33,7 @@ dependencies = [
 ]
 keywords = ["electron microscopy", "holography", "off-axis holography"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -43,16 +43,19 @@ classifiers = [
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Environment :: Console",
+    "Environment :: GPU :: NVIDIA CUDA",
     "Intended Audience :: Science/Research",
     "Intended Audience :: End Users/Desktop",
     "Intended Audience :: Developers",
     "Natural Language :: English",
     "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Image Processing",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 authors = [
     { name = "Alexander Clausen", email = "a.clausen@fz-juelich.de" },
+    { name = "Malika Khelfallah", email = "m.khelfallah@fz-juelich.de" },
     { name = "Dieter Weber", email = "d.weber@fz-juelich.de" },
     { name = "Patrick Adrian", email = "patrick.adrian.gunawan@stud.th-luebeck.de" },
 ]
