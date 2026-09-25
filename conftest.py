@@ -146,6 +146,11 @@ def lt_ctx():
     return Context(executor=InlineJobExecutor())
 
 
+@pytest.fixture
+def dask_ctx():
+    return Context()
+
+
 @pytest.fixture(autouse=True)
 def auto_ds(doctest_namespace, holo_data):
     from libertem.io.dataset.memory import MemoryDataSet

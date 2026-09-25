@@ -10,7 +10,8 @@ from libertem_holo.udf.reconstr import HoloReconstructUDF
 
 
 @pytest.mark.parametrize(
-    "backend", ["numpy", "cupy"],
+    "backend",
+    ["numpy", "cupy"],
 )
 def test_holo_reconstruction(lt_ctx: Context, backend: str, holo_data) -> None:
     holo, ref, phase_ref, slice_crop = holo_data
@@ -30,9 +31,9 @@ def test_holo_reconstruction(lt_ctx: Context, backend: str, holo_data) -> None:
 
     out_shape = dataset_holo.shape.sig
     aperture = np.fft.fftshift(disk_aperture(out_shape=out_shape, radius=sb_size))
-    holo_udf = HoloReconstructUDF(out_shape=out_shape,
-                                  sb_position=sb_position,
-                                  aperture=aperture)
+    holo_udf = HoloReconstructUDF(
+        out_shape=tuple(out_shape), sb_position=tuple(sb_position), aperture=aperture
+    )
     try:
         if backend == "cupy":
             set_use_cuda(cudas[0])

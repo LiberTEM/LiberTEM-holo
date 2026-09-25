@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from libertem.udf import UDF
 
-from libertem_holo.base.reconstr import reconstruct_frame
+from libertem_holo.base.reconstr import reconstruct_bf, reconstruct_frame
 from libertem_holo.base.utils import get_slice_fft
 
 
@@ -48,6 +48,7 @@ class HoloReconstructUDF(UDF):
         out_shape: tuple[int, int],
         sb_position: tuple[float, float],
         aperture: np.ndarray,
+        aperture_bf: np.ndarray | None = None,
         precision: bool = True,
     ) -> None:
         """Off-axis electron holography reconstruction.
@@ -77,21 +78,35 @@ class HoloReconstructUDF(UDF):
             fft-shifted (i.e. assume that the side band is shifted to the
             corners of the image)
 
+        aperture_bf
+            The corresponding center band aperture for reconstructing
+            a brightfield image.
+
         """
         super().__init__(
             out_shape=out_shape,
             sb_position=sb_position,
             precision=precision,
             aperture=aperture,
+            aperture_bf=aperture_bf,
         )
 
     def get_result_buffers(self) -> dict[str, Any]:
         ""
         extra_shape = self.params.out_shape
         dtype = np.complex128 if self.params.precision else np.complex64
-        return {
+
+        buffers = {
             "wave": self.buffer(kind="nav", dtype=dtype, extra_shape=extra_shape),
         }
+
+        if self.params.aperture_bf is not None:
+            buffers["bf"] = self.buffer(
+                kind="nav",
+                dtype="float32",
+                extra_shape=self.params.aperture_bf.shape,
+            )
+        return buffers
 
     def get_task_data(self) -> dict[str, Any]:
         ""
@@ -100,8 +115,13 @@ class HoloReconstructUDF(UDF):
             self.meta.partition_shape.sig,
         )
 
+        aperture_bf = None
+        if self.params.aperture_bf is not None:
+            aperture_bf = self.xp.array(self.params.aperture_bf)
+
         return {
             "aperture": self.xp.array(self.params.aperture),
+            "aperture_bf": aperture_bf,
             "slice": slice_fft,
         }
 
@@ -117,6 +137,16 @@ class HoloReconstructUDF(UDF):
         )
 
         self.results.wave[:] = self.forbuf(wav, self.results.wave)
+
+        if self.task_data.aperture_bf is not None:
+            # TODO: re-use FFT from reconstruct_frame here
+            bf = reconstruct_bf(
+                frame,
+                aperture=self.task_data.aperture_bf,
+                slice_fft=self.task_data.slice,
+                xp=self.xp,
+            )
+            self.results.bf[:] = self.forbuf(bf, self.results.bf)
 
     def get_backends(self) -> tuple[str, ...]:
         ""
