@@ -19,6 +19,8 @@ from ncempy.io.dm import fileDM
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from libertem.api import Context
+    from libertem.io.dataset import DataSet
 
 
 class InputSlicer:
@@ -121,6 +123,15 @@ class InputData:
                 raise ValueError(msg)
             exp_sum += in_file.exposure_time
         return exp_sum
+
+    def into_libertem_dataset(self, ctx: Context) -> DataSet:
+        """Turn this InputData into a LiberTEM dataset usable for running a UDF."""
+        if len(self.files) == 1:
+            # single-file dm dataset
+            ds = ctx.load("dm", path=self.files[0].path)
+        else:
+            ds = ctx.load("fm", files=[f.path for f in self.files])
+        return ds
 
     @classmethod
     def from_array(
