@@ -19,6 +19,8 @@ from ncempy.io.dm import fileDM
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from libertem.api import Context
+    from libertem.io.dataset import DataSet
 
 
 class InputSlicer:
@@ -121,6 +123,15 @@ class InputData:
                 raise ValueError(msg)
             exp_sum += in_file.exposure_time
         return exp_sum
+
+    def into_libertem_dataset(self, ctx: Context) -> DataSet:
+        """Turn this InputData into a LiberTEM dataset usable for running a UDF."""
+        if len(self.files) == 1:
+            # single-file dm dataset
+            ds = ctx.load("dm", path=self.files[0].path)
+        else:
+            ds = ctx.load("fm", files=[f.path for f in self.files])
+        return ds
 
     @classmethod
     def from_array(
@@ -252,16 +263,19 @@ class InputFile:
     def load_from_dm(cls, path: str | pathlib.Path) -> InputFile:
         """Load .dm3 or .dm4 data. Assumes a single 2D or 3D data set per file."""
         dm = fileDM(path)
-        ds = dm.getDataset(0)
+        data = dm.getMemmap(0)
+        tags = dm.getMetadata(0)
+
+        units, scales = _pixel_scale_and_units(tags)
 
         # [z, y, x] in 3D case, but we don't care about z
-        units = ds["pixelUnit"][-2:]
-        sizes = ds["pixelSize"][-2:]
+        units = units[-2:]
+        scales = scales[-2:]
 
-        if sizes[0] != sizes[1]:
+        if scales[0] != scales[1]:
             msg = "pixel size should be the same for both axes"
             raise ValueError(msg)
-        pixelsize = sizes[0]
+        pixelsize = scales[0]
         if units[0] == "nm":
             pix_mult = 1e-9
         elif units[0] == "µm":
@@ -269,24 +283,34 @@ class InputFile:
         else:
             msg = (
                 'pixelUnit should be nm or µm,'
-                f' is {ds["pixelUnit"]}'
+                f' is {units}'
             )
             raise ValueError(msg)
         pixelsize = float(pixelsize) * pix_mult
 
-        if len(ds["data"].shape) not in (2, 3):
+        if len(data.shape) not in (2, 3):
             msg = "data should be 2D or 3D"
             raise ValueError(msg)
 
-        tags = dm.getMetadata(0)
-
         exposure_time = tags.get("DataBar Exposure Time (s)")
-        if len(ds["data"].shape) == 3:
-            exposure_time *= ds["data"].shape[0]
+        if len(data.shape) == 3:
+            exposure_time *= data.shape[0]
         return cls(
-            data=ds["data"],
+            data=data,
             pixelsize=pixelsize,
-            tags=dm.getMetadata(0),
+            tags=tags,
             exposure_time=exposure_time,
             path=pathlib.Path(path),
         )
+
+
+def _pixel_scale_and_units(tags):
+    units = []
+    scales = []
+    for i in range(5):
+        unit = tags.get(f"Calibrations Dimension {i} Units")
+        scale = tags.get(f"Calibrations Dimension {i} Scale")
+        if unit is not None and scale is not None:
+            units.append(unit)
+            scales.append(scale)
+    return units[::-1], scales[::-1]
