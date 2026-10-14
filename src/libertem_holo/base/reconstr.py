@@ -64,10 +64,12 @@ def reconstruct_frame(
     frame
         A numpy or cupy array containing the input hologram
     sb_pos
-        The sideband position, for example as returned by
-        `estimate_sideband_position`
+        The sideband position in native (unshifted) FFT coordinates, for
+        example as returned by `estimate_sideband_position`
     aperture
-        A numpy or cupy array containing the aperture to apply in fourier space
+        A numpy or cupy array containing the aperture to apply in fourier space,
+        in native layout (zero frequency at `[0, 0]`), like
+        :attr:`HoloParams.aperture <libertem_holo.base.utils.HoloParams>`
     slice_fft
         A slice to crop to the selected output shape in fourier space,
         as returned by `get_slice_fft`.
@@ -110,10 +112,12 @@ def reconstruct_double_resolution(
     frames : array_like
         Two holograms taken at a phase offset of π; shape (2, height, width)
     sb_pos
-        The sideband position, for example as returned by
-        `estimate_sideband_position`
+        The sideband position in native (unshifted) FFT coordinates, for
+        example as returned by `estimate_sideband_position`
     aperture
-        A numpy or cupy array containing the aperture to apply in fourier space
+        A numpy or cupy array containing the aperture to apply in fourier space,
+        in native layout (zero frequency at `[0, 0]`), like
+        :attr:`HoloParams.aperture <libertem_holo.base.utils.HoloParams>`
     slice_fft
         A slice to crop to the selected output shape in fourier space,
         as returned by `get_slice_fft`.
@@ -371,8 +375,11 @@ def reconstruct_bf(
 ) -> np.ndarray:
     """Reconstruct a brightfield image from a hologram.
 
-    Please use :func:`libertem_holo.base.filter.central_line_filter` to
+    Please use :func:`libertem_holo.base.filters.central_line_filter` to
     filter out fresnel fringes as appropriate.
+
+    `aperture` is in native layout (zero frequency at `[0, 0]`), like
+    :attr:`HoloParams.aperture_bf <libertem_holo.base.utils.HoloParams>`.
     """
     frame = xp.array(frame)
     fft_frame = xp.fft.fft2(frame)
