@@ -5,13 +5,14 @@ Use cases:
 - Load a stack from a single dm3/dm4 file
 - Load a stack from a list or a glob of files
 - Construct InputData manually (potentially with missing parts)
+- Wrap an existing LiberTEM DataSet, reading slices lazily
 """
 
 from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import natsort
 import numpy as np
@@ -21,6 +22,44 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from libertem.api import Context
     from libertem.io.dataset import DataSet
+
+
+class InputSource(Protocol):
+    """A source of one or more 2D images, which is part of an `InputData`."""
+
+    @property
+    def shape_3d(self) -> tuple[int, int, int]:
+        """Shape as 3D, the first dimension being the number of images."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        """The numpy dtype of the data."""
+        ...
+
+    @property
+    def path(self) -> pathlib.Path | None:
+        """The path to the file on the filesystem, if any."""
+        ...
+
+    @property
+    def pixelsize(self) -> float | None:
+        """Pixel size in m."""
+        ...
+
+    @property
+    def tags(self) -> dict[str, Any] | None:
+        """Raw tags."""
+        ...
+
+    @property
+    def exposure_time(self) -> float | None:
+        """Exposure time in seconds, for all images of this source."""
+        ...
+
+    def zslice(self, idx: int) -> np.ndarray:
+        """Load image `idx` of this source."""
+        ...
 
 
 class InputSlicer:
@@ -38,10 +77,10 @@ class InputSlicer:
 
 @dataclass
 class InputData:
-    """Input data from one or more files."""
+    """Input data from one or more files, or from a LiberTEM DataSet."""
 
-    files: list[InputFile]
-    """ordered list of input files"""
+    files: list[InputSource]
+    """ordered list of input sources"""
 
     @property
     def pixelsize(self) -> float | None:
@@ -50,29 +89,21 @@ class InputData:
 
     def zslice(self, z: int) -> np.ndarray:
         """From a 3D stack, load a single image/slice."""
-        # translate z into two indices:
-        # 1) the correct InputFile in self.files
-        # 2) the index in that file
-        offset = 0
-        for i_f in self.files:
-            if z >= offset and z < offset + i_f.shape_3d[0]:
-                in_file_offset = z - offset
-                return i_f.data_3d[in_file_offset]
-            offset += i_f.shape_3d[0]
-        msg = f"z out of bounds: {z}"
-        raise ValueError(msg)
+        i_f, in_file_offset = self._file_for_z(z)
+        return i_f.zslice(in_file_offset)
 
     def tags_for_slice(self, z: int) -> dict[str, Any] | None:
         """Raw dictionary of tags for slize `z`."""
         # which InputFile does z lie in? return its tags
-        i_f = self._file_for_z(z)
+        i_f, _ = self._file_for_z(z)
         return i_f.tags
 
-    def _file_for_z(self, z: int) -> InputFile:
+    def _file_for_z(self, z: int) -> tuple[InputSource, int]:
+        """Translate `z` into the input source and the index in that source."""
         offset = 0
         for i_f in self.files:
             if z >= offset and z < offset + i_f.shape_3d[0]:
-                return i_f
+                return i_f, z - offset
             offset += i_f.shape_3d[0]
         msg = f"z out of bounds: {z}"
         raise ValueError(msg)
@@ -104,7 +135,7 @@ class InputData:
     @property
     def dtype(self) -> np.dtype[Any]:
         """The numpy dtype of the data."""
-        return self.files[0].data.dtype
+        return self.files[0].dtype
 
     @property
     def exposure_time(self) -> float:
@@ -125,7 +156,17 @@ class InputData:
         return exp_sum
 
     def into_libertem_dataset(self, ctx: Context) -> DataSet:
-        """Turn this InputData into a LiberTEM dataset usable for running a UDF."""
+        """Turn this InputData into a LiberTEM dataset usable for running a UDF.
+
+        If this InputData wraps a LiberTEM DataSet, that DataSet is returned
+        as-is.
+        """
+        first = self.files[0]
+        if len(self.files) == 1 and isinstance(first, DataSetInput):
+            return first.dataset
+        if any(isinstance(f, DataSetInput) for f in self.files):
+            msg = "can't combine a LiberTEM DataSet with other input sources"
+            raise ValueError(msg)
         if len(self.files) == 1:
             # single-file dm dataset
             ds = ctx.load("dm", path=self.files[0].path)
@@ -151,6 +192,44 @@ class InputData:
         return InputData(
             files=[i_f],
         )
+
+    @classmethod
+    def load_from_libertem_dataset(
+        cls,
+        dataset: DataSet,
+        *,
+        pixelsize: float | None = None,
+        exposure_time: float | None = None,
+        tags: dict[str, Any] | None = None,
+    ) -> InputData:
+        """Wrap a LiberTEM DataSet.
+
+        The DataSet needs to be initialized, for example by loading it with
+        :meth:`libertem.api.Context.load`. Its navigation dimensions are
+        flattened, so a 4D DataSet with nav shape `(ny, nx)` results in
+        `ny * nx` slices.
+
+        Slices are read lazily, using a :class:`~libertem.udf.raw.PickUDF`
+        running on an inline executor.
+
+        Metadata is not read from the DataSet, but can be given explicitly.
+
+        Example
+        -------
+        >>> ds = ctx.load("dm", path="stack.dm4")  # doctest: +SKIP
+        >>> i = InputData.load_from_libertem_dataset(ds)  # doctest: +SKIP
+        >>> i.data[0]  # doctest: +SKIP
+        array([...])
+
+        """
+        return cls(files=[
+            DataSetInput(
+                dataset=dataset,
+                pixelsize=pixelsize,
+                exposure_time=exposure_time,
+                tags=tags,
+            ),
+        ])
 
     @classmethod
     def load_from_dm(cls, path: str | pathlib.Path) -> InputData:
@@ -243,6 +322,15 @@ class InputFile:
         msg = f"shape should be 2d or 3d; is {shape}"
         raise ValueError(msg)
 
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        """The numpy dtype of the data."""
+        return self.data.dtype
+
+    def zslice(self, idx: int) -> np.ndarray:
+        """Load image `idx` of this file."""
+        return self.data_3d[idx]
+
     @classmethod
     def from_array(
         cls,
@@ -302,6 +390,57 @@ class InputFile:
             exposure_time=exposure_time,
             path=pathlib.Path(path),
         )
+
+
+@dataclass
+class DataSetInput:
+    """Lazily read input data from a LiberTEM DataSet, with flattened nav."""
+
+    dataset: DataSet
+    """the (initialized) LiberTEM DataSet"""
+
+    pixelsize: float | None = None
+    """in m"""
+
+    tags: dict[str, Any] | None = None
+    """raw tags"""
+
+    exposure_time: float | None = None
+    """in seconds, for the whole DataSet"""
+
+    @property
+    def path(self) -> pathlib.Path | None:
+        """Always `None`, as the DataSet is not necessarily backed by a single file."""
+        return None
+
+    @property
+    def shape_3d(self) -> tuple[int, int, int]:
+        """Shape as 3D, with the navigation dimensions flattened."""
+        shape = self.dataset.shape
+        sig_shape = tuple(shape.sig)
+        if len(sig_shape) != 2:
+            msg = f"signal shape should be 2d; is {sig_shape}"
+            raise ValueError(msg)
+        return (shape.nav.size, sig_shape[0], sig_shape[1])
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        """The numpy dtype of the data."""
+        return np.dtype(self.dataset.dtype)
+
+    def zslice(self, idx: int) -> np.ndarray:
+        """Load image `idx` (index into the flattened nav) using `PickUDF`."""
+        from libertem.api import Context
+        from libertem.udf.raw import PickUDF
+
+        if not 0 <= idx < self.shape_3d[0]:
+            msg = f"idx out of bounds: {idx}"
+            raise ValueError(msg)
+        nav_idx = np.unravel_index(idx, tuple(self.dataset.shape.nav))
+        roi = self.dataset.roi[nav_idx]
+        with Context.make_with("inline") as ctx:
+            res = ctx.run_udf(dataset=self.dataset, udf=PickUDF(), roi=roi)
+        return res["intensity"].raw_data[0]
 
 
 def _pixel_scale_and_units(tags):

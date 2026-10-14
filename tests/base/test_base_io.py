@@ -1,4 +1,6 @@
 import numpy as np
+import pytest
+from libertem.io.dataset.memory import MemoryDataSet
 
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.utils import HoloParams
@@ -52,3 +54,34 @@ def test_result_metadata_from_input_data(holo_data):
 
     # and our custom metadata survived:
     assert res.metadata["stuff"] == 6.54
+
+
+@pytest.mark.parametrize("shape", [(6, 16, 16), (2, 3, 16, 16)])
+def test_input_data_from_libertem_dataset(shape):
+    rng = np.random.default_rng()
+    arr = rng.random(shape).astype(np.float32)
+    ds = MemoryDataSet(data=arr, num_partitions=2, sig_dims=2)
+    inp = InputData.load_from_libertem_dataset(
+        ds, pixelsize=1e-9, exposure_time=12.0, tags={"a": 1},
+    )
+    flat = arr.reshape((-1, 16, 16))
+    assert inp.shape == flat.shape
+    assert inp.dtype == np.dtype(np.float32)
+    assert inp.pixelsize == 1e-9
+    assert inp.exposure_time == 12.0
+    assert inp.tags_for_slice(0) == {"a": 1}
+    for z in range(flat.shape[0]):
+        assert np.array_equal(inp.zslice(z), flat[z])
+        assert np.array_equal(inp.data[z], flat[z])
+    with pytest.raises(ValueError, match="out of bounds"):
+        inp.zslice(flat.shape[0])
+
+
+def test_into_libertem_dataset_mixed_sources(lt_ctx):
+    arr = np.zeros((2, 16, 16), dtype=np.float32)
+    ds = MemoryDataSet(data=arr, num_partitions=1, sig_dims=2)
+    from_ds = InputData.load_from_libertem_dataset(ds)
+    assert from_ds.into_libertem_dataset(ctx=lt_ctx) is ds
+    mixed = InputData(files=[*from_ds.files, *InputData.from_array(arr).files])
+    with pytest.raises(ValueError, match="can't combine"):
+        mixed.into_libertem_dataset(ctx=lt_ctx)
