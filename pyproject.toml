@@ -95,7 +95,8 @@ path = "src/libertem_holo/__version__.py"
 [tool.ruff.lint]
 ignore = [
     "PLR0913",  # too many arguments
-    "D419",  # empty docstring - used to "un-document" functions, for example inherited ones
+    "D419",
+    "CPY001",   # we don't have copyright notices at the top of files
 ]
 select = [
     "E4",
