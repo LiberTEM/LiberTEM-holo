@@ -76,9 +76,10 @@ def reconstruct_stack(
         using numpy.
     ctx : libertem.api.Context, optional
         The LiberTEM :code:`Context` to run the reconstruction on;
-        required for the :code:`"libertem"` backend. It is not created
-        here, as starting up a :code:`Context` can take a long time, so
-        it should be created once and re-used.
+        required for the :code:`"libertem"` backend, and ignored by the
+        :code:`"cupy"` backend. It is not created here, as starting up a
+        :code:`Context` can take a long time, so it should be created once
+        and re-used.
     progress : bool
         Show progress bars
 
@@ -93,6 +94,8 @@ def reconstruct_stack(
             msg = "Need Cupy for the cupy backend."
             raise RuntimeError(msg)
         xp = cp
+        # the cupy backend reconstructs in this process:
+        ctx = None
     elif backend == "libertem":
         if ctx is None:
             msg = "The libertem backend needs a `Context` passed in as `ctx`"

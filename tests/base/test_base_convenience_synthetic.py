@@ -87,7 +87,8 @@ def test_reconstruct_stack_cupy_vs_libertem(holo_stack, lt_ctx: Context):
     )
     res_cp = reconstruct_stack(
         stack, stack_ref, holoparams=_params(holo, cp),
-        backend="cupy", progress=False,
+        # the context is ignored by the cupy backend:
+        backend="cupy", ctx=lt_ctx, progress=False,
     )
     _assert_results_similar(res_cp, res_lt)
 
@@ -99,9 +100,6 @@ def test_reconstruct_stack_backend_args(holo_stack, lt_ctx: Context):
         reconstruct_stack(stack, backend="libertem")
     with pytest.raises(ValueError, match="unknown backend"):
         reconstruct_stack(stack, backend="foo", ctx=lt_ctx)
-    if cp is not None:
-        with pytest.raises(ValueError, match="only used with the libertem backend"):
-            reconstruct_stack(stack, backend="cupy", ctx=lt_ctx)
 
 
 def test_into_libertem_dataset_from_array(lt_ctx: Context):
