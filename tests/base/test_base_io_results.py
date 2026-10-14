@@ -23,7 +23,7 @@ def test_no_metadata(tmp_path: pathlib.Path):
 
     res_l = Results.load(tmp_path / "test1.npz")
     assert np.allclose(res.complex_wave, res_l.complex_wave)
-    assert res.metadata is None
+    assert res.metadata == {}
 
 
 def test_save_roudtrip(tmp_path: pathlib.Path):
