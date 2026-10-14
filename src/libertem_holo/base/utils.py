@@ -33,6 +33,7 @@ from functools import lru_cache
 from typing import Any, Literal
 import typing
 import logging
+import warnings
 
 try:
     import cupy as cp
@@ -84,7 +85,11 @@ def get_slice_fft(
     out_shape: tuple[int, int],
     sig_shape: tuple[int, int],
 ) -> tuple[slice, slice]:
-    """Get a slice in fourier space to achieve the given output shape."""
+    """Get a slice in fourier space to achieve the given output shape.
+
+    The slice is centered, so it has to be applied to an fftshifted array
+    (zero frequency at the center); the cropped result is fftshifted, too.
+    """
     sy, sx = sig_shape
     oy, ox = out_shape
 
@@ -214,7 +219,16 @@ def estimate_sideband_size(
 
 
 class HoloParams(typing.NamedTuple):
-    """HoloParams class contians all parameters necessary for reconstruction."""
+    """HoloParams class contians all parameters necessary for reconstruction.
+
+    Coordinate systems: `sb_position` is in native (unshifted) FFT coordinates
+    of `orig_shape`, as returned by :func:`estimate_sideband_position` and
+    used by :func:`~libertem_holo.base.reconstr.reconstruct_frame`. `aperture`
+    and `aperture_bf` have shape `out_shape` and are in native layout, too
+    (zero frequency at `[0, 0]`), ready to be multiplied with the cropped FFT
+    in :func:`~libertem_holo.base.reconstr.reconstruct_frame` and
+    :func:`~libertem_holo.base.reconstr.reconstruct_bf`.
+    """
 
     sb_size: float
     sb_position: tuple[float, float]
@@ -270,7 +284,9 @@ class HoloParams(typing.NamedTuple):
             Override the sideband size; determined automatically if not given
 
         sb_position
-            Override the sideband position; determined automatically if not given
+            Override the sideband position; determined automatically if not given.
+            In native (unshifted) FFT coordinates of the hologram, as returned by
+            :func:`estimate_sideband_position`.
 
         circle_filter_order
             Order of the butterworth filter applied to the circular part
@@ -405,15 +421,24 @@ def shifted_coords_for_shape(shape):
 
 
 def fft_shift_coords(pos, shape):
+    """Convert a position from native (unshifted) to fftshifted FFT coordinates.
+
+    For even sizes, this is where :func:`numpy.fft.fftshift` moves the value at
+    `pos`, and the conversion is its own inverse. For odd sizes it is actually
+    the :func:`numpy.fft.ifftshift` mapping, so the result is one pixel before
+    where :func:`numpy.fft.fftshift` moves the value.
+    """
     coords = shifted_coords_for_shape(shape)
     return tuple(int(n) for n in coords[pos[0], pos[1]])
 
 
 def other_sb(sb_position, shape):
-    """
-    Given the sb_position (as from the estimate function in fft coordinates),
-    and the shape of the hologram, calculate the position of the other sideband
-    position (also in fft coordinates)
+    """Position of the other sideband.
+
+    Given the sb_position (as from :func:`estimate_sideband_position`, in
+    native, unshifted FFT coordinates) and the shape of the hologram,
+    calculate the position of the other sideband (also in native FFT
+    coordinates).
     """
     sb_pos_shifted = fft_shift_coords(sb_position, shape)
     center = (shape[0]//2, shape[1]//2)
@@ -428,7 +453,30 @@ def other_sb(sb_position, shape):
     return fft_shift_coords(other_sb, shape)
 
 
-def line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
+def line_filter_coords(
+    length_ratio: float,
+    sb_position_shifted: tuple[int, int],
+    width: float,
+    orig_shape: tuple[int, int],
+) -> np.ndarray:
+    """Corners of the rectangle drawn by :func:`draw_lf_rect`.
+
+    `sb_position_shifted` and the result are in fftshifted coordinates of
+    `orig_shape` (zero frequency at the center).
+
+    .. deprecated:: 1.1.0
+        Only used by :func:`libertem_holo.base.filters.line_filter`, which is
+        deprecated.
+    """
+    warnings.warn(
+        "line_filter_coords is deprecated and will be removed in a future release",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape)
+
+
+def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     # let's start from a "unit rectangle" which is 1x1 and not rotated:
     coords = np.array([
         [0, 0],
@@ -479,10 +527,35 @@ def line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     return coords
 
 
-def draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
+def draw_lf_rect(
+    dest: np.ndarray,
+    orig_shape: tuple[int, int],
+    sb_position_shifted: tuple[int, int],
+    length_ratio: float,
+    width: float,
+) -> None:
+    """Draw a rectangular line filter into `dest`.
+
+    `dest` has shape `orig_shape` and is in fftshifted layout;
+    `sb_position_shifted` is in fftshifted coordinates (zero frequency at the
+    center).
+
+    .. deprecated:: 1.1.0
+        Only used by :func:`libertem_holo.base.filters.line_filter`, which is
+        deprecated.
+    """
+    warnings.warn(
+        "draw_lf_rect is deprecated and will be removed in a future release",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    _draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width)
+
+
+def _draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
     # we "draw" a rotated rectangle into `dest`, starting at `sb_position_shifted`
     # and ending at `length_ratio` times the vector in the direction to the center of `out_shape`.
-    coords = line_filter_coords(
+    coords = _line_filter_coords(
         length_ratio=length_ratio,
         sb_position_shifted=sb_position_shifted,
         width=width,

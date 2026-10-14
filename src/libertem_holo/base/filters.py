@@ -1,5 +1,7 @@
 """Useful image filtering helpers."""
 import math
+import warnings
+from typing import NamedTuple
 
 import numpy as np
 import numba
@@ -12,7 +14,7 @@ from skimage.restoration import unwrap_phase
 
 from libertem.masks import radial_bins
 from libertem_holo.base.utils import (
-    fft_shift_coords, other_sb, draw_lf_rect, get_slice_fft,
+    fft_shift_coords, other_sb, _draw_lf_rect, get_slice_fft,
 )
 
 
@@ -53,6 +55,10 @@ def butterworth_disk(shape: tuple[int, int], radius: float, order: int = 12, xp=
     """Generate a filered disk-shaped aperture.
 
     The edges are filtered with a butterworth filter of the given order.
+
+    The result is in fftshifted layout: the disk is centered at
+    `(shape[0] / 2, shape[1] / 2)`, which is the zero frequency of an
+    fftshifted array for even sizes (and half a pixel past it for odd sizes).
 
     Parameters
     ----------
@@ -244,16 +250,32 @@ def line_filter(
 ):
     """Return a line filter for the sideband.
 
-    It can be applied by multiplying it with the aperture. The filter has the
-    zero frequency at the center of the image.
+    It can be applied by multiplying it with the aperture.
+
+    `sb_position` is in native (unshifted) FFT coordinates of `orig_shape`, as
+    in :attr:`HoloParams.sb_position <libertem_holo.base.utils.HoloParams>`.
+    The result is a boolean mask in fftshifted layout (zero frequency at the
+    center), cropped to `out_shape` with
+    :func:`~libertem_holo.base.utils.get_slice_fft` if `crop_to_out_shape`
+    is set.
+
+    .. deprecated:: 1.1.0
+        Use :func:`butterworth_line` instead, which is what
+        :meth:`~libertem_holo.base.utils.HoloParams.from_hologram` uses.
     """
+    warnings.warn(
+        "line_filter is deprecated and will be removed in a future release; "
+        "use butterworth_line instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # we work in original shape, and crop at the end.
     dest = np.zeros(orig_shape, dtype=bool)
 
     # approx. positions of both sidebands (inferred from symmetry):
     sb_pos_shifted = fft_shift_coords(sb_position, orig_shape)
 
-    draw_lf_rect(
+    _draw_lf_rect(
         dest,
         orig_shape=orig_shape,
         sb_position_shifted=sb_pos_shifted,
@@ -280,6 +302,39 @@ def central_line_filter(
     """Return a line filter for the central band.
 
     It can be applied by multiplying it with the aperture.
+
+    Two lines from close to the center towards both sidebands, made with
+    :func:`butterworth_line`.
+
+    Parameters
+    ----------
+    sb_position
+        Position of the sideband in native (unshifted) FFT coordinates of
+        `orig_shape`, as in
+        :attr:`HoloParams.sb_position <libertem_holo.base.utils.HoloParams>`.
+        It is converted to fftshifted coordinates internally.
+
+    out_shape
+        Shape to crop to, if `crop_to_out_shape` is set.
+
+    orig_shape
+        Shape of the hologram.
+
+    length_ratio, width, order
+        See :func:`butterworth_line`.
+
+    crop_to_out_shape
+        Crop the result to `out_shape`, around the center, with
+        :func:`~libertem_holo.base.utils.get_slice_fft`.
+
+    Returns
+    -------
+    np.ndarray
+        The filter in fftshifted layout, centered on the central band (zero
+        frequency at the center). Apply :func:`numpy.fft.fftshift` after
+        cropping to get the native layout used by
+        :attr:`HoloParams.aperture_bf <libertem_holo.base.utils.HoloParams>`.
+
     """
     lf = butterworth_line(
         shape=orig_shape,
@@ -307,75 +362,191 @@ def central_line_filter(
         return dest
 
 
-@numba.njit(cache=True, inline="always")
-def _butterworth_line_kernel(
-    y, x, cy, cx,
-    shape,
-    width,
-    sb_position,
-    length_ratio,
-    order,
-):
-    a = (sb_position[0] - cy) / (sb_position[1] - cx)
-    b = 1
+class _LineGeometry(NamedTuple):
+    r"""Line filter geometry, in pixel coordinates `(y, x)` of the output array.
 
-    # determine starting point:
-    sb_dist = math.sqrt((sb_position[0] - cy)**2 + (sb_position[1] - cx)**2)
-    length = sb_dist * (1 - length_ratio)
+    The output array is in fftshifted layout (zero frequency at the center),
+    so these are fftshifted coordinates. The center `c` is the band the
+    aperture is centered on, and `target` is the band the line points to::
 
-    # right X half:
-    if sb_position[1] - cx >= 0:
-        direction_factor = -1
-    else:
-        direction_factor = 1
+          (1 - length_ratio) * |dir|
+         |<------>|
+         c ------ start ============== target ==============> edge of array
+                 (                    the line continues past `target`
+                  round cap at the start
 
-    # shift to starting point
-    cy += length * (sb_position[0] - cy) / sb_dist
-    cx += length * (sb_position[1] - cx) / sb_dist
+         dir = target - c,  |dir| = target_dist
 
-    c = -1/a
-    x0 = x - cx
-    y0 = y - cy
-    d = y0 - c * x0
-    xc = (d-c)/(a-b)
+    For the sideband aperture, `c` is the sideband and `target` the central
+    band; for the brightfield aperture, it is the other way around.
 
-    if direction_factor * xc < 0:
-        dist = abs(a*x0 - y0 + b)/math.sqrt(a**2 + 1)
-    else:
-        dist = math.sqrt((y-cy-1)**2 + (x-cx)**2)
-    return 1 / math.sqrt(1 + math.pow((dist/width), 2*order))
+    FIXME: these offsets are kept so that the aperture doesn't change within a
+    semver-compatible release:
+
+    * The center `c` is at `shape / 2 - 1`; the zero frequency of an
+      fftshifted array is at `shape // 2`, which is also what
+      :func:`butterworth_disk` uses.
+    * The axis of the line, and the center of its round cap, is at
+      `start + (1, 0)`, i.e. 1 px below (+y) the start point.
+    * The straight part begins at the perpendicular through
+      `start + (0, -1)`, instead of at the center of the round cap.
+    """
+
+    # the line starts at (start_y, start_x)...
+    start_y: float
+    start_x: float
+    # ...and extends in direction (dir_y, dir_x) up to the edge of the array:
+    dir_y: float
+    dir_x: float
+    # dir_y / dir_x, the slope of the axis (inf if it is vertical):
+    slope: float
+    # the slope of the perpendicular, only used to decide whether a pixel is
+    # past the start (inf if the axis is horizontal):
+    perp_slope: float
+    # sqrt(slope**2 + 1); dividing the residual of the axis' line equation,
+    # |slope * x - y + intercept|, by it gives the perpendicular distance:
+    dist_scale: float
 
 
-@numba.njit(cache=True, parallel=True)
-def _butterworth_line_cpu(shape, width, sb_position, length_ratio=0.9, order=12):
-    result = np.zeros(shape, dtype=np.float32)
+def _butterworth_line_geometry(
+    shape: tuple[int, int],
+    target: tuple[float, float],
+    length_ratio: float,
+) -> _LineGeometry:
+    """Compute the geometry of the line filter, see :class:`_LineGeometry`.
+
+    Parameters
+    ----------
+    shape
+        Shape of the output array, which is in fftshifted layout.
+
+    target
+        Position `(y, x)` the line points towards, in fftshifted coordinates
+        of `shape`, i.e. an index into the output array.
+
+    length_ratio
+        See :func:`butterworth_line`.
+
+    Returns
+    -------
+    _LineGeometry
+        In the same (fftshifted) coordinates as `target`.
+
+    """
+    # center, see the FIXME in `_LineGeometry`:
     cy = shape[0] / 2 - 1
     cx = shape[1] / 2 - 1
 
+    dir_y = target[0] - cy
+    dir_x = target[1] - cx
+    target_dist = math.sqrt(dir_y**2 + dir_x**2)
+    if target_dist == 0:
+        msg = (
+            f"sb_position {tuple(target)} is at the center of the aperture, "
+            "so the direction of the line filter is undefined"
+        )
+        raise ValueError(msg)
+    length = target_dist * (1 - length_ratio)
+    slope = dir_y / dir_x if dir_x != 0 else math.inf
+    perp_slope = -1 / slope if dir_y != 0 else math.inf
+    return _LineGeometry(
+        start_y=cy + length * dir_y / target_dist,
+        start_x=cx + length * dir_x / target_dist,
+        dir_y=dir_y,
+        dir_x=dir_x,
+        slope=slope,
+        perp_slope=perp_slope,
+        dist_scale=math.sqrt(slope**2 + 1),
+    )
+
+
+# The kernel below is written in terms of slopes rather than vectors, so that
+# the floating-point results, including which side of the start pixels exactly
+# on the boundary end up on, are bit-identical to earlier versions.
+@numba.njit(cache=True, inline="always")
+def _butterworth_line_kernel(
+    y: int, x: int, geometry: _LineGeometry, width: float, order: int,
+) -> np.float32:
+    """Value of the line filter at pixel `(y, x)`.
+
+    `(y, x)` is an index into the output array, `geometry` is in the same
+    coordinates. Returns 0 on the line and 1 far away from it. The `+ 1` /
+    `- 1` below are the offsets marked FIXME in :class:`_LineGeometry`.
+    """
+    g = geometry
+    off_y = y - g.start_y
+    off_x = x - g.start_x
+
+    # is the pixel past the start, in the direction of the line?
+    # equivalent to `dir_y * off_y + dir_x * (off_x + 1) > 0`
+    if g.dir_y == 0:
+        past_start = g.dir_x * (off_x + 1) > 0
+    else:
+        intercept = off_y - g.perp_slope * off_x
+        past_start = g.dir_y * (intercept - g.perp_slope) > 0
+
+    if past_start:
+        # straight part: perpendicular distance to the axis
+        if g.dir_x == 0:
+            dist = abs(off_x)
+        else:
+            dist = abs(g.slope * off_x - off_y + 1) / g.dist_scale
+    else:
+        # round cap: distance to its center
+        dist = math.sqrt((off_y - 1)**2 + off_x**2)
+    passed = 1 / math.sqrt(1 + math.pow((dist / width), 2 * order))
+    return np.float32(1) - np.float32(passed)
+
+
+@numba.njit(cache=True, parallel=True)
+def _butterworth_line_cpu(
+    shape: tuple[int, int], geometry: _LineGeometry, width: float, order: int,
+) -> np.ndarray:
+    """Line filter of the given `shape`, computed on the CPU.
+
+    `geometry` is in pixel coordinates of the result.
+    """
+    result = np.empty(shape, dtype=np.float32)
     for y in numba.prange(shape[0]):
         for x in range(shape[1]):
-            result[y, x] = _butterworth_line_kernel(
-                y, x, cy, cx,
-                shape,
-                width,
-                sb_position,
-                length_ratio,
-                order,
-            )
-    return 1 - result
+            result[y, x] = _butterworth_line_kernel(y, x, geometry, width, order)
+    return result
+
+
+@cuda.jit
+def _butterworth_line_gpu(
+    result: np.ndarray, geometry: _LineGeometry, width: float, order: int,
+) -> None:
+    """Write the line filter into `result`, on the GPU.
+
+    `geometry` is in pixel coordinates of `result`.
+    """
+    y, x = cuda.grid(2)
+    if x < result.shape[1] and y < result.shape[0]:
+        result[y, x] = _butterworth_line_kernel(y, x, geometry, width, order)
 
 
 def butterworth_line(
     shape: tuple[int, int],
     width: float,
-    sb_position: tuple[int, int],
+    sb_position: tuple[float, float],
     length_ratio: float = 0.9,
     order: int = 12,
     xp=np
 ):
     """Generate a line filter.
 
-    This is useful to remove fresnel fringes.
+    This is useful to remove fresnel fringes. The result is a mask that is one
+    everywhere except for a line with butterworth-filtered edges, which
+    is zero. The line starts close to the center of the array and points
+    towards `sb_position`, extending up to the edge of the array.
+
+    Both `sb_position` and the result are in fftshifted layout (zero frequency
+    at the center), like :func:`butterworth_disk`. To get the native layout
+    used by :class:`~libertem_holo.base.utils.HoloParams`, crop with
+    :func:`~libertem_holo.base.utils.get_slice_fft` and apply
+    :func:`numpy.fft.fftshift`, as in
+    :meth:`~libertem_holo.base.utils.HoloParams.from_hologram`.
 
     Parameters
     ----------
@@ -385,54 +556,45 @@ def butterworth_line(
     width
         width of the line in pixels
 
+    sb_position
+        Position `(y, x)` that the line points towards, in fftshifted
+        coordinates of `shape`, i.e. an index into the result. For an aperture
+        centered on the sideband, this is where the central band is (in
+        :meth:`~libertem_holo.base.utils.HoloParams.from_hologram`, that is
+        :code:`fft_shift_coords(sb_position, shape)`, with the native
+        :attr:`HoloParams.sb_position <libertem_holo.base.utils.HoloParams>`),
+        and vice versa.
+
+    length_ratio
+        Length of the line from its start to `sb_position`, as a fraction of
+        the distance from the center to `sb_position`. The part close to the
+        center is left out.
+
     order
         order of the butterworth filter
 
     xp
         Either numpy or cupy
     """
+    geometry = _butterworth_line_geometry(
+        shape=shape,
+        target=sb_position,
+        length_ratio=length_ratio,
+    )
     if xp is np:
-        return _butterworth_line_cpu(
-            shape=shape,
-            width=width,
-            sb_position=sb_position,
-            length_ratio=length_ratio,
-            order=order,
-        )
+        return _butterworth_line_cpu(shape, geometry, width, order)
     else:
         import cupy as cp
-        result = cp.zeros(shape, dtype=np.float32)
+        result = cp.empty(shape, dtype=np.float32)
         size = 16
         threadsperblock = (size, size)
         blockspergrid_x = math.ceil(result.shape[0] / threadsperblock[0])
         blockspergrid_y = math.ceil(result.shape[1] / threadsperblock[1])
         blockspergrid = (blockspergrid_x, blockspergrid_y)
         _butterworth_line_gpu[blockspergrid, threadsperblock](
-            result,
-            width,
-            sb_position,
-            length_ratio,
-            order,
+            result, geometry, width, order,
         )
-        return 1 - result
-
-
-@cuda.jit
-def _butterworth_line_gpu(
-    result, width, sb_position, length_ratio=0.9, order=12
-):
-    y, x = cuda.grid(2)
-    if x < result.shape[1] and y < result.shape[0]:
-        cy = result.shape[0] / 2 - 1
-        cx = result.shape[1] / 2 - 1
-        result[y, x] = _butterworth_line_kernel(
-            y, x, cy, cx,
-            result.shape,
-            width,
-            sb_position,
-            length_ratio,
-            order,
-        )
+        return result
 
 
 def hanning_2d(shape: tuple[int, int], xp=np):
