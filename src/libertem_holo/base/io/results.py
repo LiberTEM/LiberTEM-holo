@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -57,7 +57,7 @@ class Results:
         tuple[int, int],
         npd.Float16DType | npd.Float32DType | npd.Float64DType,
     ] | None = None
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def metadata_from_input(
         self,
