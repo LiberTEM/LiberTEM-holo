@@ -159,7 +159,9 @@ class InputData:
         """Turn this InputData into a LiberTEM dataset usable for running a UDF.
 
         If this InputData wraps a LiberTEM DataSet, that DataSet is returned
-        as-is.
+        as-is. Other sources that were not loaded from disk (for example
+        created using :meth:`from_array`) are passed in as an in-memory
+        dataset.
         """
         first = self.files[0]
         if len(self.files) == 1 and isinstance(first, DataSetInput):
@@ -167,7 +169,10 @@ class InputData:
         if any(isinstance(f, DataSetInput) for f in self.files):
             msg = "can't combine a LiberTEM DataSet with other input sources"
             raise ValueError(msg)
-        if len(self.files) == 1:
+        if any(f.path is None for f in self.files):
+            data = np.stack([self.zslice(z) for z in range(self.shape[0])])
+            ds = ctx.load("memory", data=data, sig_dims=2)
+        elif len(self.files) == 1:
             # single-file dm dataset
             ds = ctx.load("dm", path=self.files[0].path)
         else:
