@@ -48,8 +48,81 @@ log = logging.getLogger(__name__)
 XPType = typing.Any  # Union[Module("numpy"), Module("cupy")]
 
 
+class HologramFFT:
+    """The FFT of a hologram, to share between multiple reconstruction calls.
+
+    The FFT is computed once, in the constructor. Instances can be passed
+    to :func:`reconstruct_frame` and :func:`reconstruct_bf` in place of the
+    hologram, which saves the FFT when reconstructing both the complex wave
+    and the brightfield image from the same hologram.
+
+    Parameters
+    ----------
+    frame
+        A numpy or cupy array containing the input hologram
+    precision
+        If False, the hologram is converted to float32 before the FFT,
+        resulting in complex64 results. See also :func:`reconstruct_frame`.
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
+
+    Examples
+    --------
+    >>> from libertem_holo.base.generate import hologram_frame
+    >>> holo = hologram_frame(np.ones((64, 64)), np.zeros((64, 64)))
+    >>> params = HoloParams.from_hologram(holo, out_shape=(32, 32))
+    >>> holo_fft = HologramFFT(holo)
+    >>> wave = reconstruct_frame(
+    ...     holo_fft,
+    ...     sb_pos=params.sb_position,
+    ...     aperture=params.aperture,
+    ...     slice_fft=params.slice_fft,
+    ... )
+    >>> bf = reconstruct_bf(
+    ...     holo_fft,
+    ...     aperture=params.aperture_bf,
+    ...     slice_fft=params.slice_fft,
+    ... )
+    >>> wave.shape, bf.shape
+    ((32, 32), (32, 32))
+
+    """
+
+    def __init__(  # noqa: D107 (parameters are documented on the class)
+        self,
+        frame: np.ndarray[tuple[int, int]],
+        *,
+        precision: bool = True,
+        xp: XPType = np,
+    ) -> None:
+        frame = xp.array(frame)
+        if not precision:
+            frame = frame.astype(np.float32)
+        self.shape = frame.shape
+        #: unnormalized and not fft-shifted
+        self.fft = xp.fft.fft2(frame)
+        self.xp = xp
+
+
+def _as_hologram_fft(
+    frame: np.ndarray | HologramFFT,
+    *,
+    precision: bool,
+    xp: XPType,
+) -> HologramFFT:
+    if isinstance(frame, HologramFFT):
+        if frame.xp is not xp:
+            msg = (
+                f"HologramFFT was computed with {frame.xp.__name__}, "
+                f"but {xp.__name__} was requested"
+            )
+            raise ValueError(msg)
+        return frame
+    return HologramFFT(frame, precision=precision, xp=xp)
+
+
 def reconstruct_frame(
-    frame: np.ndarray[tuple[int, int]],
+    frame: np.ndarray[tuple[int, int]] | HologramFFT,
     sb_pos: tuple[float, float],
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
@@ -62,7 +135,8 @@ def reconstruct_frame(
     Parameters
     ----------
     frame
-        A numpy or cupy array containing the input hologram
+        A numpy or cupy array containing the input hologram, or a
+        :class:`HologramFFT` of it
     sb_pos
         The sideband position in native (unshifted) FFT coordinates, for
         example as returned by `estimate_sideband_position`
@@ -75,18 +149,17 @@ def reconstruct_frame(
         as returned by `get_slice_fft`.
     precision
         Defines precision of the reconstruction, True for complex128 for the
-        resulting complex wave, otherwise results will be complex64
+        resulting complex wave, otherwise results will be complex64.
+        Ignored if `frame` is a :class:`HologramFFT`, which has the
+        precision set at construction time.
     xp
         Pass in either the numpy or cupy module to select CPU or GPU processing
 
     """
-    frame = xp.array(frame)
+    holo_fft = _as_hologram_fft(frame, precision=precision, xp=xp)
+    frame_size = holo_fft.shape
 
-    if not precision:
-        frame = frame.astype(np.float32)
-    frame_size = frame.shape
-
-    fft_frame = xp.fft.fft2(frame) / np.prod(frame_size)
+    fft_frame = holo_fft.fft / np.prod(frame_size)
     fft_frame = xp.roll(fft_frame, xp.array(sb_pos).astype(xp.int64), axis=(0, 1))
 
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
@@ -367,7 +440,7 @@ def get_phase(
 
 
 def reconstruct_bf(
-    frame: np.ndarray[tuple[int, int]],
+    frame: np.ndarray[tuple[int, int]] | HologramFFT,
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
     *,
@@ -375,14 +448,16 @@ def reconstruct_bf(
 ) -> np.ndarray:
     """Reconstruct a brightfield image from a hologram.
 
+    `frame` can be either a numpy or cupy array containing the hologram,
+    or a :class:`HologramFFT` of it.
+
     Please use :func:`libertem_holo.base.filters.central_line_filter` to
     filter out fresnel fringes as appropriate.
 
     `aperture` is in native layout (zero frequency at `[0, 0]`), like
     :attr:`HoloParams.aperture_bf <libertem_holo.base.utils.HoloParams>`.
     """
-    frame = xp.array(frame)
-    fft_frame = xp.fft.fft2(frame)
+    fft_frame = _as_hologram_fft(frame, precision=True, xp=xp).fft
     fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
 
     fft_frame = fft_frame * xp.array(aperture)
