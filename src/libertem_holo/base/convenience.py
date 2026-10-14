@@ -8,6 +8,7 @@ from scipy.ndimage import gaussian_filter
 from libertem_holo.base.align import Correlator, ImageCorrelator
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.reconstr import (
+    HologramFFT,
     phase_offset_correction,
     reconstruct_bf,
     reconstruct_frame,
@@ -244,9 +245,10 @@ def _reconstruct_waves_loop(
     aperture_bf = xp.asarray(holoparams.aperture_bf)
 
     for i in tqdm(range(len(stack.data)), disable=not progress):
-        frame = xp.asarray(stack.data[i])
+        # FFT once, shared between wave and brightfield reconstruction:
+        holo_fft = HologramFFT(stack.data[i], xp=xp)
         waves[i] = reconstruct_frame(
-            frame=frame,
+            frame=holo_fft,
             sb_pos=holoparams.sb_position,
             aperture=aperture,
             slice_fft=holoparams.slice_fft,
@@ -254,7 +256,7 @@ def _reconstruct_waves_loop(
         )
         if bfs is not None:
             bfs[i] = reconstruct_bf(
-                frame=frame,
+                frame=holo_fft,
                 aperture=aperture_bf,
                 slice_fft=holoparams.slice_fft,
                 xp=xp,
