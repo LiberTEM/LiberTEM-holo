@@ -245,7 +245,7 @@ def plot_mag_induction(
     emp.vis.colorwheel(cmap=cmap, axis=axis)
 
     if mask is not None:
-        mask_binned = br(mask, (binning, binning), np.mean)
+        mask_binned = br(mask, binning, np.mean)
         mask_field = emp.fields.Field(data=mask_binned, scale=1, vector=False)
 
         emp.vis.contour(
