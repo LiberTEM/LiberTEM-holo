@@ -142,6 +142,35 @@ The :func:`libertem_holo.base.io.InputData.tags_for_slice` method
 can also be used with single-file stacks, but will
 give back the same tags for every slice.
 
+Loading from a LiberTEM dataset
+-------------------------------
+
+Any data that LiberTEM can load can be wrapped as
+:class:`libertem_holo.base.io.InputData` using
+:func:`libertem_holo.base.io.InputData.load_from_libertem_dataset`.
+Slices are read lazily when they are accessed. Navigation dimensions
+are flattened, and metadata like the pixel size can be passed explicitly:
+
+.. testcode:: load_from_libertem
+   :skipif: path_to_data is None
+
+   from libertem.api import Context
+   from libertem_holo.base.io import InputData
+
+   ctx = Context.make_with("inline")
+   ds = ctx.load("dm", path=path_to_data)
+   input_data_ds = InputData.load_from_libertem_dataset(ds, pixelsize=0.167e-9)
+   print(f"stack shape: {input_data_ds.shape}")
+   print(f"shape of the first image: {input_data_ds.data[0].shape}")
+
+.. testoutput:: load_from_libertem
+
+   stack shape: (20, 3838, 3710)
+   shape of the first image: (3838, 3710)
+
+Conversely, :func:`libertem_holo.base.io.InputData.into_libertem_dataset`
+gives you a LiberTEM dataset to run UDFs on.
+
 Assumptions
 -----------
 
