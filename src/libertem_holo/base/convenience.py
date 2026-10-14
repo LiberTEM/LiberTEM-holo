@@ -215,7 +215,7 @@ def plot_mag_induction(
     - an optional white contour showing the supplied mask.
 
     """
-    phase_binned = br(phase, (binning, binning), np.mean)
+    phase_binned = br(phase, binning, np.mean)
 
     phase_field = emp.fields.Field(
         data=gaussian_filter(phase_binned, sigma=smooth),

@@ -57,7 +57,7 @@ class Results:
         tuple[int, int],
         npd.Float16DType | npd.Float32DType | npd.Float64DType,
     ] | None = None
-    metadata: dict[str, Any] | None = None
+    metadata: dict[str, Any] = {}
 
     def metadata_from_input(
         self,
@@ -82,8 +82,6 @@ class Results:
             The :class:`HoloParams` used for the reconstruction
 
         """
-        if self.metadata is None:
-            self.metadata = {}
         self.metadata["stack_shape"] = list(input_data.shape)
         self.metadata["exposure_time"] = float(input_data.exposure_time)
         if params is not None and input_data.pixelsize is not None:
