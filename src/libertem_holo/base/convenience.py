@@ -93,9 +93,6 @@ def reconstruct_stack(
             msg = "Need Cupy for the cupy backend."
             raise RuntimeError(msg)
         xp = cp
-        if ctx is not None:
-            msg = "`ctx` is only used with the libertem backend"
-            raise ValueError(msg)
     elif backend == "libertem":
         if ctx is None:
             msg = "The libertem backend needs a `Context` passed in as `ctx`"
