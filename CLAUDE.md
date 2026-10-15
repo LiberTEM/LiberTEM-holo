@@ -76,7 +76,8 @@ Tests that need real data use the `dm_testdata_path` fixture (`conftest.py`), wh
   `pyproject.toml` with `select = ["ALL"]`; existing code has many findings.
   **New files must pass `uvx ruff check <file>`**; in existing files, don't add new findings.
 - pre-commit runs flake8 (max line length 100, `setup.cfg`); pyright is configured for `src/`
-  (`pyrightconfig.json`, Python 3.10 baseline).
+  (`pyrightconfig.json`, Python 3.10 baseline). Run `uvx pre-commit install` before committing
+  to ensure its hooks are installed (idempotent).
 - Docstrings use numpy style; doctests that need data or files use `# doctest: +SKIP`.
 - API naming (e.g. `load_from_*` vs `from_*` constructors) is not settled; follow the
   surrounding code and mention the choice.
