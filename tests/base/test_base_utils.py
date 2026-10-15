@@ -8,6 +8,8 @@ from libertem_holo.base.utils import (
     HoloParams,
     estimate_sideband_position,
     _hard_disk_aperture,
+    _mask_threshold,
+    _sideband_max,
 )
 from libertem_holo.base.reconstr import reconstruct_frame
 
@@ -177,6 +179,29 @@ def _get_xp(backend):  # noqa: ANN202
     return np
 
 
+def _assert_same_sideband(holo, result, expected, sb):  # noqa: ANN202
+    """Assert that `result` ties with `expected`, up to FFT rounding errors.
+
+    Where the maximum is not unique, like for conjugate pixels in row 0, or if
+    the searched half only contains noise, the position depends on how the FFT
+    implementation rounds (cuFFT vs. numpy).
+    """
+    if sb == "lower":
+        row_start, row_stop = 0, int(holo.shape[0] / 2)
+    else:
+        row_start, row_stop = int(holo.shape[0] / 2), holo.shape[0]
+    assert row_start <= result[0] < row_stop
+    magnitude = np.abs(np.fft.fft2(holo))
+    pos = tuple(int(c) for c in result)
+    pos_expected = tuple(int(c) for c in expected)
+    # rounding errors of the FFT are a few `eps * max`, real differences
+    # between peaks are orders of magnitude larger:
+    atol = 1e-9 * magnitude.max()
+    assert np.isclose(magnitude[pos], magnitude[pos_expected], rtol=0, atol=atol), (
+        f"{result} doesn't tie with {expected}"
+    )
+
+
 @pytest.mark.parametrize("backend", ["numpy", "cupy"])
 @pytest.mark.parametrize("shape", [(64, 64), (48, 80), (63, 65), (31, 17), (128, 128)])
 @pytest.mark.parametrize("f_angle", [0, 30, 90, 137.5])
@@ -196,8 +221,67 @@ def test_estimate_sideband_position_vs_reference(  # noqa: PLR0917
     result = estimate_sideband_position(
         xp.asarray(holo), (1, 1), central_band_mask_radius=radius, sb=sb, xp=xp,
     )
-    assert result == expected
+    if backend == "numpy":
+        assert result == expected
+    else:
+        _assert_same_sideband(holo, result, expected, sb)
     assert all(isinstance(c, float) for c in result)
+
+
+@pytest.mark.parametrize(
+    ("shape", "sampling", "sb"), [
+        ((48, 80), 3.3, "lower"),
+        ((63, 65), 5.0, "upper"),
+    ],
+)
+@pytest.mark.parametrize(
+    # With f_angle=90, the sideband is in row 0: for `lower`, |F(0, k)| and
+    # |F(0, -k)| tie exactly with numpy's FFT, and for `upper`, only noise is
+    # left, so the position depends on the rounding of the FFT. These are the
+    # configurations that failed with cuFFT before ties were accepted.
+    "f_angle", [0, 30, 90, 137.5],
+)
+def test_sideband_position_fft_rounding(shape, sampling, sb, f_angle):
+    """`_assert_same_sideband` accepts results from a differently rounding FFT."""
+    holo = hologram_frame(
+        np.ones(shape), np.zeros(shape), sampling=sampling, f_angle=f_angle,
+    )
+    expected = _estimate_sideband_position_reference(
+        holo, (1, 1), central_band_mask_radius=2.2, sb=sb,
+    )
+    fft = np.fft.fft2(holo)
+    if sb == "lower":
+        row_start, row_stop = 0, int(shape[0] / 2)
+    else:
+        row_start, row_stop = int(shape[0] / 2), shape[0]
+    # emulate a different FFT implementation (like cuFFT) by errors of the size
+    # of the FFT's rounding errors:
+    scale = np.finfo(np.float64).eps * np.abs(fft).max()
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        noise = rng.standard_normal(fft.shape) + 1j * rng.standard_normal(fft.shape)
+        result = _sideband_max(
+            fft + scale * noise, row_start, row_stop, _mask_threshold(2.2), xp=np,
+        )
+        _assert_same_sideband(holo, result, expected, sb)
+
+
+@pytest.mark.parametrize("f_angle", [30, 90])
+def test_assert_same_sideband_rejects_other_peak(f_angle):
+    shape = (48, 80)
+    holo = hologram_frame(
+        np.ones(shape), np.zeros(shape), sampling=3.3, f_angle=f_angle,
+    )
+    expected = _estimate_sideband_position_reference(
+        holo, (1, 1), central_band_mask_radius=2.2, sb="lower",
+    )
+    # the next smaller peak, after removing the sideband (and its tie):
+    fft = np.fft.fft2(holo)
+    peak = np.abs(fft[tuple(int(c) for c in expected)])
+    fft[np.abs(fft) >= 0.99 * peak] = 0
+    other = _sideband_max(fft, 0, int(shape[0] / 2), _mask_threshold(2.2), xp=np)
+    with pytest.raises(AssertionError, match="doesn't tie"):
+        _assert_same_sideband(holo, other, expected, "lower")
 
 
 @pytest.mark.parametrize("backend", ["numpy", "cupy"])
