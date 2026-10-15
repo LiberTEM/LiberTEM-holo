@@ -206,3 +206,31 @@ def test_estimate_sideband_position_numba(sb):
     holo = hologram_frame(np.ones((32, 33)), np.zeros((32, 33)), f_angle=30)
     expected = _estimate_sideband_position_reference(holo, (1, 1), sb=sb)
     assert estimate_sideband_position(holo, (1, 1), sb=sb) == expected
+
+
+@pytest.mark.parametrize("backend", ["numpy", "cupy"])
+@pytest.mark.parametrize(
+    ("shape", "peaks", "expected"), [
+        # tie within a row (on the GPU: between two threads): smaller x
+        pytest.param((8, 16), {(3, 7): 2.0, (3, 3): 2.0}, (3, 3), id="tie-x"),
+        # tie across rows (on the GPU: between blocks): first row
+        pytest.param((8, 16), {(3, 2): 2.0, (2, 9): 2.0}, (2, 9), id="tie-rows"),
+        # rows longer than the GPU block of 256 threads, so a thread handles
+        # several pixels (x=5 and x=261 by the same thread):
+        pytest.param((4, 300), {(1, 261): 2.0, (1, 5): 1.0}, (1, 261), id="wrap"),
+        pytest.param((4, 300), {(1, 261): 2.0, (1, 5): 2.0}, (1, 5), id="wrap-tie"),
+        pytest.param((4, 300), {(1, 290): 1j}, (1, 290), id="wrap-imag"),
+        # only values in the central band mask, or none at all:
+        pytest.param((8, 16), {(0, 0): 5.0, (0, 1): 3.0}, (0, 0), id="masked-only"),
+        pytest.param((8, 16), {}, (0, 0), id="zeros"),
+    ],
+)
+def test_sideband_max_synthetic(backend, shape, peaks, expected):
+    xp = _get_xp(backend)
+    fft = np.zeros(shape, dtype=np.complex128)
+    for pos, value in peaks.items():
+        fft[pos] = value
+    result = _sideband_max(
+        xp.asarray(fft), 0, shape[0] // 2, _mask_threshold(2.2), xp=xp,
+    )
+    assert result == expected
