@@ -183,17 +183,21 @@ def test_hologram_fft_equivalence(backend: str, precision, holo_stack) -> None:
     )
     # the same `holo_fft` is re-used for the brightfield:
     bf_ref = reconstruct_bf(
-        frame, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=xp,
+        frame, aperture=p.aperture_bf, slice_fft=p.slice_fft, precision=precision, xp=xp,
     )
     bf = reconstruct_bf(
         holo_fft, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=xp,
     )
 
-    # same operations in the same order, so the results are bit-identical:
+    # the array path transforms only the needed columns of the spectrum, the
+    # HologramFFT path the complete half spectrum, so they agree up to rounding:
+    tol = 1e-10 if precision else 1e-5
     assert wave.dtype == wave_ref.dtype
-    assert np.array_equal(to_cpu(wave), to_cpu(wave_ref))
+    wave, wave_ref = to_cpu(wave), to_cpu(wave_ref)
+    assert np.allclose(wave, wave_ref, rtol=tol, atol=tol * np.abs(wave_ref).max())
     assert bf.dtype == bf_ref.dtype
-    assert np.array_equal(to_cpu(bf), to_cpu(bf_ref))
+    bf, bf_ref = to_cpu(bf), to_cpu(bf_ref)
+    assert np.allclose(bf, bf_ref, rtol=tol, atol=tol * np.abs(bf_ref).max())
 
 
 def test_hologram_fft_xp_mismatch(holo_stack) -> None:
