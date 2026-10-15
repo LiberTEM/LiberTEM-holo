@@ -8,6 +8,7 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.generate import hologram_frame
+from libertem_holo.base.plan import ReconstructionPlan
 from libertem_holo.base.reconstr import (
     HologramFFT,
     reconstruct_bf,
@@ -84,12 +85,17 @@ def test_reconstruct_frame(
     "backend", ["numpy", "cupy"],
 )
 @pytest.mark.parametrize(
-    "shared_fft", [False, True],
+    "variant", ["separate", "shared_fft", "plan"],
 )
 def test_reconstruct_wave_bf(
-    backend: str, shared_fft: bool, benchmark: Any, holo_4k: np.ndarray,  # noqa: ANN401, FBT001
+    backend: str, variant: str, benchmark: Any, holo_4k: np.ndarray,  # noqa: ANN401
 ) -> None:
-    """Time wave + brightfield from one hologram, with and without shared FFT."""
+    """Time wave + brightfield from one hologram.
+
+    `separate`: two calls on the array; `shared_fft`: both from one
+    `HologramFFT`; `plan`: a `ReconstructionPlan` built once, which also
+    skips the unused spectrum columns and reuses its buffer.
+    """
     xp = _get_xp(backend)
     params = HoloParams.from_hologram(
         holo_4k, out_shape=(1024, 1024), central_band_mask_radius=100, xp=xp,
@@ -97,9 +103,14 @@ def test_reconstruct_wave_bf(
     aperture = xp.asarray(params.aperture)
     aperture_bf = xp.asarray(params.aperture_bf)
 
+    if variant == "plan":
+        plan = ReconstructionPlan.from_params(params, xp=xp)
+        benchmark(_synced(lambda: plan.wave_and_bf(holo_4k), xp))
+        return
+
     def _wave_bf() -> tuple[Any, Any]:
         # including the FFT, which is the part we save on:
-        frame = HologramFFT(holo_4k, xp=xp) if shared_fft else holo_4k
+        frame = HologramFFT(holo_4k, xp=xp) if variant == "shared_fft" else holo_4k
         wave = reconstruct_frame(
             frame,
             sb_pos=params.sb_position,
