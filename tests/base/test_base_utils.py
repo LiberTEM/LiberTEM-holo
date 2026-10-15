@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
 
+from libertem_holo.base.reconstr import reconstruct_frame
 from libertem_holo.base.utils import (
-    remove_phase_ramp,
     HoloParams,
     _hard_disk_aperture,
+    remove_phase_ramp,
 )
-from libertem_holo.base.reconstr import reconstruct_frame
 
 
 @pytest.mark.parametrize(
@@ -33,10 +33,10 @@ def test_remove_phase_ramp(shape, ramp_yx, method):
     ramp_y, ramp_x = ramp_yx
     yy = np.arange(0, shape[0], 1)
     xx = np.arange(0, shape[1], 1)
-    y, x = np.meshgrid(yy, xx, indexing='ij')
+    y, x = np.meshgrid(yy, xx, indexing="ij")
     ramp = ramp_x * x + ramp_y * y
 
-    img_without_ramp, detected_ramp, (ramp_y_det, ramp_x_det) = remove_phase_ramp(
+    img_without_ramp, detected_ramp, (_ramp_y_det, _ramp_x_det) = remove_phase_ramp(
         ramp,
         roi=None,
         method=method,
@@ -68,14 +68,14 @@ def test_remove_phase_ramp(shape, ramp_yx, method):
 )
 @pytest.mark.parametrize(
     "roi_method", [
-        "arr", "slice"
-    ]
+        "arr", "slice",
+    ],
 )
 def test_remove_phase_ramp_with_roi(shape, ramp_yx, method, roi_method):
     ramp_y, ramp_x = ramp_yx
     yy = np.arange(0, shape[0], 1)
     xx = np.arange(0, shape[1], 1)
-    y, x = np.meshgrid(yy, xx, indexing='ij')
+    y, x = np.meshgrid(yy, xx, indexing="ij")
     ramp = ramp_x * x + ramp_y * y
 
     # put the ramp into a larger zero array to ensure we are looking at the
@@ -88,7 +88,7 @@ def test_remove_phase_ramp_with_roi(shape, ramp_yx, method, roi_method):
     if roi_method == "arr":
         roi = space[slice_in_shape]
 
-    img_without_ramp, detected_ramp, (ramp_y_det, ramp_x_det) = remove_phase_ramp(
+    img_without_ramp, detected_ramp, (_ramp_y_det, _ramp_x_det) = remove_phase_ramp(
         space,
         roi=roi,
         method=method,
@@ -101,7 +101,7 @@ def test_remove_phase_ramp_with_roi(shape, ramp_yx, method, roi_method):
 
 
 def test_line_filter_width_0(holo_data) -> None:
-    holo, ref, phase_ref, slice_crop = holo_data
+    _holo, ref, _phase_ref, _slice_crop = holo_data
 
     p = HoloParams.from_hologram(
         ref[0, 0],
@@ -116,7 +116,7 @@ def test_line_filter_width_0(holo_data) -> None:
         slice_fft=p.slice_fft,
     )
 
-    assert not np.any(np.isnan(wave), )
+    assert not np.any(np.isnan(wave))
 
 
 @pytest.mark.parametrize("shape", [(64, 64), (63, 65), (31, 17)])
