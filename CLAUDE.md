@@ -62,6 +62,12 @@ Tests that need real data use the `dm_testdata_path` fixture (`conftest.py`), wh
   `.. testcode::` blocks in `docs/source/*.rst`, which skip without test data)
 - `docs`: live-reloading docs server on port 8008
 - `mypy`, `numba_coverage` (`NUMBA_DISABLE_JIT=1`, `-m with_numba`)
+- `cuda-compile`: compile the CUDA kernels to PTX for the lowest and highest compute capability
+  the toolkit supports (`-m cuda_compile`, toolkit from the `cuda-toolkit` pip wheels, no GPU needed).
+  Runs in GitHub CI (`cuda-kernels` job); new `@cuda.jit` kernels belong in
+  `tests/base/test_cuda_kernels.py`. There are deliberately no simulator tests: numba's CUDA
+  simulator is slow and its shared arrays race under coverage. Test GPU behaviour with cupy tests
+  that skip without a GPU; without a GPU, only compilation is checked.
 - `notebooks` / `notebooks_gen`: run or regenerate `notebooks/*.ipynb`
 
 ## Style and linting

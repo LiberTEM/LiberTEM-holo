@@ -33,6 +33,11 @@ from functools import lru_cache
 from typing import Any, Literal
 import typing
 import logging
+import warnings
+import math
+
+import numba
+from numba import cuda
 
 try:
     import cupy as cp
@@ -84,7 +89,11 @@ def get_slice_fft(
     out_shape: tuple[int, int],
     sig_shape: tuple[int, int],
 ) -> tuple[slice, slice]:
-    """Get a slice in fourier space to achieve the given output shape."""
+    """Get a slice in fourier space to achieve the given output shape.
+
+    The slice is centered, so it has to be applied to an fftshifted array
+    (zero frequency at the center); the cropped result is fftshifted, too.
+    """
     sy, sx = sig_shape
     oy, ox = out_shape
 
@@ -101,7 +110,134 @@ def _hard_disk_aperture(shape: tuple[int, int], radius: float, xp=np):
     ys, xs = xp.meshgrid(xp.arange(shape[0]), xp.arange(shape[1]), indexing='ij')
     result = xp.zeros(shape, dtype=bool)
     result[np.sqrt((xs - cx)**2 + (ys - cy)**2) < radius] = 1
-    return np.fft.fftshift(result)
+    # `ifftshift` moves index (cy, cx) to (0, 0), also for odd shapes:
+    return np.fft.ifftshift(result)
+
+
+@numba.njit(cache=True, inline="always")
+def _signed_freq_index(j: int, n: int) -> int:
+    """Signed frequency index of index `j` of an unshifted FFT of size `n`."""
+    if j < n - n // 2:
+        return j
+    return j - n
+
+
+@numba.njit(cache=True, inline="always")
+def _masked_power(z: complex, dy: int, dx: int, threshold: int) -> float:
+    """Squared magnitude of `z`, or 0 if inside the central band mask."""
+    if dy * dy + dx * dx < threshold:
+        return 0.0
+    re = float(z.real)
+    im = float(z.imag)
+    return re * re + im * im
+
+
+@numba.njit(cache=True, parallel=True)
+def _sideband_max_cpu(
+    fft: np.ndarray, row_start: int, row_stop: int, threshold: int,
+) -> tuple[int, int]:
+    sy, sx = fft.shape
+    n_rows = row_stop - row_start
+    row_max = np.full(n_rows, -1.0)
+    row_arg = np.zeros(n_rows, dtype=np.int64)
+    for i in numba.prange(n_rows):
+        y = row_start + i
+        dy = _signed_freq_index(y, sy)
+        best = -1.0
+        best_x = 0
+        for x in range(sx):
+            dx = _signed_freq_index(x, sx)
+            v = _masked_power(fft[y, x], dy, dx, threshold)
+            if v > best:
+                best = v
+                best_x = x
+        row_max[i] = best
+        row_arg[i] = best_x
+    # sequential, so ties resolve to the first occurrence in row-major order:
+    best_i = 0
+    for i in range(1, n_rows):
+        if row_max[i] > row_max[best_i]:
+            best_i = i
+    return row_start + best_i, row_arg[best_i]
+
+
+_SB_THREADS = 256
+
+
+@cuda.jit(cache=True)
+def _sideband_max_gpu(
+    fft: np.ndarray,
+    row_start: int,
+    threshold: int,
+    row_max: np.ndarray,
+    row_arg: np.ndarray,
+) -> None:
+    # one block per row; ties resolve to the smallest x
+    i = cuda.blockIdx.x
+    tid = cuda.threadIdx.x
+    y = row_start + i
+    sy, sx = fft.shape
+    dy = _signed_freq_index(y, sy)
+    best = -1.0
+    best_x = 0
+    for x in range(tid, sx, _SB_THREADS):
+        dx = _signed_freq_index(x, sx)
+        v = _masked_power(fft[y, x], dy, dx, threshold)
+        if v > best:
+            best = v
+            best_x = x
+    s_max = cuda.shared.array(_SB_THREADS, numba.float64)
+    s_arg = cuda.shared.array(_SB_THREADS, numba.int64)
+    s_max[tid] = best
+    s_arg[tid] = best_x
+    cuda.syncthreads()
+    step = _SB_THREADS // 2
+    while step > 0:
+        if tid < step:
+            other = s_max[tid + step]
+            other_x = s_arg[tid + step]
+            if other > s_max[tid] or (other == s_max[tid] and other_x < s_arg[tid]):
+                s_max[tid] = other
+                s_arg[tid] = other_x
+        cuda.syncthreads()
+        step //= 2
+    if tid == 0:
+        row_max[i] = s_max[0]
+        row_arg[i] = s_arg[0]
+
+
+def _sideband_max(
+    fft: np.ndarray, row_start: int, row_stop: int, threshold: int, xp: XPType,
+) -> tuple[int, int]:
+    """Position of the maximum of `|fft|` outside the central band mask.
+
+    Searches rows `[row_start, row_stop)` of the unshifted `fft`, and
+    returns the first occurrence in row-major order, like `argmax`.
+    """
+    if xp is np:
+        y, x = _sideband_max_cpu(fft, row_start, row_stop, threshold)
+        return int(y), int(x)
+    n_rows = row_stop - row_start
+    row_max = xp.empty(n_rows, dtype=np.float64)
+    row_arg = xp.empty(n_rows, dtype=np.int64)
+    _sideband_max_gpu[n_rows, _SB_THREADS](fft, row_start, threshold, row_max, row_arg)
+    row_max = to_cpu(row_max)
+    row_arg = to_cpu(row_arg)
+    i = int(np.argmax(row_max))  # first occurrence
+    return row_start + i, int(row_arg[i])
+
+
+def _mask_threshold(radius: float) -> int:
+    """Smallest integer `t` with `sqrt(t) >= radius`.
+
+    For integer `d2`, `d2 < t` is then equivalent to `sqrt(d2) < radius`.
+    """
+    t = max(0, math.ceil(radius * radius))
+    while t > 0 and math.sqrt(t - 1) >= radius:
+        t -= 1
+    while math.sqrt(t) < radius:
+        t += 1
+    return t
 
 
 def estimate_sideband_position(
@@ -131,46 +267,36 @@ def estimate_sideband_position(
     Tuple of the sideband position (y, x), referred to the unshifted FFT.
 
     """
-    sb_position = (0, 0)
-
-    f_freq = freq_array(holo_data.shape, holo_sampling, xp=xp)
+    if sb == "lower":
+        row_start, row_stop = 0, int(holo_data.shape[0] / 2)
+    elif sb == "upper":
+        # NOTE: row 0 is not searched here, so a sideband in row 0 is only
+        # found with `sb="lower"`
+        row_start, row_stop = int(holo_data.shape[0] / 2), holo_data.shape[0]
+    else:
+        msg = f"unknown sideband {sb!r}, should be 'lower' or 'upper'"
+        raise ValueError(msg)
 
     # If aperture radius of centerband is not given, it will be set to 5 % of
     # the Nyquist frequency.
     if central_band_mask_radius is None:
-        central_band_mask_radius = np.mean(holo_data.shape) / 20.0 * np.max(f_freq)
+        # the maximum of `freq_array(holo_data.shape, holo_sampling)`:
+        sy, sx = holo_data.shape
+        max_freq_y = np.max(np.abs(np.fft.fftfreq(sy, holo_sampling[0])))
+        max_freq_x = np.max(np.abs(np.fft.fftfreq(sx, holo_sampling[1])))
+        max_freq = np.hypot(max_freq_x, max_freq_y)
+        central_band_mask_radius = np.mean(holo_data.shape) / 20.0 * max_freq
 
-    aperture = _hard_disk_aperture(
-        holo_data.shape,
-        central_band_mask_radius,
-        xp=xp,
-    )
-
-    # A small aperture masking out the centerband.
-    aperture_central_band = np.subtract(1.0, aperture)
-    # imitates 0
-
-    fft_holo = xp.fft.fft2(holo_data) / np.prod(holo_data.shape)
-    fft_filtered = fft_holo * aperture_central_band
+    fft_holo = xp.fft.fft2(holo_data)
 
     # Sideband position in pixels referred to unshifted FFT
-    if sb == "lower":
-        fft_sb = fft_filtered[: int(fft_filtered.shape[0] / 2), :]
-        sb_position = (
-            np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
-        )
-    elif sb == "upper":
-        fft_sb = fft_filtered[int(fft_filtered.shape[0] / 2):, :]
-        sb_position = np.unravel_index(np.abs(fft_sb).argmax(), fft_sb.shape)
-        sb_position = (
-            xp.add(
-                xp.asarray(sb_position),
-                xp.asarray([int(fft_filtered.shape[0] / 2), 0]),
-            )
-        )
-        if xp is cp:
-            sb_position = sb_position.get()
-
+    sb_position = _sideband_max(
+        fft_holo,
+        row_start=row_start,
+        row_stop=row_stop,
+        threshold=_mask_threshold(central_band_mask_radius),
+        xp=xp,
+    )
     return tuple(float(c) for c in sb_position)
 
 
@@ -214,7 +340,16 @@ def estimate_sideband_size(
 
 
 class HoloParams(typing.NamedTuple):
-    """HoloParams class contians all parameters necessary for reconstruction."""
+    """HoloParams class contians all parameters necessary for reconstruction.
+
+    Coordinate systems: `sb_position` is in native (unshifted) FFT coordinates
+    of `orig_shape`, as returned by :func:`estimate_sideband_position` and
+    used by :func:`~libertem_holo.base.reconstr.reconstruct_frame`. `aperture`
+    and `aperture_bf` have shape `out_shape` and are in native layout, too
+    (zero frequency at `[0, 0]`), ready to be multiplied with the cropped FFT
+    in :func:`~libertem_holo.base.reconstr.reconstruct_frame` and
+    :func:`~libertem_holo.base.reconstr.reconstruct_bf`.
+    """
 
     sb_size: float
     sb_position: tuple[float, float]
@@ -270,7 +405,9 @@ class HoloParams(typing.NamedTuple):
             Override the sideband size; determined automatically if not given
 
         sb_position
-            Override the sideband position; determined automatically if not given
+            Override the sideband position; determined automatically if not given.
+            In native (unshifted) FFT coordinates of the hologram, as returned by
+            :func:`estimate_sideband_position`.
 
         circle_filter_order
             Order of the butterworth filter applied to the circular part
@@ -405,15 +542,24 @@ def shifted_coords_for_shape(shape):
 
 
 def fft_shift_coords(pos, shape):
+    """Convert a position from native (unshifted) to fftshifted FFT coordinates.
+
+    For even sizes, this is where :func:`numpy.fft.fftshift` moves the value at
+    `pos`, and the conversion is its own inverse. For odd sizes it is actually
+    the :func:`numpy.fft.ifftshift` mapping, so the result is one pixel before
+    where :func:`numpy.fft.fftshift` moves the value.
+    """
     coords = shifted_coords_for_shape(shape)
     return tuple(int(n) for n in coords[pos[0], pos[1]])
 
 
 def other_sb(sb_position, shape):
-    """
-    Given the sb_position (as from the estimate function in fft coordinates),
-    and the shape of the hologram, calculate the position of the other sideband
-    position (also in fft coordinates)
+    """Position of the other sideband.
+
+    Given the sb_position (as from :func:`estimate_sideband_position`, in
+    native, unshifted FFT coordinates) and the shape of the hologram,
+    calculate the position of the other sideband (also in native FFT
+    coordinates).
     """
     sb_pos_shifted = fft_shift_coords(sb_position, shape)
     center = (shape[0]//2, shape[1]//2)
@@ -428,7 +574,30 @@ def other_sb(sb_position, shape):
     return fft_shift_coords(other_sb, shape)
 
 
-def line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
+def line_filter_coords(
+    length_ratio: float,
+    sb_position_shifted: tuple[int, int],
+    width: float,
+    orig_shape: tuple[int, int],
+) -> np.ndarray:
+    """Corners of the rectangle drawn by :func:`draw_lf_rect`.
+
+    `sb_position_shifted` and the result are in fftshifted coordinates of
+    `orig_shape` (zero frequency at the center).
+
+    .. deprecated:: 1.1.0
+        Only used by :func:`libertem_holo.base.filters.line_filter`, which is
+        deprecated.
+    """
+    warnings.warn(
+        "line_filter_coords is deprecated and will be removed in a future release",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape)
+
+
+def _line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     # let's start from a "unit rectangle" which is 1x1 and not rotated:
     coords = np.array([
         [0, 0],
@@ -479,10 +648,35 @@ def line_filter_coords(length_ratio, sb_position_shifted, width, orig_shape):
     return coords
 
 
-def draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
+def draw_lf_rect(
+    dest: np.ndarray,
+    orig_shape: tuple[int, int],
+    sb_position_shifted: tuple[int, int],
+    length_ratio: float,
+    width: float,
+) -> None:
+    """Draw a rectangular line filter into `dest`.
+
+    `dest` has shape `orig_shape` and is in fftshifted layout;
+    `sb_position_shifted` is in fftshifted coordinates (zero frequency at the
+    center).
+
+    .. deprecated:: 1.1.0
+        Only used by :func:`libertem_holo.base.filters.line_filter`, which is
+        deprecated.
+    """
+    warnings.warn(
+        "draw_lf_rect is deprecated and will be removed in a future release",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    _draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width)
+
+
+def _draw_lf_rect(dest, orig_shape, sb_position_shifted, length_ratio, width):
     # we "draw" a rotated rectangle into `dest`, starting at `sb_position_shifted`
     # and ending at `length_ratio` times the vector in the direction to the center of `out_shape`.
-    coords = line_filter_coords(
+    coords = _line_filter_coords(
         length_ratio=length_ratio,
         sb_position_shifted=sb_position_shifted,
         width=width,

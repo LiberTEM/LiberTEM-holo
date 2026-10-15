@@ -3,7 +3,19 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.utils import HoloParams
-from libertem_holo.base.reconstr import get_phase, phase_offset_correction
+from libertem_holo.base.reconstr import (
+    HologramFFT,
+    get_phase,
+    phase_offset_correction,
+    reconstruct_bf,
+    reconstruct_frame,
+)
+from libertem_holo.base.utils import to_cpu
+
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
 
 
 @pytest.mark.with_numba
@@ -133,6 +145,68 @@ def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
     averaged, phase_offsets, stack = phase_offset_correction(
         xp.asarray(w_holo[:2]), return_stack=True, xp=xp,
     )
+
+
+@pytest.mark.parametrize(
+    "backend", ["numpy", "cupy"],
+)
+@pytest.mark.parametrize(
+    "precision", [True, False],
+)
+def test_hologram_fft_equivalence(backend: str, precision, holo_stack) -> None:
+    holo, _, _, _ = holo_stack
+
+    if backend == "cupy":
+        d = detect()
+        if not d["cudas"] or not d["has_cupy"]:
+            pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+        xp = cp
+    else:
+        xp = np
+
+    frame = holo[0].astype(np.float32)
+    p = HoloParams.from_hologram(
+        frame,
+        out_shape=(64, 64),
+        central_band_mask_radius=10,
+        xp=xp,
+    )
+    holo_fft = HologramFFT(frame, precision=precision, xp=xp)
+
+    wave_ref = reconstruct_frame(
+        frame, sb_pos=p.sb_position, aperture=p.aperture, slice_fft=p.slice_fft,
+        precision=precision, xp=xp,
+    )
+    wave = reconstruct_frame(
+        holo_fft, sb_pos=p.sb_position, aperture=p.aperture, slice_fft=p.slice_fft,
+        xp=xp,
+    )
+    # the same `holo_fft` is re-used for the brightfield:
+    bf_ref = reconstruct_bf(
+        frame, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=xp,
+    )
+    bf = reconstruct_bf(
+        holo_fft, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=xp,
+    )
+
+    # same operations in the same order, so the results are bit-identical:
+    assert wave.dtype == wave_ref.dtype
+    assert np.array_equal(to_cpu(wave), to_cpu(wave_ref))
+    assert bf.dtype == bf_ref.dtype
+    assert np.array_equal(to_cpu(bf), to_cpu(bf_ref))
+
+
+def test_hologram_fft_xp_mismatch(holo_stack) -> None:
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+    holo, _, _, _ = holo_stack
+    p = HoloParams.from_hologram(
+        holo[0], out_shape=(64, 64), central_band_mask_radius=10,
+    )
+    holo_fft = HologramFFT(holo[0], xp=cp)
+    with pytest.raises(ValueError, match="was computed with cupy"):
+        reconstruct_bf(holo_fft, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=np)
 
 
 @pytest.mark.need_cupy
