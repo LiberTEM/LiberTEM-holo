@@ -14,7 +14,7 @@ import os
 import pytest
 from numba import cuda, typeof, types
 
-from libertem_holo.base import filters
+from libertem_holo.base import filters, utils
 
 # In CI, a missing CUDA toolkit is an error, not a reason to skip:
 REQUIRE_CUDA_COMPILE = os.environ.get("LIBERTEM_HOLO_REQUIRE_CUDA_COMPILE") == "1"
@@ -68,4 +68,15 @@ def test_compile_kernel(kernel, arg_types):
         ptx, _ = cuda.compile_ptx(
             getattr(filters, kernel).py_func, arg_types(), cc=cc,
         )
+        assert f".target sm_{cc[0]}{cc[1]}" in ptx
+
+
+@pytest.mark.cuda_compile
+@pytest.mark.parametrize("fft_type", [types.complex128, types.complex64])
+def test_compile_sideband_max(fft_type):
+    arg_types = (
+        fft_type[:, :], types.int64, types.int64, types.float64[:], types.int64[:],
+    )
+    for cc in _compute_capabilities():
+        ptx, _ = cuda.compile_ptx(utils._sideband_max_gpu.py_func, arg_types, cc=cc)
         assert f".target sm_{cc[0]}{cc[1]}" in ptx
