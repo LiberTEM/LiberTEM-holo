@@ -44,6 +44,7 @@ try:
 except ImportError:
     cp = None
 import numpy as np
+import scipy.fft
 from skimage.draw import polygon
 from scipy.ndimage import gaussian_filter
 from scipy.optimize import least_squares
@@ -287,7 +288,11 @@ def estimate_sideband_position(
         max_freq = np.hypot(max_freq_x, max_freq_y)
         central_band_mask_radius = np.mean(holo_data.shape) / 20.0 * max_freq
 
-    fft_holo = xp.fft.fft2(holo_data)
+    if xp is np:
+        # one-off full FFT: use all cores (scipy's pocketfft is threaded)
+        fft_holo = scipy.fft.fft2(holo_data, workers=-1)
+    else:
+        fft_holo = xp.fft.fft2(holo_data)
 
     # Sideband position in pixels referred to unshifted FFT
     sb_position = _sideband_max(
