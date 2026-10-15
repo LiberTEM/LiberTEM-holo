@@ -41,6 +41,11 @@ import logging
 from scipy.sparse.linalg import eigsh
 
 from libertem_holo.base.filters import phase_unwrap
+from libertem_holo.base.plan import (
+    PartialSpectrum,
+    ReconstructionPlan,
+    half_spectrum,
+)
 from libertem_holo.base.utils import get_slice_fft, HoloParams
 
 log = logging.getLogger(__name__)
@@ -49,20 +54,23 @@ XPType = typing.Any  # Union[Module("numpy"), Module("cupy")]
 
 
 class HologramFFT:
-    """The FFT of a hologram, to share between multiple reconstruction calls.
+    """The half spectrum of a hologram, to share between multiple reconstruction calls.
 
-    The FFT is computed once, in the constructor. Instances can be passed
-    to :func:`reconstruct_frame` and :func:`reconstruct_bf` in place of the
-    hologram, which saves the FFT when reconstructing both the complex wave
-    and the brightfield image from the same hologram.
+    The real-to-complex FFT is computed once, in the constructor. Instances
+    can be passed to :func:`reconstruct_frame` and :func:`reconstruct_bf` in
+    place of the hologram, which saves the FFT when reconstructing both the
+    complex wave and the brightfield image from the same hologram. To also
+    skip the parts of the spectrum that are not needed, use
+    :class:`~libertem_holo.base.plan.ReconstructionPlan` directly.
 
     Parameters
     ----------
     frame
         A numpy or cupy array containing the input hologram
     precision
-        If False, the hologram is converted to float32 before the FFT,
-        resulting in complex64 results. See also :func:`reconstruct_frame`.
+        If True, the hologram is transformed in float64, resulting in
+        complex128 results; if False in float32, resulting in complex64.
+        See also :func:`reconstruct_frame`.
     xp
         Pass in either the numpy or cupy module to select CPU or GPU processing
 
@@ -95,21 +103,51 @@ class HologramFFT:
         precision: bool = True,
         xp: XPType = np,
     ) -> None:
-        frame = xp.array(frame)
-        if not precision:
-            frame = frame.astype(np.float32)
-        self.shape = frame.shape
-        #: unnormalized and not fft-shifted
-        self.fft = xp.fft.fft2(frame)
+        self._spectrum = half_spectrum(frame, precision=precision, xp=xp)
+        #: shape of the hologram (the half spectrum alone does not determine it)
+        self.shape = self._spectrum.sig_shape
+        self.precision = precision
         self.xp = xp
 
+    @property
+    def half_spectrum(self) -> np.ndarray:
+        """Unnormalized, unshifted ``rfft2`` of the hologram, ``(sy, sx//2 + 1)``."""
+        return self._spectrum.data
 
-def _as_hologram_fft(
+    def as_partial(self) -> PartialSpectrum:
+        """Return the spectrum as a :class:`~libertem_holo.base.plan.PartialSpectrum`.
+
+        For use with :class:`~libertem_holo.base.plan.ReconstructionPlan`.
+        """
+        return self._spectrum
+
+
+def _out_shape_from_slice(
+    slice_fft: tuple[slice, slice],
+    sig_shape: tuple[int, int],
+) -> tuple[int, int]:
+    """Output shape of the centered slice `slice_fft`; raises for other slices."""
+    out_shape = tuple(int(s.stop - s.start) for s in slice_fft)
+    expected = get_slice_fft(out_shape, sig_shape)
+    if tuple(slice_fft) != expected:
+        msg = (
+            f"slice_fft {tuple(slice_fft)} is not the centered slice {expected} "
+            f"for out_shape {out_shape} and frame shape {tuple(sig_shape)}"
+        )
+        raise ValueError(msg)
+    return out_shape
+
+
+def _plan_and_spectrum(
     frame: np.ndarray | HologramFFT,
     *,
+    sb_pos: tuple[float, float],
+    aperture: np.ndarray,
+    slice_fft: tuple[slice, slice],
     precision: bool,
     xp: XPType,
-) -> HologramFFT:
+) -> tuple[ReconstructionPlan, PartialSpectrum]:
+    """Build a single-use plan for `frame`, and compute its spectrum."""
     if isinstance(frame, HologramFFT):
         if frame.xp is not xp:
             msg = (
@@ -117,8 +155,23 @@ def _as_hologram_fft(
                 f"but {xp.__name__} was requested"
             )
             raise ValueError(msg)
-        return frame
-    return HologramFFT(frame, precision=precision, xp=xp)
+        sig_shape = frame.shape
+        precision = frame.precision
+    else:
+        frame = xp.asarray(frame)
+        sig_shape = (int(frame.shape[0]), int(frame.shape[1]))
+    plan = ReconstructionPlan(
+        sig_shape=sig_shape,
+        out_shape=_out_shape_from_slice(slice_fft, sig_shape),
+        sb_pos=sb_pos,
+        aperture=aperture,
+        precision=precision,
+        xp=xp,
+        reuse_buffers=False,  # single use, and safe to call from threads
+    )
+    if isinstance(frame, HologramFFT):
+        return plan, frame.as_partial()
+    return plan, plan.spectrum(frame)
 
 
 def reconstruct_frame(
@@ -131,6 +184,10 @@ def reconstruct_frame(
     xp: XPType = np,
 ) -> np.ndarray:
     """Reconstruct a single hologram.
+
+    This is a convenience wrapper around
+    :class:`~libertem_holo.base.plan.ReconstructionPlan`; when reconstructing
+    many holograms with the same parameters, build the plan once and reuse it.
 
     Parameters
     ----------
@@ -148,25 +205,19 @@ def reconstruct_frame(
         A slice to crop to the selected output shape in fourier space,
         as returned by `get_slice_fft`.
     precision
-        Defines precision of the reconstruction, True for complex128 for the
-        resulting complex wave, otherwise results will be complex64.
+        Defines precision of the reconstruction, True for float64/complex128
+        for the resulting complex wave, otherwise float32/complex64.
         Ignored if `frame` is a :class:`HologramFFT`, which has the
         precision set at construction time.
     xp
         Pass in either the numpy or cupy module to select CPU or GPU processing
 
     """
-    holo_fft = _as_hologram_fft(frame, precision=precision, xp=xp)
-    frame_size = holo_fft.shape
-
-    fft_frame = holo_fft.fft / np.prod(frame_size)
-    fft_frame = xp.roll(fft_frame, xp.array(sb_pos).astype(xp.int64), axis=(0, 1))
-
-    fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
-
-    fft_frame = fft_frame * aperture
-
-    return xp.fft.ifft2(fft_frame) * np.prod(frame_size)
+    plan, spec = _plan_and_spectrum(
+        frame, sb_pos=sb_pos, aperture=aperture, slice_fft=slice_fft,
+        precision=precision, xp=xp,
+    )
+    return plan.wave(spec)
 
 
 def reconstruct_double_resolution(
@@ -444,12 +495,14 @@ def reconstruct_bf(
     aperture: np.ndarray,
     slice_fft: tuple[slice, slice],
     *,
-    xp=np,
+    precision: bool = True,
+    xp: XPType = np,
 ) -> np.ndarray:
     """Reconstruct a brightfield image from a hologram.
 
     `frame` can be either a numpy or cupy array containing the hologram,
-    or a :class:`HologramFFT` of it.
+    or a :class:`HologramFFT` of it. `precision` works as in
+    :func:`reconstruct_frame`; the result is float64 or float32 accordingly.
 
     Please use :func:`libertem_holo.base.filters.central_line_filter` to
     filter out fresnel fringes as appropriate.
@@ -457,12 +510,11 @@ def reconstruct_bf(
     `aperture` is in native layout (zero frequency at `[0, 0]`), like
     :attr:`HoloParams.aperture_bf <libertem_holo.base.utils.HoloParams>`.
     """
-    fft_frame = _as_hologram_fft(frame, precision=True, xp=xp).fft
-    fft_frame = xp.fft.fftshift(xp.fft.fftshift(fft_frame)[slice_fft])
-
-    fft_frame = fft_frame * xp.array(aperture)
-
-    return xp.abs(xp.fft.ifft2(fft_frame))
+    plan, spec = _plan_and_spectrum(
+        frame, sb_pos=(0, 0), aperture=aperture, slice_fft=slice_fft,
+        precision=precision, xp=xp,
+    )
+    return xp.abs(plan.wave(spec))
 
 
 def phase_offset_correction(
