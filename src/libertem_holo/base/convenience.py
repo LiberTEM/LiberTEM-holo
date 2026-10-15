@@ -7,12 +7,8 @@ from scipy.ndimage import gaussian_filter
 
 from libertem_holo.base.align import Correlator, ImageCorrelator
 from libertem_holo.base.io import InputData, Results
-from libertem_holo.base.reconstr import (
-    HologramFFT,
-    phase_offset_correction,
-    reconstruct_bf,
-    reconstruct_frame,
-)
+from libertem_holo.base.plan import ReconstructionPlan
+from libertem_holo.base.reconstr import phase_offset_correction
 from libertem_holo.base.utils import HoloParams, to_cpu
 
 try:
@@ -241,26 +237,15 @@ def _reconstruct_waves_loop(
     stack_out_shape = (len(stack.data),) + holoparams.out_shape
     waves = xp.zeros(stack_out_shape, dtype=np.complex128)
     bfs = xp.zeros(stack_out_shape, dtype=np.float32) if with_bf else None
-    aperture = xp.asarray(holoparams.aperture)
-    aperture_bf = xp.asarray(holoparams.aperture_bf)
+    # the plan computes the window indices once and reuses its FFT buffer:
+    plan = ReconstructionPlan.from_params(holoparams, xp=xp)
 
     for i in tqdm(range(len(stack.data)), disable=not progress):
         # FFT once, shared between wave and brightfield reconstruction:
-        holo_fft = HologramFFT(stack.data[i], xp=xp)
-        waves[i] = reconstruct_frame(
-            frame=holo_fft,
-            sb_pos=holoparams.sb_position,
-            aperture=aperture,
-            slice_fft=holoparams.slice_fft,
-            xp=xp,
-        )
+        spec = plan.spectrum(stack.data[i])
+        waves[i] = plan.wave(spec)
         if bfs is not None:
-            bfs[i] = reconstruct_bf(
-                frame=holo_fft,
-                aperture=aperture_bf,
-                slice_fft=holoparams.slice_fft,
-                xp=xp,
-            )
+            bfs[i] = plan.bf(spec)
     return waves, bfs
 
 
