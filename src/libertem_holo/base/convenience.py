@@ -1,8 +1,11 @@
 """Convenience functions for reconstruction and visualization."""
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Literal
 
+from libertem.common.threading import set_num_threads
 from scipy.ndimage import gaussian_filter
 
 from libertem_holo.base.align import Correlator, ImageCorrelator
@@ -37,6 +40,7 @@ def reconstruct_stack(
     backend: Literal["cupy", "libertem"] = "cupy",
     ctx: Context | None = None,
     progress: bool = True,
+    align_threads: int | None = None,
 ) -> Results:
     """Reconstruct and align a stack of holograms.
 
@@ -79,6 +83,10 @@ def reconstruct_stack(
         and re-used.
     progress : bool
         Show progress bars
+    align_threads : int, optional
+        Number of threads for registering and shifting the frames; all frames
+        are aligned against the first one, so they are independent. Defaults
+        to the number of CPUs for numpy, and to 1 for cupy.
 
     Returns
     -------
@@ -109,6 +117,7 @@ def reconstruct_stack(
         xp=xp,
         ctx=ctx,
         progress=progress,
+        align_threads=align_threads,
     )
 
 
@@ -121,6 +130,7 @@ def _reconstruct_stack(
     xp: XPType,
     ctx: Context | None,
     progress: bool,
+    align_threads: int | None = None,
 ) -> Results:
     """Implementation of :func:`reconstruct_stack`.
 
@@ -153,7 +163,7 @@ def _reconstruct_stack(
         stack, holoparams, with_bf=True, xp=xp, ctx=ctx, progress=progress,
     )
     waves, bfs, drifts = _align_waves(
-        waves, bfs, correlator, xp=xp, progress=progress,
+        waves, bfs, correlator, xp=xp, progress=progress, n_threads=align_threads,
     )
 
     wave_avg, _, _ = phase_offset_correction(waves, xp=xp)
@@ -280,13 +290,21 @@ def _align_waves(
     *,
     xp: XPType = np,
     progress: bool = True,
+    n_threads: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Align a stack of waves against the first wave.
 
     The shifts are determined by registering the brightfield images `bfs`
     using `correlator`, and then applied to both `waves` and `bfs`.
 
-    The input arrays are modified in place.
+    The input arrays are modified in place. As all frames are aligned
+    against the first one, they are processed independently in a thread
+    pool of `n_threads` threads (default: the number of CPUs for numpy, 1
+    for cupy). The FFTs and the interpolation release the GIL, so this
+    scales with the number of cores; BLAS is limited to one thread while the
+    pool runs, as the upsampled DFT would otherwise oversubscribe the cores
+    (measured 4x slower). `correlator` is shared between the threads, so it
+    must not keep per-call state.
 
     Returns
     -------
@@ -303,16 +321,30 @@ def _align_waves(
     else:
         from cupyx.scipy.ndimage import shift  # noqa: PLC0415
 
+    if n_threads is None:
+        n_threads = (os.cpu_count() or 1) if xp is np else 1
+
     drifts = xp.zeros((waves.shape[0], 2))
     # copy, as we update `bfs` in-place and `prepare_input` may return a view:
     ref = correlator.prepare_input(bfs[0].copy())
 
-    for i in tqdm(range(waves.shape[0]), disable=not progress):
+    def _align_one(i: int) -> None:
         moving = correlator.prepare_input(bfs[i])
         shifts = correlator.correlate(ref_image=ref, moving_image=moving).shift
         waves[i] = shift(waves[i], shifts)
         bfs[i] = xp.abs(shift(bfs[i], shifts))
         drifts[i] = xp.asarray(shifts)
+
+    with (
+        set_num_threads(1 if n_threads > 1 else None),
+        ThreadPoolExecutor(max_workers=n_threads) as pool,
+    ):
+        for _ in tqdm(
+            pool.map(_align_one, range(waves.shape[0])),
+            total=waves.shape[0],
+            disable=not progress,
+        ):
+            pass
     return waves, bfs, drifts
 
 
