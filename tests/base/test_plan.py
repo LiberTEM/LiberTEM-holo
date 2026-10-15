@@ -175,7 +175,9 @@ def test_plan_argument_errors() -> None:
     with pytest.raises(ValueError, match="frames of shape"):
         plan.wave(half_spectrum(np.ones((32, 33))))
     with pytest.raises(ValueError, match="unknown spectrum kind"):
-        plan.wave(PartialSpectrum(kind="full", data=None, sig_shape=(32, 32)))  # type: ignore[arg-type]
+        plan.wave(
+            PartialSpectrum(kind="full", data=None, sig_shape=(32, 32))
+        )  # type: ignore[arg-type]
 
 
 def test_cached_windows_are_shared_read_only() -> None:
