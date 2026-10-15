@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from libertem.udf import UDF
 
-from libertem_holo.base.reconstr import reconstruct_bf, reconstruct_frame
+from libertem_holo.base.reconstr import HologramFFT, reconstruct_bf, reconstruct_frame
 from libertem_holo.base.utils import get_slice_fft
 
 
@@ -127,8 +127,12 @@ class HoloReconstructUDF(UDF):
 
     def process_frame(self, frame: np.ndarray) -> None:
         ""
+        # FFT once, shared between wave and brightfield reconstruction:
+        holo_fft = HologramFFT(
+            frame, precision=self.params.precision, xp=self.xp,
+        )
         wav = reconstruct_frame(
-            frame,
+            holo_fft,
             sb_pos=self.params.sb_position,
             aperture=self.task_data.aperture,
             slice_fft=self.task_data.slice,
@@ -139,9 +143,8 @@ class HoloReconstructUDF(UDF):
         self.results.wave[:] = self.forbuf(wav, self.results.wave)
 
         if self.task_data.aperture_bf is not None:
-            # TODO: re-use FFT from reconstruct_frame here
             bf = reconstruct_bf(
-                frame,
+                holo_fft,
                 aperture=self.task_data.aperture_bf,
                 slice_fft=self.task_data.slice,
                 xp=self.xp,
