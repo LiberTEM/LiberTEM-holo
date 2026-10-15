@@ -9,8 +9,7 @@ from typing import Any
 import numpy as np
 from libertem.udf import UDF
 
-from libertem_holo.base.reconstr import HologramFFT, reconstruct_bf, reconstruct_frame
-from libertem_holo.base.utils import get_slice_fft
+from libertem_holo.base.plan import ReconstructionPlan
 
 
 class HoloReconstructUDF(UDF):
@@ -110,46 +109,27 @@ class HoloReconstructUDF(UDF):
 
     def get_task_data(self) -> dict[str, Any]:
         ""
-        slice_fft = get_slice_fft(
-            self.params.out_shape,
-            self.meta.partition_shape.sig,
-        )
-
-        aperture_bf = None
-        if self.params.aperture_bf is not None:
-            aperture_bf = self.xp.array(self.params.aperture_bf)
-
-        return {
-            "aperture": self.xp.array(self.params.aperture),
-            "aperture_bf": aperture_bf,
-            "slice": slice_fft,
-        }
-
-    def process_frame(self, frame: np.ndarray) -> None:
-        ""
-        # FFT once, shared between wave and brightfield reconstruction:
-        holo_fft = HologramFFT(
-            frame, precision=self.params.precision, xp=self.xp,
-        )
-        wav = reconstruct_frame(
-            holo_fft,
+        # one plan per task: the window indices are computed once, and the
+        # FFT buffer is reused between the frames of a partition
+        plan = ReconstructionPlan(
+            sig_shape=tuple(self.meta.partition_shape.sig),
+            out_shape=self.params.out_shape,
             sb_pos=self.params.sb_position,
-            aperture=self.task_data.aperture,
-            slice_fft=self.task_data.slice,
+            aperture=self.params.aperture,
+            aperture_bf=self.params.aperture_bf,
             precision=self.params.precision,
             xp=self.xp,
         )
+        return {"plan": plan}
 
-        self.results.wave[:] = self.forbuf(wav, self.results.wave)
-
-        if self.task_data.aperture_bf is not None:
-            bf = reconstruct_bf(
-                holo_fft,
-                aperture=self.task_data.aperture_bf,
-                slice_fft=self.task_data.slice,
-                xp=self.xp,
-            )
-            self.results.bf[:] = self.forbuf(bf, self.results.bf)
+    def process_frame(self, frame: np.ndarray) -> None:
+        ""
+        plan = self.task_data.plan
+        # FFT once, shared between wave and brightfield reconstruction:
+        spec = plan.spectrum(frame)
+        self.results.wave[:] = self.forbuf(plan.wave(spec), self.results.wave)
+        if self.params.aperture_bf is not None:
+            self.results.bf[:] = self.forbuf(plan.bf(spec), self.results.bf)
 
     def get_backends(self) -> tuple[str, ...]:
         ""
