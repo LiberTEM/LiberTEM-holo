@@ -18,6 +18,9 @@ Reconstruction
 .. automodule:: libertem_holo.base.reconstr
     :members:
 
+.. automodule:: libertem_holo.base.plan
+    :members:
+
 Image filtering and aperture building
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
