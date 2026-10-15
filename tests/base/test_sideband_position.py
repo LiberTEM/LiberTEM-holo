@@ -1,6 +1,7 @@
 """Tests for `estimate_sideband_position`, against a reference implementation."""
 import numpy as np
 import pytest
+import scipy.fft
 from libertem.utils.devices import detect
 
 from libertem_holo.base.generate import hologram_frame
@@ -41,7 +42,9 @@ def _estimate_sideband_position_reference(
     aperture = np.fft.ifftshift(aperture)  # was: `fftshift`
 
     aperture_central_band = np.subtract(1.0, aperture)
-    fft_holo = np.fft.fft2(holo_data) / np.prod(holo_data.shape)
+    # the same FFT implementation as `estimate_sideband_position` on the CPU,
+    # so that near-ties resolve identically:
+    fft_holo = scipy.fft.fft2(holo_data, workers=-1) / np.prod(holo_data.shape)
     fft_filtered = fft_holo * aperture_central_band
 
     if sb == "lower":
