@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import itertools
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
+from libertem.io.dataset.memory import MemoryDataSet
 from libertem.utils.devices import detect
 
 from libertem_holo.base.plan import (
@@ -13,7 +15,11 @@ from libertem_holo.base.plan import (
     gather_idx_1d,
     half_spectrum,
 )
-from libertem_holo.base.utils import get_slice_fft
+from libertem_holo.base.utils import HoloParams, get_slice_fft
+from libertem_holo.udf.reconstr import HoloReconstructUDF
+
+if TYPE_CHECKING:
+    from libertem.api import Context
 
 try:
     import cupy as cp
@@ -200,3 +206,38 @@ def test_mirrored_columns_cupy() -> None:
     slice_fft = get_slice_fft(out_shape, sig_shape)
     assert rel_err(wave.get(), legacy_wave(frame, sb_pos, aperture, slice_fft)) < 1e-10
     assert rel_err(bf.get(), legacy_bf(frame, aperture, slice_fft)) < 1e-10
+
+
+@pytest.mark.parametrize("precision", [True, False])
+def test_udf_matches_legacy(
+    lt_ctx: Context, holo_data: tuple, precision: bool,  # noqa: FBT001
+) -> None:
+    """The UDF reconstructs each frame like the previous implementation."""
+    holo, _, _, _ = holo_data
+    frame = holo[0, 0].astype(np.float32)
+    params = HoloParams.from_hologram(
+        frame, out_shape=(32, 32), central_band_mask_radius=4,
+    )
+    ds = MemoryDataSet(data=holo.astype(np.float32), num_partitions=2)
+    udf = HoloReconstructUDF(
+        out_shape=params.out_shape,
+        sb_position=params.sb_position,
+        aperture=params.aperture,
+        aperture_bf=params.aperture_bf,
+        precision=precision,
+    )
+    res = lt_ctx.run_udf(dataset=ds, udf=udf)
+    waves, bfs = res["wave"].data, res["bf"].data
+    assert waves.shape == (*holo.shape[:2], 32, 32)
+    assert waves.dtype == (np.complex128 if precision else np.complex64)
+    tol = 1e-10 if precision else 1e-5
+    for idx in np.ndindex(holo.shape[:2]):
+        # the dataset is float32; with `precision` the UDF transforms it in float64:
+        f = holo[idx].astype(np.float32)
+        if precision:
+            f = f.astype(np.float64)
+        wave_ref = legacy_wave(f, params.sb_position, params.aperture, params.slice_fft)
+        bf_ref = legacy_bf(f, params.aperture_bf, params.slice_fft)
+        assert rel_err(waves[idx], wave_ref) < tol
+        # the brightfield result buffer of the UDF is float32:
+        assert rel_err(bfs[idx], bf_ref) < 1e-5
