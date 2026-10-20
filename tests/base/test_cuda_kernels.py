@@ -14,7 +14,7 @@ import os
 import pytest
 from numba import cuda, typeof, types
 
-from libertem_holo.base import filters, utils
+from libertem_holo.base import filters, plan, utils
 
 # In CI, a missing CUDA toolkit is an error, not a reason to skip:
 REQUIRE_CUDA_COMPILE = os.environ.get("LIBERTEM_HOLO_REQUIRE_CUDA_COMPILE") == "1"
@@ -68,6 +68,21 @@ def test_compile_kernel(kernel, arg_types):
         ptx, _ = cuda.compile_ptx(
             getattr(filters, kernel).py_func, arg_types(), cc=cc,
         )
+        assert f".target sm_{cc[0]}{cc[1]}" in ptx
+
+
+@pytest.mark.cuda_compile
+@pytest.mark.parametrize(
+    ("complex_type", "float_type"),
+    [(types.complex128, types.float64), (types.complex64, types.float32)],
+)
+def test_compile_gather(complex_type, float_type):
+    arg_types = (
+        complex_type[:, :], types.int64[:], float_type[:, :],
+        types.int64, types.int64, types.int64, types.int64, complex_type[:, :],
+    )
+    for cc in _compute_capabilities():
+        ptx, _ = cuda.compile_ptx(plan._gather_gpu.py_func, arg_types, cc=cc)
         assert f".target sm_{cc[0]}{cc[1]}" in ptx
 
 

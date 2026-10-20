@@ -2,21 +2,21 @@
 
 The per-frame reconstruction only ever uses an ``out_shape``-sized window of
 the hologram's spectrum, and the hologram is real. :class:`ReconstructionPlan`
-precomputes, once per parameter set, which spectrum elements end up in that
-window and then reconstructs each frame with
+precomputes, once per parameter set, which spectrum columns that window needs
+and then reconstructs each frame with
 
 * a real-to-complex FFT along the rows (half the spectrum is redundant for
   real input),
 * a complex FFT along the columns only for the columns that the sideband
   and central band windows need,
-* a gather of the window directly from the unshifted spectrum, so there are
-  no full-size ``roll``, ``fftshift`` or scaling passes,
+* a gather of the window directly from the unshifted spectrum by a numba
+  kernel (CPU) or CUDA kernel (cupy) that computes the spectrum index of
+  each output element on the fly, conjugates the elements that are only
+  stored as their mirror image, and applies the aperture, all in one pass,
+  so there are no full-size ``roll``, ``fftshift`` or scaling passes and no
+  index arrays of the size of the output window (only the 1D column set
+  for the pruned FFT),
 * reuse of the large intermediate buffer between frames (numpy only).
-
-The index arrays are cached per geometry and array module (and GPU device),
-on the device, so building a plan for parameters that were seen before, as
-:func:`libertem_holo.base.reconstr.reconstruct_frame` does per call, neither
-recomputes nor transfers anything.
 
 The results agree with the previous ``roll`` / ``fftshift`` / crop
 implementation up to floating point rounding, including its layout for odd
@@ -28,9 +28,14 @@ from __future__ import annotations
 import typing
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+import numba
 import numpy as np
+from numba import cuda
+
+if TYPE_CHECKING:
+    from libertem_holo.base.utils import HoloParams
 
 XPType = typing.Any  # Union[Module("numpy"), Module("cupy")]
 SpectrumKind = Literal["half", "pruned"]
@@ -76,6 +81,9 @@ def gather_idx_1d(n: int, o: int, s: int) -> np.ndarray:
     for an even window in an odd spectrum the window is one bin off-centre,
     and for odd by odd the DC element lands at index ``o - 1`` of the window
     instead of 0. Changing that is a separate, result-changing step.
+
+    :func:`_window_index_1d` is the same formula for one element, as used
+    by the gather kernels.
     """
     a = int(n / 2 - o / 2)  # slice start, as in `get_slice_fft`
     j = np.arange(o)
@@ -83,76 +91,100 @@ def gather_idx_1d(n: int, o: int, s: int) -> np.ndarray:
     return (a + c - n // 2 - s) % n  # `fftshift` of the spectrum and `roll(+s)`
 
 
-@dataclass(frozen=True)
-class _Window:
-    """Index arrays of one output window; read-only host (numpy) arrays."""
+@numba.njit(cache=True, inline="always")
+def _window_index_1d(j: int, n: int, o: int, s: int) -> int:
+    """Spectrum index of output element `j`; see :func:`gather_idx_1d`.
 
-    #: spectrum row of each output row
-    iy: np.ndarray
-    #: spectrum column of each output column
-    ix: np.ndarray
-    #: columns that are only stored as their conjugate mirror in a half spectrum
-    mirror: np.ndarray
-    #: column of the half spectrum for each output column
-    ixp: np.ndarray
-    #: row of the half spectrum for each output element, shape `out_shape`
-    rows: np.ndarray
+    Requires ``o <= n``, which :class:`ReconstructionPlan` enforces; then
+    ``(n - o) // 2`` is the slice start ``int(n / 2 - o / 2)``.
+    """
+    a = (n - o) // 2
+    c = (j - o // 2) % o
+    return (a + c - n // 2 - s) % n
 
 
-@lru_cache(maxsize=8)
-def _build_window(
-    sig_shape: tuple[int, int], out_shape: tuple[int, int], shift: tuple[int, int],
-) -> _Window:
-    """Index arrays of the window around `shift`; cached, as the arrays are reused."""
-    sy, sx = sig_shape
-    iy = gather_idx_1d(sy, out_shape[0], shift[0])
-    ix = gather_idx_1d(sx, out_shape[1], shift[1])
-    mirror = ix > sx // 2
-    ixp = np.where(mirror, sx - ix, ix)
-    rows = np.where(mirror[None, :], ((-iy) % sy)[:, None], iy[:, None])
-    for arr in (iy, ix, mirror, ixp, rows):
-        arr.setflags(write=False)
-    return _Window(iy=iy, ix=ix, mirror=mirror, ixp=ixp, rows=rows)
+@numba.njit(cache=True, inline="always")
+def _column_index(k: int, sx: int, ox: int, shift_x: int) -> tuple[int, bool]:
+    """Half spectrum column of output column `k`, and whether it is mirrored.
+
+    Columns beyond the Nyquist column are only stored as the conjugate of
+    their mirror image in a real-to-complex spectrum.
+    """
+    ix = _window_index_1d(k, sx, ox, shift_x)
+    if ix > sx // 2:
+        return sx - ix, True
+    return ix, False
 
 
-@dataclass
-class _DeviceWindow:
-    """Index arrays of one output window, on the compute device."""
+@numba.njit(cache=True, nogil=True)
+def _gather_cpu(  # noqa: PLR0917 (kernel arguments are positional)
+    data: np.ndarray,
+    col_of_ixp: np.ndarray,
+    aperture: np.ndarray,
+    shift_y: int,
+    shift_x: int,
+    sy: int,
+    sx: int,
+    out: np.ndarray,
+) -> None:
+    """Gather the window around `shift` from `data` into `out`, times `aperture`.
 
-    #: column of the half spectrum for each output column
-    ixp: typing.Any
-    #: row of the half spectrum for each output element, shape `out_shape`
-    rows: typing.Any
-    #: position of each output column in the pruned column set
-    colpos: typing.Any
-    #: int8, -1 for mirrored columns, +1 otherwise; None if nothing is mirrored
-    sign: typing.Any
+    `data` holds spectrum columns of a frame of shape ``(sy, sx)``;
+    `col_of_ixp` maps a half spectrum column to its column in `data`.
+    Single-threaded: on the CPU, this runs inside a LiberTEM worker.
+    """
+    oy, ox = out.shape
+    cols = np.empty(ox, dtype=np.int64)
+    mirrored = np.empty(ox, dtype=np.bool_)
+    for k in range(ox):
+        ixp, m = _column_index(k, sx, ox, shift_x)
+        cols[k] = col_of_ixp[ixp]
+        mirrored[k] = m
+    for j in range(oy):
+        iy = _window_index_1d(j, sy, oy, shift_y)
+        iy_m = (-iy) % sy
+        for k in range(ox):
+            v = data[iy_m, cols[k]].conjugate() if mirrored[k] else data[iy, cols[k]]
+            out[j, k] = v * aperture[j, k]
+
+
+_GATHER_BLOCK = (16, 16)
+
+
+@cuda.jit(cache=True)
+def _gather_gpu(  # noqa: PLR0917 (kernel arguments are positional)
+    data: np.ndarray,
+    col_of_ixp: np.ndarray,
+    aperture: np.ndarray,
+    shift_y: int,
+    shift_x: int,
+    sy: int,
+    sx: int,
+    out: np.ndarray,
+) -> None:
+    # one thread per output element, same index arithmetic as `_gather_cpu`
+    j, k = cuda.grid(2)
+    oy, ox = out.shape
+    if j < oy and k < ox:
+        iy = _window_index_1d(j, sy, oy, shift_y)
+        ixp, m = _column_index(k, sx, ox, shift_x)
+        c = col_of_ixp[ixp]
+        v = data[(-iy) % sy, c].conjugate() if m else data[iy, c]
+        out[j, k] = v * aperture[j, k]
 
 
 @dataclass(frozen=True)
 class _Indices:
-    """Everything of a plan that depends only on geometry and array module."""
+    """The column set of a plan; what depends only on geometry and array module."""
 
     #: unique columns of the half spectrum that the windows need, host
     cols_host: np.ndarray
     #: the same, on the compute device
     cols: typing.Any
-    sb: _DeviceWindow
-    bf: _DeviceWindow | None
-
-
-def _to_device(w: _Window, colpos: np.ndarray, xp: XPType) -> _DeviceWindow:
-    sign = None
-    if w.mirror.any():
-        sign = np.where(w.mirror, -1, 1).astype(np.int8)
-        sign.setflags(write=False)
-        sign = xp.asarray(sign)
-    return _DeviceWindow(
-        ixp=xp.asarray(w.ixp),
-        rows=xp.asarray(w.rows),
-        colpos=xp.asarray(colpos),
-        sign=sign,
-    )
+    #: column in the pruned spectrum for each half spectrum column (-1: not needed)
+    col_of_ixp: typing.Any
+    #: identity map, for gathering from a complete half spectrum
+    col_identity: typing.Any
 
 
 @lru_cache(maxsize=8)
@@ -165,28 +197,26 @@ def _build_indices(
     xp: XPType,
     device: int | None,  # noqa: ARG001 (part of the cache key)
 ) -> _Indices:
-    """Index arrays of a plan on the device of `xp`; cached, so transferred only once.
+    """Column set of a plan on the device of `xp`; cached, so transferred only once.
 
     `device` is the current GPU for cupy (None for numpy): it only serves as
     part of the cache key, as arrays live on the device they were created on.
     Use ``_build_indices.cache_clear()`` to release the cached arrays.
     """
-    sb = _build_window(sig_shape, out_shape, shift)
-    bf = _build_window(sig_shape, out_shape, (0, 0))
-    windows = [sb, bf] if with_bf else [sb]
-    cols, inv = np.unique(
-        np.concatenate([w.ixp for w in windows]), return_inverse=True,
-    )
-    ox = out_shape[1]
-    colpos_sb = np.ascontiguousarray(inv[:ox])
-    colpos_bf = np.ascontiguousarray(inv[ox:])
-    for arr in (cols, colpos_sb, colpos_bf):
+    sx = sig_shape[1]
+    shifts = [shift, (0, 0)] if with_bf else [shift]
+    ix = np.concatenate([gather_idx_1d(sx, out_shape[1], s[1]) for s in shifts])
+    ixp = np.where(ix > sx // 2, sx - ix, ix)
+    cols = np.unique(ixp)
+    col_of_ixp = np.full(sx // 2 + 1, -1, dtype=np.int64)
+    col_of_ixp[cols] = np.arange(len(cols))
+    for arr in (cols, col_of_ixp):
         arr.setflags(write=False)
     return _Indices(
         cols_host=cols,
         cols=xp.asarray(cols),
-        sb=_to_device(sb, colpos_sb, xp),
-        bf=_to_device(bf, colpos_bf, xp) if with_bf else None,
+        col_of_ixp=xp.asarray(col_of_ixp),
+        col_identity=xp.arange(sx // 2 + 1),
     )
 
 
@@ -227,7 +257,7 @@ def half_spectrum(
 
 
 class ReconstructionPlan:
-    """Precomputed indices and buffers to reconstruct holograms of one shape.
+    """Precomputed column set and buffers to reconstruct holograms of one shape.
 
     Parameters
     ----------
@@ -258,11 +288,12 @@ class ReconstructionPlan:
 
     Notes
     -----
-    `out_shape` must not exceed `sig_shape` along either axis. The index
-    arrays are cached per `sig_shape`, `out_shape`, integer sideband position,
-    presence of `aperture_bf` and `xp` (and GPU device), and are shared
+    `out_shape` must not exceed `sig_shape` along either axis. The column
+    set is cached per `sig_shape`, `out_shape`, integer sideband position,
+    presence of `aperture_bf` and `xp` (and GPU device), and shared
     read-only between plans, so building many plans for the same parameters
-    is cheap and does not transfer anything to the GPU.
+    is cheap and does not transfer anything to the GPU. The gather kernels
+    are compiled by numba on first use (cached on disk).
 
     Examples
     --------
@@ -312,20 +343,16 @@ class ReconstructionPlan:
             None if aperture_bf is None else self._as_aperture(aperture_bf)
         )
 
-        shift = (int(sb_pos[0]), int(sb_pos[1]))
+        self._shift = (int(sb_pos[0]), int(sb_pos[1]))
         device = None if xp is np else int(xp.cuda.runtime.getDevice())
-        idx = _build_indices(
+        self._idx = _build_indices(
             sig_shape=self.sig_shape,
             out_shape=self.out_shape,
-            shift=shift,
+            shift=self._shift,
             with_bf=aperture_bf is not None,
             xp=xp,
             device=device,
         )
-        self._cols_host = idx.cols_host
-        self._cols = idx.cols
-        self._sb = idx.sb
-        self._bf = idx.bf
 
         self._buffers = reuse_buffers and xp is np
         self._half: np.ndarray | None = None
@@ -348,7 +375,7 @@ class ReconstructionPlan:
     @classmethod
     def from_params(
         cls,
-        params: typing.Any,  # noqa: ANN401 (HoloParams; avoids a circular import)
+        params: HoloParams,
         *,
         precision: bool = True,
         xp: XPType | None = None,
@@ -372,7 +399,7 @@ class ReconstructionPlan:
     @property
     def n_columns(self) -> int:
         """Number of spectrum columns that :meth:`spectrum` transforms."""
-        return len(self._cols_host)
+        return len(self._idx.cols_host)
 
     def spectrum(self, frame: np.ndarray) -> PartialSpectrum:
         """Transform `frame` as far as needed for :meth:`wave` and :meth:`bf`.
@@ -389,15 +416,18 @@ class ReconstructionPlan:
             half = np.fft.rfft(frame, axis=1, out=self._half)
             # `np.take(..., out=)` is twice as slow as allocating, so the
             # column block is allocated per frame; the FFT then runs in place:
-            cols = np.take(half, self._cols_host, axis=1)
+            cols = np.take(half, self._idx.cols_host, axis=1)
             data = np.fft.fft(cols, axis=0, out=cols)
         else:
             half = xp.fft.rfft(frame, axis=1)
-            cols = xp.take(half, self._cols, axis=1)
+            cols = xp.take(half, self._idx.cols, axis=1)
             data = xp.fft.fft(cols, axis=0)
         return PartialSpectrum(kind="pruned", data=data, sig_shape=self.sig_shape)
 
-    def _gather(self, spec: PartialSpectrum, w: _DeviceWindow) -> np.ndarray:
+    def _gather(
+        self, spec: PartialSpectrum, shift: tuple[int, int], aperture: np.ndarray,
+    ) -> np.ndarray:
+        """Return the window around `shift` of `spec`, multiplied by `aperture`."""
         if tuple(spec.sig_shape) != self.sig_shape:
             msg = (
                 f"spectrum is of frames of shape {spec.sig_shape}, "
@@ -405,38 +435,39 @@ class ReconstructionPlan:
             )
             raise ValueError(msg)
         if spec.kind == "half":
-            crop = spec.data[w.rows, w.ixp[None, :]]
+            col_map = self._idx.col_identity
         elif spec.kind == "pruned":
-            crop = spec.data[w.rows, w.colpos[None, :]]
+            col_map = self._idx.col_of_ixp
         else:
             msg = f"unknown spectrum kind {spec.kind!r}"
             raise ValueError(msg)
-        if w.sign is not None:
-            # conjugate the columns that are only stored as their mirror
-            # (int8 sign: multiplying float32 or float64 by it keeps the dtype)
-            crop.imag *= w.sign
-        return crop
+        xp = self.xp
+        out = xp.empty(self.out_shape, dtype=self.complex_dtype)
+        args = (spec.data, col_map, aperture, shift[0], shift[1], *self.sig_shape, out)
+        if xp is np:
+            _gather_cpu(*args)
+        else:
+            by, bx = _GATHER_BLOCK
+            grid = (-(-self.out_shape[0] // by), -(-self.out_shape[1] // bx))
+            _gather_gpu[grid, _GATHER_BLOCK](*args)
+        return out
 
     def _ifft2(self, crop: np.ndarray) -> np.ndarray:
-        if self._buffers:
-            # numpy's `ifft2` ignores `out=`, `ifftn` honours it:
+        if self.xp is np:
+            # in place; numpy's `ifft2` ignores `out=`, `ifftn` honours it:
             return np.fft.ifftn(crop, axes=(-2, -1), out=crop)
         return self.xp.fft.ifft2(crop)
 
     def wave(self, spec: PartialSpectrum) -> np.ndarray:
         """Reconstruct the complex wave from a :class:`PartialSpectrum`."""
-        crop = self._gather(spec, self._sb)
-        crop *= self.aperture
-        return self._ifft2(crop)
+        return self._ifft2(self._gather(spec, self._shift, self.aperture))
 
     def bf(self, spec: PartialSpectrum) -> np.ndarray:
         """Reconstruct the brightfield image from a :class:`PartialSpectrum`."""
-        if self._bf is None or self.aperture_bf is None:
+        if self.aperture_bf is None:
             msg = "plan was built without `aperture_bf`"
             raise ValueError(msg)
-        crop = self._gather(spec, self._bf)
-        crop *= self.aperture_bf
-        return self.xp.abs(self._ifft2(crop))
+        return self.xp.abs(self._ifft2(self._gather(spec, (0, 0), self.aperture_bf)))
 
     def reconstruct(self, frame: np.ndarray) -> np.ndarray:
         """Reconstruct the complex wave of one hologram."""
