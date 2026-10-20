@@ -13,6 +13,8 @@ from libertem_holo.base.plan import (
     PartialSpectrum,
     ReconstructionPlan,
     _build_indices,
+    _gather_cpu,
+    _window_index_1d,
     gather_idx_1d,
     half_spectrum,
 )
@@ -77,6 +79,36 @@ def test_gather_idx_1d_matches_legacy_ops(n: int, o: int, s: int) -> None:
     sl = get_slice_fft((o, o), (n, n))[0]
     ref = np.fft.fftshift(np.fft.fftshift(np.roll(a, s))[sl])
     assert np.array_equal(a[gather_idx_1d(n, o, s)], ref)
+
+
+@pytest.mark.with_numba
+@pytest.mark.parametrize(
+    ("n", "o", "s"), [(16, 8, 3), (17, 8, -2), (17, 9, 15), (31, 7, 0)],
+)
+def test_window_index_1d_matches_gather_idx_1d(n: int, o: int, s: int) -> None:
+    """The scalar index formula of the kernels equals the vectorized one."""
+    scalar = [_window_index_1d(j, n, o, s) for j in range(o)]
+    assert scalar == list(gather_idx_1d(n, o, s))
+
+
+@pytest.mark.with_numba
+def test_gather_cpu_matches_fancy_indexing() -> None:
+    """The fused gather equals index arrays + conjugation + aperture (small case)."""
+    rng = np.random.default_rng(5)
+    sy, sx, oy, ox = 12, 10, 6, 5
+    shift = (2, 7)  # the window straddles the mirrored half
+    half = rng.random((sy, sx // 2 + 1)) + 1j * rng.random((sy, sx // 2 + 1))
+    aperture = rng.random((oy, ox))
+    iy, ix = gather_idx_1d(sy, oy, shift[0]), gather_idx_1d(sx, ox, shift[1])
+    mirror = ix > sx // 2
+    ixp = np.where(mirror, sx - ix, ix)
+    rows = np.where(mirror[None, :], ((-iy) % sy)[:, None], iy[:, None])
+    expected = half[rows, ixp[None, :]]
+    expected[:, mirror] = expected[:, mirror].conj()
+    expected *= aperture
+    out = np.empty((oy, ox), dtype=np.complex128)
+    _gather_cpu(half, np.arange(sx // 2 + 1), aperture, *shift, sy, sx, out)
+    assert np.array_equal(out, expected)
 
 
 @pytest.mark.parametrize("kind", ["half", "pruned"])
@@ -227,7 +259,7 @@ def test_out_shape_must_fit_frame(out_shape: tuple[int, int]) -> None:
 
 
 def test_device_indices_are_shared() -> None:
-    """Plans with the same parameters share the cached (device) index arrays."""
+    """Plans with the same parameters share the cached (device) column set."""
     # the sideband window lies in the mirrored half of the spectrum, the bf
     # window does not overlap it:
     sig_shape, out_shape, sb_pos = (64, 60), (16, 16), (5, 8)
@@ -240,15 +272,12 @@ def test_device_indices_are_shared() -> None:
     )
     after = _build_indices.cache_info()
     assert (after.hits, after.misses) == (before.hits + 1, before.misses)
-    for name in ("_cols", "_sb", "_bf"):
-        assert getattr(a, name) is getattr(b, name)
-    assert a._sb.sign is not None  # noqa: SLF001
-    assert a._sb.sign.dtype == np.int8  # noqa: SLF001
-    assert not a._sb.sign.flags.writeable  # noqa: SLF001
-    # without `aperture_bf` the pruned column set differs, the window itself is shared:
+    assert a._idx is b._idx  # noqa: SLF001
+    assert not a._idx.cols_host.flags.writeable  # noqa: SLF001
+    assert not a._idx.col_of_ixp.flags.writeable  # noqa: SLF001
+    # without `aperture_bf` the pruned column set is smaller:
     c = ReconstructionPlan(aperture=aperture, **kwargs)
-    assert c._sb is not a._sb  # noqa: SLF001
-    assert c._sb.rows is a._sb.rows  # noqa: SLF001
+    assert c._idx is not a._idx  # noqa: SLF001
     assert c.n_columns < a.n_columns
     # the wrappers build a plan per call and hit the cache from the second call on:
     frame = np.ones(sig_shape)
@@ -263,14 +292,14 @@ def test_device_indices_are_shared() -> None:
     assert (after.hits, after.misses) == (before.hits + 1, before.misses)
 
 
-def test_cached_windows_are_shared_read_only() -> None:
-    """Plans with the same geometry share the cached index arrays."""
+def test_sideband_position_is_truncated() -> None:
+    """Fractional sideband positions truncate to the same integer shift."""
     aperture = np.ones((8, 8))
     geometry = {"sig_shape": (32, 32), "out_shape": (8, 8), "aperture": aperture}
     a = ReconstructionPlan(sb_pos=(1, 1), **geometry)
     b = ReconstructionPlan(sb_pos=(1.9, 1), **geometry)
-    assert a._sb.rows is b._sb.rows  # noqa: SLF001
-    assert not a._sb.rows.flags.writeable  # noqa: SLF001
+    assert a._shift == b._shift == (1, 1)  # noqa: SLF001
+    assert a._idx is b._idx  # noqa: SLF001
 
 
 @pytest.mark.need_cupy
@@ -306,10 +335,9 @@ def test_device_indices_are_shared_cupy() -> None:
     }
     a = ReconstructionPlan(aperture=aperture, **kwargs)
     b = ReconstructionPlan(aperture=aperture, **kwargs)
-    assert isinstance(a._sb.rows, cp.ndarray)  # noqa: SLF001
-    assert isinstance(a._sb.sign, cp.ndarray)  # noqa: SLF001
-    assert a._sb is b._sb  # noqa: SLF001
-    assert a._cols is b._cols  # noqa: SLF001
+    assert isinstance(a._idx.cols, cp.ndarray)  # noqa: SLF001
+    assert isinstance(a._idx.col_of_ixp, cp.ndarray)  # noqa: SLF001
+    assert a._idx is b._idx  # noqa: SLF001
     frame = cp.ones(sig_shape)
     call = {
         "sb_pos": sb_pos, "aperture": aperture,
