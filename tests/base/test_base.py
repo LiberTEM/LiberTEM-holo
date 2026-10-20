@@ -183,7 +183,8 @@ def test_hologram_fft_equivalence(backend: str, precision, holo_stack) -> None:
     )
     # the same `holo_fft` is re-used for the brightfield:
     bf_ref = reconstruct_bf(
-        frame, aperture=p.aperture_bf, slice_fft=p.slice_fft, precision=precision, xp=xp,
+        frame, aperture=p.aperture_bf, slice_fft=p.slice_fft,
+        precision=precision, xp=xp,
     )
     bf = reconstruct_bf(
         holo_fft, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=xp,

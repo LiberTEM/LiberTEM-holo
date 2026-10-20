@@ -2,7 +2,12 @@ import numpy as np
 import pytest
 from libertem.api import Context
 
-from libertem_holo.base.convenience import _reconstruct_stack, reconstruct_stack
+from libertem_holo.base.align import ImageCorrelator
+from libertem_holo.base.convenience import (
+    _align_waves,
+    _reconstruct_stack,
+    reconstruct_stack,
+)
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.utils import HoloParams
 
@@ -112,23 +117,22 @@ def test_into_libertem_dataset_from_array(lt_ctx: Context):
 @pytest.mark.parametrize("n_threads", [1, 4])
 def test_align_waves_threads_identical(n_threads: int) -> None:
     """Threaded alignment gives the same result as the sequential loop."""
-    from libertem_holo.base.align import ImageCorrelator
-    from libertem_holo.base.convenience import _align_waves
-
     n, sy, sx = 6, 96, 80
     yy, xx = np.mgrid[:sy, :sx]
     disk = (np.sqrt((yy - sy / 2) ** 2 + (xx - sx / 2) ** 2) < 12).astype(np.float32)
     rng = np.random.default_rng(3)
     shifts_true = [(0, 0), (2, -3), (-4, 1), (5, 5), (-1, -6), (3, 0)]
-    bfs = np.stack([
-        np.roll(disk, s, axis=(0, 1)) + 0.05 * rng.random((sy, sx)).astype(np.float32)
-        for s in shifts_true
-    ])
-    waves = (rng.random((n, sy, sx)) + 1j * rng.random((n, sy, sx))).astype(np.complex128)
+    noise = 0.05 * rng.random((n, sy, sx)).astype(np.float32)
+    bfs = np.stack([np.roll(disk, s, axis=(0, 1)) for s in shifts_true]) + noise
+    waves = rng.random((n, sy, sx)) + 1j * rng.random((n, sy, sx))
     correlator = ImageCorrelator(hanning=True, binning=1, upsample_factor=10)
 
-    expected = _align_waves(waves.copy(), bfs.copy(), correlator, progress=False, n_threads=1)
-    result = _align_waves(waves.copy(), bfs.copy(), correlator, progress=False, n_threads=n_threads)
+    expected = _align_waves(
+        waves.copy(), bfs.copy(), correlator, progress=False, n_threads=1,
+    )
+    result = _align_waves(
+        waves.copy(), bfs.copy(), correlator, progress=False, n_threads=n_threads,
+    )
     for a, b in zip(result, expected, strict=True):
         assert np.array_equal(a, b)
     drifts = result[2]
