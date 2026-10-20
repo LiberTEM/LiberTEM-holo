@@ -1,6 +1,7 @@
 """Convenience functions for reconstruction and visualization."""
 from __future__ import annotations
 
+import contextlib
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Literal
@@ -304,7 +305,8 @@ def _align_waves(
     scales with the number of cores; BLAS is limited to one thread while the
     pool runs, as the upsampled DFT would otherwise oversubscribe the cores
     (measured 4x slower). `correlator` is shared between the threads, so it
-    must not keep per-call state.
+    must not keep per-call state. On cupy, the threads use the GPU that is
+    current in the calling thread.
 
     Returns
     -------
@@ -327,13 +329,16 @@ def _align_waves(
     drifts = xp.zeros((waves.shape[0], 2))
     # copy, as we update `bfs` in-place and `prepare_input` may return a view:
     ref = correlator.prepare_input(bfs[0].copy())
+    # the current GPU is thread-local in cupy, so carry it over to the pool:
+    device = contextlib.nullcontext() if xp is np else xp.cuda.Device()
 
     def _align_one(i: int) -> None:
-        moving = correlator.prepare_input(bfs[i])
-        shifts = correlator.correlate(ref_image=ref, moving_image=moving).shift
-        waves[i] = shift(waves[i], shifts)
-        bfs[i] = xp.abs(shift(bfs[i], shifts))
-        drifts[i] = xp.asarray(shifts)
+        with device:
+            moving = correlator.prepare_input(bfs[i])
+            shifts = correlator.correlate(ref_image=ref, moving_image=moving).shift
+            waves[i] = shift(waves[i], shifts)
+            bfs[i] = xp.abs(shift(bfs[i], shifts))
+            drifts[i] = xp.asarray(shifts)
 
     with (
         set_num_threads(1 if n_threads > 1 else None),
