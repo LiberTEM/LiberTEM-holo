@@ -16,7 +16,12 @@
    around the plan, with the same signatures; results agree with the previous
    implementation up to floating point rounding.
    :func:`~libertem_holo.base.reconstr.reconstruct_bf` gained the
-   :code:`precision` parameter.
+   :code:`precision` parameter. The index arrays of the plan are cached per
+   geometry and array module, on the GPU for cupy, so calling the wrappers
+   once per frame does not transfer anything per call. An :code:`out_shape`
+   larger than the hologram, or a :code:`slice_fft` that is not the centered
+   slice of :func:`~libertem_holo.base.utils.get_slice_fft`, now raise
+   :code:`ValueError` instead of producing wrapped-around results.
  * The :code:`precision` parameter now selects the computation dtype
    explicitly: :code:`True` transforms the hologram in float64 (complex128
    results), :code:`False` in float32 (complex64 results). Previously, float32

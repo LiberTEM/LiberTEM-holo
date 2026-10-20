@@ -13,6 +13,11 @@ window and then reconstructs each frame with
   no full-size ``roll``, ``fftshift`` or scaling passes,
 * reuse of the large intermediate buffer between frames (numpy only).
 
+The index arrays are cached per geometry and array module (and GPU device),
+on the device, so building a plan for parameters that were seen before, as
+:func:`libertem_holo.base.reconstr.reconstruct_frame` does per call, neither
+recomputes nor transfers anything.
+
 The results agree with the previous ``roll`` / ``fftshift`` / crop
 implementation up to floating point rounding, including its layout for odd
 sizes; see ``tests/base/test_plan.py``.
@@ -120,8 +125,69 @@ class _DeviceWindow:
     rows: typing.Any
     #: position of each output column in the pruned column set
     colpos: typing.Any
-    #: -1 for mirrored columns, +1 otherwise; None if nothing is mirrored
+    #: int8, -1 for mirrored columns, +1 otherwise; None if nothing is mirrored
     sign: typing.Any
+
+
+@dataclass(frozen=True)
+class _Indices:
+    """Everything of a plan that depends only on geometry and array module."""
+
+    #: unique columns of the half spectrum that the windows need, host
+    cols_host: np.ndarray
+    #: the same, on the compute device
+    cols: typing.Any
+    sb: _DeviceWindow
+    bf: _DeviceWindow | None
+
+
+def _to_device(w: _Window, colpos: np.ndarray, xp: XPType) -> _DeviceWindow:
+    sign = None
+    if w.mirror.any():
+        sign = np.where(w.mirror, -1, 1).astype(np.int8)
+        sign.setflags(write=False)
+        sign = xp.asarray(sign)
+    return _DeviceWindow(
+        ixp=xp.asarray(w.ixp),
+        rows=xp.asarray(w.rows),
+        colpos=xp.asarray(colpos),
+        sign=sign,
+    )
+
+
+@lru_cache(maxsize=8)
+def _build_indices(
+    *,
+    sig_shape: tuple[int, int],
+    out_shape: tuple[int, int],
+    shift: tuple[int, int],
+    with_bf: bool,
+    xp: XPType,
+    device: int | None,  # noqa: ARG001 (part of the cache key)
+) -> _Indices:
+    """Index arrays of a plan on the device of `xp`; cached, so transferred only once.
+
+    `device` is the current GPU for cupy (None for numpy): it only serves as
+    part of the cache key, as arrays live on the device they were created on.
+    Use ``_build_indices.cache_clear()`` to release the cached arrays.
+    """
+    sb = _build_window(sig_shape, out_shape, shift)
+    bf = _build_window(sig_shape, out_shape, (0, 0))
+    windows = [sb, bf] if with_bf else [sb]
+    cols, inv = np.unique(
+        np.concatenate([w.ixp for w in windows]), return_inverse=True,
+    )
+    ox = out_shape[1]
+    colpos_sb = np.ascontiguousarray(inv[:ox])
+    colpos_bf = np.ascontiguousarray(inv[ox:])
+    for arr in (cols, colpos_sb, colpos_bf):
+        arr.setflags(write=False)
+    return _Indices(
+        cols_host=cols,
+        cols=xp.asarray(cols),
+        sb=_to_device(sb, colpos_sb, xp),
+        bf=_to_device(bf, colpos_bf, xp) if with_bf else None,
+    )
 
 
 @dataclass
@@ -175,7 +241,9 @@ class ReconstructionPlan:
         Truncated to integers, like the previous implementation.
     aperture
         Sideband aperture of shape `out_shape`, in unshifted layout
-        (like :attr:`libertem_holo.base.utils.HoloParams.aperture`)
+        (like :attr:`libertem_holo.base.utils.HoloParams.aperture`). A
+        floating point aperture that is not wider than the computation's
+        precision is used as is, wider ones are cast down.
     aperture_bf
         Central band aperture for the brightfield image, same layout;
         optional
@@ -187,6 +255,14 @@ class ReconstructionPlan:
     reuse_buffers
         Keep the large intermediate array between frames (numpy only).
         A plan with buffers must not be shared between threads.
+
+    Notes
+    -----
+    `out_shape` must not exceed `sig_shape` along either axis. The index
+    arrays are cached per `sig_shape`, `out_shape`, integer sideband position,
+    presence of `aperture_bf` and `xp` (and GPU device), and are shared
+    read-only between plans, so building many plans for the same parameters
+    is cheap and does not transfer anything to the GPU.
 
     Examples
     --------
@@ -219,27 +295,37 @@ class ReconstructionPlan:
         self.precision = precision
         self.real_dtype = real_dtype(precision)
         self.complex_dtype = np.dtype(np.complex128 if precision else np.complex64)
+        for o, n in zip(self.out_shape, self.sig_shape, strict=True):
+            if not 1 <= o <= n:
+                msg = f"out_shape {self.out_shape} exceeds sig_shape {self.sig_shape}"
+                raise ValueError(msg)
         if tuple(aperture.shape) != self.out_shape:
             msg = f"aperture shape {aperture.shape} != out_shape {self.out_shape}"
             raise ValueError(msg)
-        self.aperture = xp.asarray(aperture, dtype=self.real_dtype)
+        if aperture_bf is not None and tuple(aperture_bf.shape) != self.out_shape:
+            msg = (
+                f"aperture_bf shape {aperture_bf.shape} != out_shape {self.out_shape}"
+            )
+            raise ValueError(msg)
+        self.aperture = self._as_aperture(aperture)
         self.aperture_bf = (
-            None if aperture_bf is None
-            else xp.asarray(aperture_bf, dtype=self.real_dtype)
+            None if aperture_bf is None else self._as_aperture(aperture_bf)
         )
 
         shift = (int(sb_pos[0]), int(sb_pos[1]))
-        sb = _build_window(self.sig_shape, self.out_shape, shift)
-        bf = _build_window(self.sig_shape, self.out_shape, (0, 0))
-        windows = [sb, bf] if aperture_bf is not None else [sb]
-        cols, inv = np.unique(
-            np.concatenate([w.ixp for w in windows]), return_inverse=True,
+        device = None if xp is np else int(xp.cuda.runtime.getDevice())
+        idx = _build_indices(
+            sig_shape=self.sig_shape,
+            out_shape=self.out_shape,
+            shift=shift,
+            with_bf=aperture_bf is not None,
+            xp=xp,
+            device=device,
         )
-        ox = self.out_shape[1]
-        self._cols_host = cols
-        self._cols = xp.asarray(cols)
-        self._sb = self._to_device(sb, inv[:ox])
-        self._bf = self._to_device(bf, inv[ox:]) if aperture_bf is not None else None
+        self._cols_host = idx.cols_host
+        self._cols = idx.cols
+        self._sb = idx.sb
+        self._bf = idx.bf
 
         self._buffers = reuse_buffers and xp is np
         self._half: np.ndarray | None = None
@@ -247,17 +333,17 @@ class ReconstructionPlan:
             sy, sx = self.sig_shape
             self._half = np.empty((sy, sx // 2 + 1), dtype=self.complex_dtype)
 
-    def _to_device(self, w: _Window, colpos: np.ndarray) -> _DeviceWindow:
-        xp = self.xp
-        sign = None
-        if w.mirror.any():
-            sign = xp.asarray(np.where(w.mirror, -1, 1).astype(self.real_dtype))
-        return _DeviceWindow(
-            ixp=xp.asarray(w.ixp),
-            rows=xp.asarray(w.rows),
-            colpos=xp.asarray(colpos),
-            sign=sign,
-        )
+    def _as_aperture(self, aperture: np.ndarray) -> np.ndarray:
+        """Move `aperture` to the device; cast only if wider than the precision.
+
+        Multiplying the complex window with a narrower float aperture
+        promotes it exactly, so there is no need for a copy per plan.
+        """
+        aperture = self.xp.asarray(aperture)
+        wider = aperture.dtype.itemsize > self.real_dtype.itemsize
+        if aperture.dtype.kind != "f" or wider:
+            aperture = aperture.astype(self.real_dtype)
+        return aperture
 
     @classmethod
     def from_params(
@@ -326,7 +412,8 @@ class ReconstructionPlan:
             msg = f"unknown spectrum kind {spec.kind!r}"
             raise ValueError(msg)
         if w.sign is not None:
-            # conjugate the columns that are only stored as their mirror:
+            # conjugate the columns that are only stored as their mirror
+            # (int8 sign: multiplying float32 or float64 by it keeps the dtype)
             crop.imag *= w.sign
         return crop
 

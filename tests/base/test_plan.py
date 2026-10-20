@@ -12,9 +12,11 @@ from libertem.utils.devices import detect
 from libertem_holo.base.plan import (
     PartialSpectrum,
     ReconstructionPlan,
+    _build_indices,
     gather_idx_1d,
     half_spectrum,
 )
+from libertem_holo.base.reconstr import reconstruct_frame
 from libertem_holo.base.utils import HoloParams, get_slice_fft
 from libertem_holo.udf.reconstr import HoloReconstructUDF
 
@@ -157,6 +159,23 @@ def test_float32() -> None:
     spec = half_spectrum(frame, precision=False)
     assert spec.data.dtype == np.complex64
     assert plan.wave(spec).dtype == np.complex64
+    # a wider aperture is cast down, so the computation stays in complex64:
+    plan_ap64 = ReconstructionPlan(
+        sig_shape=sig_shape, out_shape=out_shape, sb_pos=sb_pos,
+        aperture=aperture.astype(np.float64), precision=False,
+    )
+    assert plan_ap64.aperture.dtype == np.float32
+    assert np.array_equal(plan_ap64.reconstruct(frame), wave)
+    # a narrower aperture is used as is; the multiplication promotes it exactly:
+    plan_64 = ReconstructionPlan(
+        sig_shape=sig_shape, out_shape=out_shape, sb_pos=sb_pos,
+        aperture=aperture, precision=True,
+    )
+    assert plan_64.aperture.dtype == np.float32
+    frame_64 = frame.astype(np.float64)
+    wave_64 = plan_64.reconstruct(frame_64)
+    assert wave_64.dtype == np.complex128
+    assert rel_err(wave_64, legacy_wave(frame_64, sb_pos, aperture, slice_fft)) < 1e-12
 
 
 def test_plan_argument_errors() -> None:
@@ -164,6 +183,11 @@ def test_plan_argument_errors() -> None:
     with pytest.raises(ValueError, match="aperture shape"):
         ReconstructionPlan(
             sig_shape=(32, 32), out_shape=(8, 9), sb_pos=(1, 1), aperture=aperture,
+        )
+    with pytest.raises(ValueError, match="aperture_bf shape"):
+        ReconstructionPlan(
+            sig_shape=(32, 32), out_shape=(8, 8), sb_pos=(1, 1), aperture=aperture,
+            aperture_bf=np.ones((8, 9)),
         )
     plan = ReconstructionPlan(
         sig_shape=(32, 32), out_shape=(8, 8), sb_pos=(1, 1), aperture=aperture,
@@ -176,8 +200,67 @@ def test_plan_argument_errors() -> None:
         plan.wave(half_spectrum(np.ones((32, 33))))
     with pytest.raises(ValueError, match="unknown spectrum kind"):
         plan.wave(
-            PartialSpectrum(kind="full", data=None, sig_shape=(32, 32))
+            PartialSpectrum(kind="full", data=None, sig_shape=(32, 32)),
         )  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("out_shape", [(34, 8), (8, 34), (0, 8), (8, 0)])
+def test_out_shape_must_fit_frame(out_shape: tuple[int, int]) -> None:
+    """An output window larger than the frame would wrap around silently.
+
+    Even oversizes, as `get_slice_fft` clips odd ones to the frame size, which
+    the wrapper then rejects as an aperture shape mismatch.
+    """
+    with pytest.raises(ValueError, match="exceeds sig_shape"):
+        ReconstructionPlan(
+            sig_shape=(32, 32), out_shape=out_shape, sb_pos=(1, 1),
+            aperture=np.ones(out_shape),
+        )
+    if 0 in out_shape:
+        return
+    # the same through the wrapper, whose `get_slice_fft` slice has a negative start:
+    with pytest.raises(ValueError, match="exceeds sig_shape"):
+        reconstruct_frame(
+            np.ones((32, 32)), sb_pos=(1, 1), aperture=np.ones(out_shape),
+            slice_fft=get_slice_fft(out_shape, (32, 32)),
+        )
+
+
+def test_device_indices_are_shared() -> None:
+    """Plans with the same parameters share the cached (device) index arrays."""
+    # the sideband window lies in the mirrored half of the spectrum, the bf
+    # window does not overlap it:
+    sig_shape, out_shape, sb_pos = (64, 60), (16, 16), (5, 8)
+    aperture = np.ones(out_shape)
+    kwargs = {"sig_shape": sig_shape, "out_shape": out_shape, "sb_pos": sb_pos}
+    a = ReconstructionPlan(aperture=aperture, aperture_bf=aperture, **kwargs)
+    before = _build_indices.cache_info()
+    b = ReconstructionPlan(
+        aperture=aperture, aperture_bf=aperture, precision=False, **kwargs,
+    )
+    after = _build_indices.cache_info()
+    assert (after.hits, after.misses) == (before.hits + 1, before.misses)
+    for name in ("_cols", "_sb", "_bf"):
+        assert getattr(a, name) is getattr(b, name)
+    assert a._sb.sign is not None  # noqa: SLF001
+    assert a._sb.sign.dtype == np.int8  # noqa: SLF001
+    assert not a._sb.sign.flags.writeable  # noqa: SLF001
+    # without `aperture_bf` the pruned column set differs, the window itself is shared:
+    c = ReconstructionPlan(aperture=aperture, **kwargs)
+    assert c._sb is not a._sb  # noqa: SLF001
+    assert c._sb.rows is a._sb.rows  # noqa: SLF001
+    assert c.n_columns < a.n_columns
+    # the wrappers build a plan per call and hit the cache from the second call on:
+    frame = np.ones(sig_shape)
+    call = {
+        "sb_pos": sb_pos, "aperture": aperture,
+        "slice_fft": get_slice_fft(out_shape, sig_shape),
+    }
+    reconstruct_frame(frame, **call)
+    before = _build_indices.cache_info()
+    reconstruct_frame(frame, **call)
+    after = _build_indices.cache_info()
+    assert (after.hits, after.misses) == (before.hits + 1, before.misses)
 
 
 def test_cached_windows_are_shared_read_only() -> None:
@@ -208,6 +291,35 @@ def test_mirrored_columns_cupy() -> None:
     slice_fft = get_slice_fft(out_shape, sig_shape)
     assert rel_err(wave.get(), legacy_wave(frame, sb_pos, aperture, slice_fft)) < 1e-10
     assert rel_err(bf.get(), legacy_bf(frame, aperture, slice_fft)) < 1e-10
+
+
+@pytest.mark.need_cupy
+def test_device_indices_are_shared_cupy() -> None:
+    """The index arrays are transferred to the GPU once per parameter set."""
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+    sig_shape, out_shape, sb_pos = (64, 60), (16, 16), (5, 8)
+    aperture = cp.ones(out_shape)
+    kwargs = {
+        "sig_shape": sig_shape, "out_shape": out_shape, "sb_pos": sb_pos, "xp": cp,
+    }
+    a = ReconstructionPlan(aperture=aperture, **kwargs)
+    b = ReconstructionPlan(aperture=aperture, **kwargs)
+    assert isinstance(a._sb.rows, cp.ndarray)  # noqa: SLF001
+    assert isinstance(a._sb.sign, cp.ndarray)  # noqa: SLF001
+    assert a._sb is b._sb  # noqa: SLF001
+    assert a._cols is b._cols  # noqa: SLF001
+    frame = cp.ones(sig_shape)
+    call = {
+        "sb_pos": sb_pos, "aperture": aperture,
+        "slice_fft": get_slice_fft(out_shape, sig_shape), "xp": cp,
+    }
+    reconstruct_frame(frame, **call)
+    before = _build_indices.cache_info()
+    reconstruct_frame(frame, **call)
+    after = _build_indices.cache_info()
+    assert (after.hits, after.misses) == (before.hits + 1, before.misses)
 
 
 @pytest.mark.parametrize("precision", [True, False])
