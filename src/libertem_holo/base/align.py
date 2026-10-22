@@ -469,8 +469,11 @@ class ImageCorrelator(_FFTCorrelator):
         hanning: bool = True,
         binning: int = 1,
         xp: XPType = np,
-        correlate_on: Literal["bf", "wave", "hologram"] = "bf",
+        correlate_on: Literal["bf", "wave"] = "bf",
     ) -> None:
+        if correlate_on not in ("bf", "wave"):
+            msg = f"correlate_on must be 'bf' or 'wave', not {correlate_on!r}"
+            raise ValueError(msg)
         self._xp = xp
         self._upsample_factor = upsample_factor
         self._normalization = normalization

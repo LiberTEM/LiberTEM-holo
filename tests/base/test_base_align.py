@@ -436,6 +436,8 @@ def test_correlate_on_attribute():
     # per instance for the input-agnostic ImageCorrelator:
     assert ImageCorrelator(correlate_on="wave").correlate_on == "wave"
     assert ImageCorrelator.correlate_on == "bf"
+    with pytest.raises(ValueError, match="correlate_on"):
+        ImageCorrelator(correlate_on="hologram")
 
 
 @pytest.mark.parametrize("backend", ["numpy", "cupy"])
