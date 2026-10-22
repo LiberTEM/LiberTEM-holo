@@ -2,7 +2,14 @@ import numpy as np
 import pytest
 from libertem.api import Context
 
-from libertem_holo.base.align import ImageCorrelator
+from libertem_holo.base._registration import REFERENCE_NODE
+from libertem_holo.base.align import (
+    AmplitudeCorrelator,
+    AnchoredRegistration,
+    ImageCorrelator,
+    StarRegistration,
+    WaveCorrelator,
+)
 from libertem_holo.base.convenience import (
     _align_waves,
     _reconstruct_stack,
@@ -137,3 +144,156 @@ def test_align_waves_threads_identical(n_threads: int) -> None:
         assert np.array_equal(a, b)
     drifts = result[2]
     assert np.allclose(drifts, -np.asarray(shifts_true, dtype=float), atol=0.11)
+
+
+def test_reconstruct_stack_registration_star_is_default(holo_stack, lt_ctx: Context):
+    """`StarRegistration()` on brightfield images is the untouched default."""
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    default = reconstruct_stack(stack, backend="libertem", ctx=lt_ctx, progress=False)
+    star = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False,
+        registration=StarRegistration(),
+    )
+    # (the averaged wave of two identical runs differs by roundoff, ~1e-15)
+    np.testing.assert_allclose(
+        default.complex_wave, star.complex_wave, rtol=0,
+        atol=1e-12 * np.abs(default.complex_wave).max(),
+    )
+    assert np.array_equal(default.brightfield, star.brightfield)
+    assert default.metadata["drifts_x"] == star.metadata["drifts_x"]
+    assert default.metadata["drifts_y"] == star.metadata["drifts_y"]
+    assert "registration" not in default.metadata
+    assert "registration" not in star.metadata
+
+
+@pytest.mark.parametrize("correlator", ["bf", "wave"])
+def test_reconstruct_stack_anchored(holo_stack, lt_ctx: Context, correlator, tmp_path):
+    holo, _, _, _ = holo_stack
+    n = holo.shape[0]
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    star = reconstruct_stack(stack, backend="libertem", ctx=lt_ctx, progress=False)
+    kwargs = {} if correlator == "bf" else {"correlator": WaveCorrelator()}
+    res = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False,
+        registration=AnchoredRegistration(batch_size=4), **kwargs,
+    )
+    drifts = np.vstack([res.metadata["drifts_x"], res.metadata["drifts_y"]]).T
+    drifts_star = np.vstack([star.metadata["drifts_x"], star.metadata["drifts_y"]]).T
+    assert drifts.shape == (n, 2)
+    assert np.all(np.isfinite(drifts))
+    if correlator == "bf":
+        # the fixture is not physically sound (hard edges, amplitude > 1), so
+        # only rough consistency with the star alignment is asserted here;
+        # the wave correlator is not meaningful on it at all
+        assert np.allclose(drifts, drifts_star, atol=1.0)
+        assert np.corrcoef(drifts.ravel(), drifts_star.ravel())[0, 1] > 0.95
+
+    meta = res.metadata["registration"]
+    assert meta["topology"] == "anchored"
+    assert meta["batch_size"] == 4
+    n_edges = 6 + (4 + 6) + (2 + 1)  # batches of 4, 4, 2 frames
+    for key in ("first", "second", "psr", "weight", "residual", "shift"):
+        assert len(meta[key]) == n_edges, key
+    assert all(isinstance(x, int) for x in meta["first"])
+    assert all(isinstance(x, float) for x in meta["psr"])
+    assert np.all(np.asarray(meta["psr"]) > 0)
+    assert np.asarray(meta["first"]).min() == REFERENCE_NODE
+    # JSON round trip through save/load:
+    path = tmp_path / "anchored.npz"
+    res.save(path)
+    assert Results.load(path).metadata["registration"] == meta
+
+
+def test_reconstruct_stack_wave_correlator_default_registration(holo_stack, lt_ctx: Context):
+    """A correlator that doesn't register brightfield images never takes the legacy path."""
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    implicit = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, correlator=WaveCorrelator(),
+    )
+    explicit = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, correlator=WaveCorrelator(),
+        registration=StarRegistration(),
+    )
+    assert implicit.metadata["registration"]["topology"] == "star"
+    assert implicit.metadata["drifts_x"] == explicit.metadata["drifts_x"]
+    assert implicit.metadata["drifts_y"] == explicit.metadata["drifts_y"]
+    assert implicit.metadata["registration"] == explicit.metadata["registration"]
+    # and it is not what the brightfield images give:
+    bf = reconstruct_stack(stack, backend="libertem", ctx=lt_ctx, progress=False)
+    assert implicit.metadata["drifts_x"] != bf.metadata["drifts_x"]
+
+
+def test_reconstruct_stack_registration_strings(holo_stack, lt_ctx: Context):
+    """The topology names stand for the option classes with their defaults."""
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    default = reconstruct_stack(stack, backend="libertem", ctx=lt_ctx, progress=False)
+    star = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, registration="star",
+    )
+    assert star.metadata["drifts_x"] == default.metadata["drifts_x"]
+    assert "registration" not in star.metadata
+    anchored = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, registration="anchored",
+    )
+    explicit = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False,
+        registration=AnchoredRegistration(),
+    )
+    assert anchored.metadata["registration"] == explicit.metadata["registration"]
+    assert anchored.metadata["registration"]["batch_size"] == 16
+    with pytest.raises(ValueError, match="unknown registration"):
+        reconstruct_stack(
+            stack, backend="libertem", ctx=lt_ctx, progress=False, registration="ring",
+        )
+
+
+def test_reconstruct_stack_image_correlator_on_waves(holo_stack, lt_ctx: Context):
+    """`ImageCorrelator(correlate_on="wave")` with the WaveCorrelator's settings is one."""
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    on_waves = ImageCorrelator(
+        upsample_factor=10, normalization=None, hanning=True, binning=1, correlate_on="wave",
+    )
+    a = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, correlator=on_waves,
+        registration="anchored",
+    )
+    b = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, correlator=WaveCorrelator(),
+        registration="anchored",
+    )
+    assert a.metadata["drifts_x"] == b.metadata["drifts_x"]
+    assert a.metadata["drifts_y"] == b.metadata["drifts_y"]
+    assert a.metadata["registration"] == b.metadata["registration"]
+
+
+def test_reconstruct_stack_registration_errors(holo_stack, lt_ctx: Context):
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    params = HoloParams.from_hologram(holo[0], out_shape=(32, 32), central_band_mask_radius=10)
+    with pytest.raises(ValueError, match="anchored topology"):
+        reconstruct_stack(
+            stack, backend="libertem", ctx=lt_ctx, progress=False,
+            holoparams=params, correlator=AmplitudeCorrelator(holoparams=params),
+            registration=AnchoredRegistration(),
+        )
+
+
+@pytest.mark.parametrize("correlator", ["bf", "wave"])
+def test_reconstruct_stack_anchored_cupy(holo_stack, lt_ctx: Context, correlator):
+    if cp is None:
+        pytest.skip("no cupy")
+    holo, _, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    options = AnchoredRegistration(batch_size=4)
+    kwargs = {} if correlator == "bf" else {"correlator": WaveCorrelator()}
+    expected = reconstruct_stack(
+        stack, backend="libertem", ctx=lt_ctx, progress=False, registration=options, **kwargs,
+    )
+    kwargs = {} if correlator == "bf" else {"correlator": WaveCorrelator(xp=cp)}
+    res = reconstruct_stack(stack, backend="cupy", progress=False, registration=options, **kwargs)
+    _assert_results_similar(res, expected)
+    assert len(res.metadata["registration"]["psr"]) == len(expected.metadata["registration"]["psr"])

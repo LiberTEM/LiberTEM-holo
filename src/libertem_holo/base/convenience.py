@@ -4,12 +4,24 @@ from __future__ import annotations
 import contextlib
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from libertem.common.threading import set_num_threads
 from scipy.ndimage import gaussian_filter
 
-from libertem_holo.base.align import Correlator, ImageCorrelator
+from libertem_holo.base._registration import (
+    Registration,
+    RegistrationArg,
+    StackRegistrationResult,
+    register_stack,
+    resolve_registration,
+)
+from libertem_holo.base.align import (
+    AnchoredRegistration,
+    Correlator,
+    ImageCorrelator,
+    StarRegistration,
+)
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.plan import ReconstructionPlan
 from libertem_holo.base.reconstr import phase_offset_correction
@@ -42,6 +54,7 @@ def reconstruct_stack(
     ctx: Context | None = None,
     progress: bool = True,
     align_threads: int | None = None,
+    registration: RegistrationArg = None,
 ) -> Results:
     """Reconstruct and align a stack of holograms.
 
@@ -67,9 +80,13 @@ def reconstruct_stack(
         the first hologram in the stack.
     correlator : Correlator, optional
         Parameters for frame by frame alignment.
-        If None, phase correlation will be used. Make sure the correlator
-        works with the array module matching the `backend` (cupy for
-        :code:`"cupy"`, numpy for :code:`"libertem"`).
+        If None, phase correlation of the brightfield images will be used.
+        Make sure the correlator works with the array module matching the
+        `backend` (cupy for :code:`"cupy"`, numpy for :code:`"libertem"`).
+        Its :attr:`~libertem_holo.base.align.Correlator.correlate_on` decides
+        whether it is given the brightfield images, the complex waves (for
+        example :class:`~libertem_holo.base.align.WaveCorrelator`, or
+        :code:`ImageCorrelator(correlate_on="wave")`) or the raw holograms.
     backend : "cupy" or "libertem"
         With :code:`"cupy"`, everything runs on the GPU in this process.
         With :code:`"libertem"`, the reconstruction runs as a
@@ -85,9 +102,21 @@ def reconstruct_stack(
     progress : bool
         Show progress bars
     align_threads : int, optional
-        Number of threads for registering and shifting the frames; all frames
-        are aligned against the first one, so they are independent. Defaults
+        Number of threads for registering and shifting the frames. Defaults
         to the number of CPUs for numpy, and to 1 for cupy.
+    registration : "star" or "anchored", optional
+        How the frames are registered. :code:`"star"` (the default): every
+        frame is registered against the first one. :code:`"anchored"`:
+        batches of frames are registered pairwise and solved jointly,
+        weighted by the peak-to-sidelobe ratio of each measurement. To
+        change the batch size or the solver parameters of the latter, pass
+        an :class:`~libertem_holo.base.align.AnchoredRegistration` instead
+        of the string (:class:`~libertem_holo.base.align.StarRegistration`
+        has no parameters). Unless the registration is the default star
+        alignment of the brightfield images, the per-pair measurements are
+        stored under :code:`metadata["registration"]` (frame indices,
+        measured shifts, PSR, final weights and residuals; the averaged
+        reference of the anchored topology is frame index -1).
 
     Returns
     -------
@@ -119,6 +148,7 @@ def reconstruct_stack(
         ctx=ctx,
         progress=progress,
         align_threads=align_threads,
+        registration=registration,
     )
 
 
@@ -132,6 +162,7 @@ def _reconstruct_stack(
     ctx: Context | None,
     progress: bool,
     align_threads: int | None = None,
+    registration: RegistrationArg = None,
 ) -> Results:
     """Implementation of :func:`reconstruct_stack`.
 
@@ -163,9 +194,20 @@ def _reconstruct_stack(
     waves, bfs = _reconstruct_waves(
         stack, holoparams, with_bf=True, xp=xp, ctx=ctx, progress=progress,
     )
-    waves, bfs, drifts = _align_waves(
-        waves, bfs, correlator, xp=xp, progress=progress, n_threads=align_threads,
-    )
+    assert bfs is not None  # noqa: S101
+    registration_result: StackRegistrationResult | None = None
+    options = resolve_registration(registration)
+    if _use_star_alignment(options, correlator):
+        # TODO(libertem-holo 2.x): default to the "anchored" topology  # noqa: TD003, FIX002
+        waves, bfs, drifts = _align_waves(
+            waves, bfs, correlator, xp=xp, progress=progress, n_threads=align_threads,
+        )
+    else:
+        waves, bfs, registration_result = _align_waves_graph(
+            waves, bfs, stack, correlator, options,
+            xp=xp, progress=progress, n_threads=align_threads,
+        )
+        drifts = registration_result.drifts
 
     wave_avg, _, _ = phase_offset_correction(waves, xp=xp)
     bf_avg = xp.mean(bfs, axis=0)
@@ -185,7 +227,26 @@ def _reconstruct_stack(
     drifts = to_cpu(drifts)
     res.metadata["drifts_x"] = list(drifts[..., 0])
     res.metadata["drifts_y"] = list(drifts[..., 1])
+    if registration_result is not None:
+        res.metadata["registration"] = {
+            "topology": options.topology,
+            **registration_result.to_metadata(),
+        }
+        if isinstance(options, AnchoredRegistration):
+            res.metadata["registration"]["batch_size"] = options.batch_size
     return res
+
+
+def _use_star_alignment(registration: Registration, correlator: Correlator) -> bool:
+    """Whether `registration` is what :func:`_align_waves` does.
+
+    That is the default: every brightfield image against the first one.
+    Kept on its own code path so that the results of existing workflows stay
+    bit-identical.
+    """
+    if getattr(correlator, "correlate_on", "bf") != "bf":
+        return False
+    return isinstance(registration, StarRegistration)
 
 
 def _reconstruct_waves(
@@ -351,6 +412,116 @@ def _align_waves(
         ):
             pass
     return waves, bfs, drifts
+
+
+class _HologramFrames:
+    """The raw holograms of a stack as an indexable sequence of `xp` arrays."""
+
+    def __init__(self, stack: InputData, xp: XPType) -> None:
+        self._stack = stack
+        self._xp = xp
+
+    def __len__(self) -> int:
+        return len(self._stack.data)
+
+    def __getitem__(self, i: int) -> np.ndarray:
+        return self._xp.asarray(self._stack.data[i])
+
+
+def _align_waves_graph(  # noqa: C901
+    waves: np.ndarray,
+    bfs: np.ndarray,
+    stack: InputData,
+    correlator: Correlator,
+    options: Registration,
+    *,
+    xp: XPType = np,
+    progress: bool = True,
+    n_threads: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, StackRegistrationResult]:
+    """Align a stack of waves by pairwise graph registration.
+
+    The frames the correlator registers are chosen by its
+    :attr:`~libertem_holo.base.align.Correlator.correlate_on`: the
+    brightfield images `bfs`, the `waves`, or the raw holograms of `stack`.
+    The solved drifts are applied to both `waves` and `bfs` in place, batch
+    by batch (see :func:`~libertem_holo.base.align.register_stack`). For the
+    anchored topology, the reference is the average of the aligned frames of
+    the first batch: the mean of the brightfield images, or the
+    :func:`~libertem_holo.base.reconstr.phase_offset_correction` average of
+    the waves; raw holograms can't be averaged, so that combination is
+    rejected.
+
+    Returns
+    -------
+    waves
+        The aligned waves
+    bfs
+        The aligned (absolute) brightfield images
+    result
+        The drifts (shape (N, 2)) and the per-pair measurements
+
+    """
+    if xp is np:
+        from scipy.ndimage import shift  # noqa: PLC0415
+    else:
+        from cupyx.scipy.ndimage import shift  # noqa: PLC0415
+
+    kind = getattr(correlator, "correlate_on", "bf")
+    if kind == "bf":
+        frames: Any = bfs
+    elif kind == "wave":
+        frames = waves
+    elif kind == "hologram":
+        frames = _HologramFrames(stack, xp)
+    else:
+        msg = f"unknown correlate_on {kind!r} of {type(correlator).__name__}"
+        raise ValueError(msg)
+    if isinstance(options, AnchoredRegistration) and kind == "hologram":
+        msg = (
+            "the anchored topology needs a correlator that registers the "
+            "brightfield images or the waves (correlate_on 'bf' or 'wave'), "
+            f"{type(correlator).__name__} registers raw holograms"
+        )
+        raise ValueError(msg)
+
+    if n_threads is None:
+        n_threads = (os.cpu_count() or 1) if xp is np else 1
+    # the current GPU is thread-local in cupy, so carry it over to the pool:
+    device = contextlib.nullcontext() if xp is np else xp.cuda.Device()
+
+    def align_batch(indices: range, drifts: np.ndarray) -> None:
+        def _align_one(k: int) -> None:
+            i = indices[k]
+            with device:
+                waves[i] = shift(waves[i], drifts[k])
+                bfs[i] = xp.abs(shift(bfs[i], drifts[k]))
+
+        with (
+            set_num_threads(1 if n_threads > 1 else None),
+            ThreadPoolExecutor(max_workers=n_threads) as pool,
+        ):
+            for _ in pool.map(_align_one, range(len(indices))):
+                pass
+
+    def make_reference(indices: range) -> np.ndarray:
+        batch = slice(indices.start, indices.stop)
+        if kind == "bf":
+            return xp.mean(bfs[batch], axis=0)
+        reference, _, _ = phase_offset_correction(waves[batch], xp=xp)
+        return reference
+
+    result = register_stack(
+        frames,
+        correlator,
+        options,
+        align_batch=align_batch,
+        make_reference=make_reference,
+        n_threads=n_threads,
+        xp=xp,
+        progress=progress,
+    )
+    return waves, bfs, result
 
 
 def plot_mag_induction(
