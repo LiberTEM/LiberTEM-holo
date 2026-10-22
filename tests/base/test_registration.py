@@ -374,19 +374,21 @@ def test_register_stack_cupy(topology):
     anchored = AnchoredRegistration(batch_size=4)
     options = StarRegistration() if topology == "star" else anchored
 
-    def make_reference_np(indices):
-        return bfs[indices.start:indices.stop].mean(axis=0)
+    # the drifts reach `align_batch` on the host, so the numpy aligner serves
+    # both runs; only the reference goes to the device
+    align_np, make_reference_np, _ = _rolling_aligner(bfs)
+    align_cp, make_reference_host, _ = _rolling_aligner(bfs)
 
     def make_reference_cp(indices):
-        return cp.asarray(bfs[indices.start:indices.stop]).mean(axis=0)
+        return cp.asarray(make_reference_host(indices))
 
     expected = register_stack(
         bfs, ImageCorrelator(upsample_factor=10), options,
-        make_reference=make_reference_np,
+        align_batch=align_np, make_reference=make_reference_np,
     )
     result = register_stack(
         cp.asarray(bfs), ImageCorrelator(upsample_factor=10, xp=cp), options,
-        make_reference=make_reference_cp, xp=cp,
+        align_batch=align_cp, make_reference=make_reference_cp, xp=cp,
     )
     for name in ("drifts", "first", "second", "shift", "psr", "weight", "residual"):
         assert isinstance(getattr(result, name), np.ndarray), name
