@@ -214,6 +214,84 @@ def test_hologram_fft_xp_mismatch(holo_stack) -> None:
         reconstruct_bf(holo_fft, aperture=p.aperture_bf, slice_fft=p.slice_fft, xp=np)
 
 
+@pytest.fixture
+def frame_and_params(holo_stack):
+    holo, _, _, _ = holo_stack
+    frame = holo[0]
+    p = HoloParams.from_hologram(frame, out_shape=(64, 64), central_band_mask_radius=10)
+    return frame, p
+
+
+def test_reconstruct_frame_holoparams(frame_and_params) -> None:
+    """`holoparams=` is the same as passing the parameters explicitly (#176)."""
+    frame, p = frame_and_params
+    expected = reconstruct_frame(frame, p.sb_position, p.aperture, p.slice_fft)
+    wave = reconstruct_frame(frame, holoparams=p)
+    assert np.array_equal(wave, expected)
+    assert wave.shape == (64, 64)
+
+    holo_fft = HologramFFT(frame)
+    assert np.allclose(reconstruct_frame(holo_fft, holoparams=p), expected)
+
+
+def test_reconstruct_frame_holoparams_override(frame_and_params) -> None:
+    """Explicit arguments take precedence over `holoparams`."""
+    frame, p = frame_and_params
+    expected = reconstruct_frame(frame, (0, 0), p.aperture, p.slice_fft)
+    wave = reconstruct_frame(frame, sb_pos=(0, 0), holoparams=p)
+    assert np.array_equal(wave, expected)
+
+    other = HoloParams.from_hologram(
+        frame, out_shape=(32, 32), central_band_mask_radius=10,
+    )
+    wave = reconstruct_frame(
+        frame, aperture=other.aperture, slice_fft=other.slice_fft, holoparams=p,
+    )
+    assert wave.shape == (32, 32)
+
+
+def test_reconstruct_frame_estimate_params(frame_and_params) -> None:
+    """Without any parameters, they are estimated with `from_hologram`."""
+    frame, _ = frame_and_params
+    p = HoloParams.from_hologram(frame)
+    wave = reconstruct_frame(frame)
+    assert np.array_equal(wave, reconstruct_frame(frame, holoparams=p))
+    assert wave.shape == (frame.shape[0] // 4, frame.shape[1] // 4)
+
+
+@pytest.mark.parametrize("given", ["sb_pos", "aperture", "slice_fft"])
+def test_reconstruct_frame_partial_params(frame_and_params, given: str) -> None:
+    frame, p = frame_and_params
+    values = {"sb_pos": p.sb_position, "aperture": p.aperture, "slice_fft": p.slice_fft}
+    with pytest.raises(ValueError, match="missing"):
+        reconstruct_frame(frame, **{given: values[given]})
+
+
+def test_reconstruct_frame_hologram_fft_needs_params(frame_and_params) -> None:
+    frame, _ = frame_and_params
+    with pytest.raises(TypeError, match="HologramFFT"):
+        reconstruct_frame(HologramFFT(frame))
+
+
+def test_reconstruct_frame_holoparams_shape_mismatch(frame_and_params) -> None:
+    frame, p = frame_and_params
+    with pytest.raises(ValueError, match="shape"):
+        reconstruct_frame(frame[:128, :128], holoparams=p)
+
+
+def test_reconstruct_frame_holoparams_cupy(frame_and_params) -> None:
+    """`xp` defaults to `holoparams.xp`."""
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+    frame, _ = frame_and_params
+    p_cp = HoloParams.from_hologram(
+        cp.asarray(frame), out_shape=(64, 64), central_band_mask_radius=10, xp=cp,
+    )
+    wave = reconstruct_frame(cp.asarray(frame), holoparams=p_cp)
+    assert isinstance(wave, cp.ndarray)
+
+
 @pytest.mark.need_cupy
 def test_cupy_is_available():
     """
