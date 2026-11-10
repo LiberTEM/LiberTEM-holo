@@ -147,6 +147,41 @@ def test_phase_offset(backend: str, holo_data, lt_ctx) -> None:
     )
 
 
+@pytest.mark.parametrize("shape", [(1, 16, 12), (16, 12)])
+def test_phase_offset_single_image(shape) -> None:
+    """A single image, as (1, sy, sx) stack or (sy, sx) array, is passed through."""
+    rng = np.random.default_rng(42)
+    image = rng.random(shape) + 1j * rng.random(shape)
+
+    averaged, phase_offsets, stack = phase_offset_correction(image, return_stack=True)
+    assert averaged.shape == (16, 12)
+    assert np.array_equal(averaged, image.reshape((16, 12)))
+    assert np.array_equal(phase_offsets, [[1]])
+    assert stack.shape == shape
+    assert np.array_equal(stack, image)
+    # copies, not views of the input:
+    assert not np.shares_memory(averaged, image)
+    assert not np.shares_memory(stack, image)
+
+    averaged_only, _, no_stack = phase_offset_correction(image)
+    assert np.array_equal(averaged_only, averaged)
+    assert no_stack is None
+
+
+def test_phase_offset_single_real_image() -> None:
+    """A real-valued single image comes back as complex, like a stack does."""
+    image = np.ones((8, 8), dtype=np.float32)
+    averaged, _, _ = phase_offset_correction(image)
+    assert np.iscomplexobj(averaged)
+    assert np.array_equal(averaged, image)
+
+
+@pytest.mark.parametrize("shape", [(16,), (2, 1, 16, 12), (0, 16, 12)])
+def test_phase_offset_bad_shape(shape) -> None:
+    with pytest.raises(ValueError, match="stack"):
+        phase_offset_correction(np.ones(shape, dtype=complex))
+
+
 @pytest.mark.parametrize(
     "backend", ["numpy", "cupy"],
 )
