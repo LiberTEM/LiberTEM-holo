@@ -179,9 +179,29 @@ def test_fringe_contrast_sideband(visibility, sampling, f_angle):
 def test_fringe_contrast_profile(visibility, sampling, f_angle):
     holo = _vacuum_hologram(visibility, sampling=sampling, f_angle=f_angle)
     contrast = fringe_contrast(holo, method="profile", size=200)
-    # sampling at whole pixels misses the extrema a bit, so the profile
-    # underestimates the contrast, by up to ~20 % at 4 px per fringe:
-    assert 0.78 * visibility < contrast <= visibility + 1e-9
+    # interpolation and averaging smooth the fringes a little, so the profile
+    # underestimates the contrast by up to ~5 % here:
+    assert 0.93 * visibility < contrast < 1.01 * visibility
+
+
+@pytest.mark.parametrize("f_angle", [30, 75])
+@pytest.mark.parametrize("sampling", [4, 5])
+def test_fringe_contrast_profile_subpixel_stable(sampling, f_angle):
+    """Shifting the profile by a fraction of a pixel hardly changes the result.
+
+    Reading the contrast from the sampled extrema instead was unstable at
+    ~4 px per fringe: a shift of 1e-9 px changed it from 82 % to 68 % of
+    the true value.
+    """
+    holo = _vacuum_hologram(0.7, sampling=sampling, f_angle=f_angle)
+    offsets = np.random.default_rng(1).uniform(-0.5, 0.5, size=(10, 2))
+    contrast = [
+        fringe_contrast(
+            holo, method="profile", size=200, center=(256 + dy, 256 + dx),
+        )
+        for dy, dx in offsets
+    ]
+    assert np.ptp(contrast) < 0.01 * 0.7
 
 
 def test_fringe_contrast_poisson_noise():
@@ -192,7 +212,7 @@ def test_fringe_contrast_poisson_noise():
     rng = np.random.default_rng(42)
     holo = noise_scale * rng.poisson(_vacuum_hologram(0.5) / noise_scale)
     assert np.isclose(fringe_contrast(holo, method="sideband"), 0.5, rtol=0.02)
-    assert 0.4 < fringe_contrast(holo, method="profile") < 0.5
+    assert np.isclose(fringe_contrast(holo, method="profile"), 0.5, rtol=0.04)
 
 
 def test_fringe_contrast_map():
@@ -252,8 +272,8 @@ def test_fringe_contrast_region_too_large(method):
 
 def test_fringe_contrast_profile_too_short():
     holo = _vacuum_hologram(0.5, shape=(128, 128))
-    with pytest.raises(ValueError, match="maxima"):
-        fringe_contrast(holo, method="profile", size=3)
+    with pytest.raises(ValueError, match="less than 2 fringe periods"):
+        fringe_contrast(holo, method="profile", size=8)
 
 
 def test_fringe_contrast_unknown_method():

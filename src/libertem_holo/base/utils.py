@@ -48,7 +48,6 @@ import scipy.fft
 from skimage.draw import polygon
 from skimage.measure import profile_line
 from scipy.ndimage import gaussian_filter
-from scipy.signal import find_peaks
 from scipy.optimize import least_squares
 
 
@@ -545,11 +544,10 @@ class HoloParams(typing.NamedTuple):
 
 #: Default size of the region for :func:`fringe_contrast`, in fringe periods
 FRINGE_CONTRAST_PERIODS = 50
-# minimum distance between two maxima (or minima) of the line profile, as a
-# fraction of the fringe period:
-_PEAK_DISTANCE_RATIO = 0.6
-# minimum number of maxima and minima in the line profile:
-_MIN_EXTREMA = 2
+# minimum length of the line profile, in fringe periods:
+_MIN_PROFILE_PERIODS = 2
+# spline order for sampling the line profile (cubic):
+_PROFILE_ORDER = 3
 
 
 def fringe_period(
@@ -752,13 +750,18 @@ def fringe_contrast(
       `size` around `center`.
     * :code:`"profile"`: a line profile of length `size` through `center`,
       perpendicular to the fringes and averaged over `width` pixels along
-      them, without interpolation. The contrast is
-      :math:`(I_{max} - I_{min}) / (I_{max} + I_{min})`, with the mean of the
-      maxima and of the minima of the profile. The direction and the period of
+      them, sampled with cubic interpolation. The direction and the period of
       the fringes are determined from the sideband position, see
-      :func:`fringe_period`. As the profile is sampled at whole pixels, the
-      extrema are usually missed slightly, so this underestimates the
-      contrast, the more so the fewer pixels per fringe.
+      :func:`fringe_period`. A cosine
+      :math:`\bar{I} + A \cos(2 \pi s / T + \varphi)` with the fringe
+      period :math:`T` is fitted to the profile, and the contrast is
+      :math:`A / \bar{I}`, which is
+      :math:`(I_{max} - I_{min}) / (I_{max} + I_{min})` for sinusoidal
+      fringes. Using the whole profile, instead of only its sampled maxima
+      and minima, makes the result independent of where exactly the samples
+      fall on the fringes. Interpolation and averaging smooth the fringes a
+      little, so this slightly underestimates the contrast (by a few percent
+      at 4 to 8 pixels per fringe on synthetic holograms).
 
     Both methods measure the fringe contrast only where the object and
     reference waves have the same amplitude, for example in vacuum or in a
@@ -806,7 +809,7 @@ def fringe_contrast(
     >>> holo = hologram_frame(np.ones((512, 512)), np.zeros((512, 512)), visibility=0.4)
     >>> round(fringe_contrast(holo, method="sideband"), 2)
     0.4
-    >>> 0.3 < fringe_contrast(holo, method="profile") <= 0.4
+    >>> abs(fringe_contrast(holo, method="profile") - 0.4) < 0.02
     True
 
     """
@@ -895,21 +898,27 @@ def _profile_contrast(
             f"{hologram.shape}; pass a smaller `size` or `width`"
         )
         raise ValueError(msg)
-    profile = profile_line(
-        hologram, start, end, linewidth=width, order=0, mode="reflect",
-    )
-    distance = max(1, int(_PEAK_DISTANCE_RATIO * period))
-    maxima, _ = find_peaks(profile, distance=distance)
-    minima, _ = find_peaks(-profile, distance=distance)
-    if len(maxima) < _MIN_EXTREMA or len(minima) < _MIN_EXTREMA:
+    if size < _MIN_PROFILE_PERIODS * period:
         msg = (
-            f"found only {len(maxima)} maxima and {len(minima)} minima in the "
-            "line profile; pass a larger `size`"
+            f"the profile of length {size:.1f} px covers less than "
+            f"{_MIN_PROFILE_PERIODS} fringe periods ({period:.2f} px); "
+            "pass a larger `size`"
         )
         raise ValueError(msg)
-    i_max = profile[maxima].mean()
-    i_min = profile[minima].mean()
-    return float((i_max - i_min) / (i_max + i_min))
+    profile = profile_line(
+        np.asarray(hologram, dtype=np.float64), start, end,
+        linewidth=width, order=_PROFILE_ORDER, mode="reflect",
+    )
+    # fit mean + amplitude * cos(2 pi s / period + phase), which is linear in
+    # (mean, a, b) for mean + a cos(2 pi s / period) + b sin(2 pi s / period):
+    s = np.linspace(0, size, len(profile))
+    arg = 2 * np.pi * s / period
+    design = np.stack([np.ones_like(s), np.cos(arg), np.sin(arg)], axis=1)
+    (mean, a, b), *_ = np.linalg.lstsq(design, profile, rcond=None)
+    if mean <= 0:
+        msg = f"the mean intensity of the line profile is {mean}, should be positive"
+        raise ValueError(msg)
+    return float(np.hypot(a, b) / mean)
 
 
 @lru_cache
