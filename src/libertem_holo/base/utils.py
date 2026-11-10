@@ -46,7 +46,9 @@ except ImportError:
 import numpy as np
 import scipy.fft
 from skimage.draw import polygon
+from skimage.measure import profile_line
 from scipy.ndimage import gaussian_filter
+from scipy.signal import find_peaks
 from scipy.optimize import least_squares
 
 
@@ -539,6 +541,375 @@ class HoloParams(typing.NamedTuple):
     @property
     def slice_fft(self):
         return get_slice_fft(self.out_shape, self.orig_shape)
+
+
+#: Default size of the region for :func:`fringe_contrast`, in fringe periods
+FRINGE_CONTRAST_PERIODS = 50
+# minimum distance between two maxima (or minima) of the line profile, as a
+# fraction of the fringe period:
+_PEAK_DISTANCE_RATIO = 0.6
+# minimum number of maxima and minima in the line profile:
+_MIN_EXTREMA = 2
+
+
+def fringe_period(
+    sb_position: tuple[float, float],
+    shape: tuple[int, int],
+) -> tuple[tuple[float, float], float]:
+    """Direction and period of the hologram fringes, from the sideband position.
+
+    Parameters
+    ----------
+    sb_position
+        The sideband position (y, x) in native (unshifted) FFT coordinates,
+        as returned by :func:`estimate_sideband_position`
+    shape
+        Shape of the hologram
+
+    Returns
+    -------
+    direction
+        Unit vector (y, x) perpendicular to the fringes
+    period
+        Fringe period, in pixels
+
+    Examples
+    --------
+    >>> direction, period = fringe_period((0, 16), shape=(64, 64))
+    >>> direction, period
+    ((0.0, 1.0), 4.0)
+
+    """
+    # signed frequency in cycles per pixel; positions in the upper half of the
+    # FFT are negative frequencies:
+    freq = [
+        (pos if pos < size / 2 else pos - size) / size
+        for pos, size in zip(sb_position, shape, strict=True)
+    ]
+    norm = math.hypot(*freq)
+    if norm == 0:
+        msg = f"sideband position {tuple(sb_position)} is at zero frequency"
+        raise ValueError(msg)
+    direction = (float(freq[0] / norm), float(freq[1] / norm))
+    return direction, 1 / norm
+
+
+def fringe_contrast_map(
+    hologram: np.ndarray,
+    *,
+    sb_position: tuple[float, float] | None = None,
+    sb_size: float | None = None,
+    out_shape: tuple[int, int] | None = None,
+    central_band_mask_radius: float | None = None,
+    sb: Literal["lower", "upper"] = "upper",
+    xp: XPType = np,
+) -> np.ndarray:
+    r"""Map of the fringe contrast (visibility) of a hologram.
+
+    The sideband and the centerband are reconstructed with the same circular
+    aperture, and the contrast is :math:`\mu = 2 |\psi_{sb}| / |\psi_{cb}|`.
+    For a hologram :math:`I = A^2 (1 + a^2 + 2 a \mu \cos(\dots))`, this is
+    :math:`2 a \mu / (1 + a^2)`, so it is the fringe contrast :math:`\mu`
+    only where the object and reference waves have the same amplitude
+    (:math:`a = 1`), for example in vacuum or in a reference hologram.
+
+    Parameters
+    ----------
+    hologram
+        A single hologram, can be either a numpy or a cupy array
+    sb_position
+        The sideband position in native (unshifted) FFT coordinates;
+        estimated with :func:`estimate_sideband_position` if not given
+    sb_size
+        Radius of the aperture, in pixels of the FFT of the hologram;
+        estimated with :func:`estimate_sideband_size` if not given. It should
+        be smaller than the distance between the centerband and the sideband.
+    out_shape
+        Shape of the map. If not given, a quarter of the hologram shape, or
+        larger if needed to fit the aperture. The aperture has to fit into it.
+    central_band_mask_radius
+        Used when estimating the sideband position, see
+        :func:`estimate_sideband_position`
+    sb
+        Which sideband to use, 'lower' or 'upper'
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU processing
+
+    Returns
+    -------
+    contrast
+        The fringe contrast, with shape `out_shape`, as a numpy or cupy array
+
+    Examples
+    --------
+    >>> from libertem_holo.base.generate import hologram_frame
+    >>> holo = hologram_frame(np.ones((256, 256)), np.zeros((256, 256)), visibility=0.4)
+    >>> contrast = fringe_contrast_map(holo)
+    >>> contrast.shape
+    (64, 64)
+    >>> round(float(contrast.mean()), 2)
+    0.4
+
+    """
+    params = _contrast_params(
+        hologram,
+        sb_position=sb_position,
+        sb_size=sb_size,
+        out_shape=out_shape,
+        central_band_mask_radius=central_band_mask_radius,
+        sb=sb,
+        xp=xp,
+    )
+    return _contrast_map(hologram, params, xp=xp)
+
+
+def _contrast_params(
+    hologram: np.ndarray,
+    *,
+    sb_position: tuple[float, float] | None,
+    sb_size: float | None,
+    out_shape: tuple[int, int] | None,
+    central_band_mask_radius: float | None,
+    sb: Literal["lower", "upper"],
+    xp: XPType,
+) -> HoloParams:
+    shape = tuple(hologram.shape)
+    if sb_position is None:
+        sb_position = estimate_sideband_position(
+            xp.asarray(hologram),
+            holo_sampling=(1, 1),
+            central_band_mask_radius=central_band_mask_radius,
+            sb=sb,
+            xp=xp,
+        )
+    if sb_size is None:
+        sb_size = estimate_sideband_size(sb_position, shape)
+    diameter = math.ceil(2 * sb_size)
+    if out_shape is None:
+        # a quarter of the hologram, but large enough for the aperture:
+        out_shape = tuple(
+            min(n, max(n // 4, diameter + diameter % 2))
+            for n in shape
+        )
+    elif diameter > min(out_shape) + 1:  # allow for rounding
+        msg = (
+            f"the aperture (radius {sb_size:.1f} px) doesn't fit into "
+            f"out_shape {tuple(out_shape)}; pass a larger `out_shape` "
+            "or a smaller `sb_size`"
+        )
+        raise ValueError(msg)
+    # no line filter, so the aperture is the same for sideband and centerband:
+    return HoloParams.from_hologram(
+        hologram,
+        sb_position=sb_position,
+        sb_size=sb_size,
+        out_shape=out_shape,
+        line_filter_width=None,
+        xp=xp,
+    )
+
+
+def _contrast_map(
+    hologram: np.ndarray,
+    params: HoloParams,
+    *,
+    xp: XPType,
+) -> np.ndarray:
+    # reconstr imports this module, so import it here:
+    from libertem_holo.base.reconstr import reconstruct_frame  # noqa: PLC0415
+
+    hologram = xp.asarray(hologram)
+    sb_amp = xp.abs(reconstruct_frame(
+        hologram, params.sb_position, params.aperture, params.slice_fft, xp=xp,
+    ))
+    cb_amp = xp.abs(reconstruct_frame(
+        hologram, (0, 0), params.aperture, params.slice_fft, xp=xp,
+    ))
+    nonzero = cb_amp > 0
+    return xp.where(nonzero, 2 * sb_amp / xp.where(nonzero, cb_amp, 1), 0)
+
+
+def fringe_contrast(
+    hologram: np.ndarray,
+    *,
+    method: Literal["sideband", "profile"] = "sideband",
+    center: tuple[float, float] | None = None,
+    size: float | None = None,
+    width: int = 20,
+    sb_position: tuple[float, float] | None = None,
+    sb_size: float | None = None,
+    out_shape: tuple[int, int] | None = None,
+    central_band_mask_radius: float | None = None,
+    sb: Literal["lower", "upper"] = "upper",
+    xp: XPType = np,
+) -> float:
+    r"""Fringe contrast (visibility) of a hologram in a region.
+
+    Two methods are available:
+
+    * :code:`"sideband"`: the mean of :func:`fringe_contrast_map`, that is
+      :math:`2 |\psi_{sb}| / |\psi_{cb}|`, over a square region of side
+      `size` around `center`.
+    * :code:`"profile"`: a line profile of length `size` through `center`,
+      perpendicular to the fringes and averaged over `width` pixels along
+      them, without interpolation. The contrast is
+      :math:`(I_{max} - I_{min}) / (I_{max} + I_{min})`, with the mean of the
+      maxima and of the minima of the profile. The direction and the period of
+      the fringes are determined from the sideband position, see
+      :func:`fringe_period`. As the profile is sampled at whole pixels, the
+      extrema are usually missed slightly, so this underestimates the
+      contrast, the more so the fewer pixels per fringe.
+
+    Both methods measure the fringe contrast only where the object and
+    reference waves have the same amplitude, for example in vacuum or in a
+    reference hologram; see :func:`fringe_contrast_map`.
+
+    Parameters
+    ----------
+    hologram
+        A single hologram, can be either a numpy or a cupy array
+    method
+        :code:`"sideband"` or :code:`"profile"`, see above
+    center
+        Center (y, x) of the region, in pixels of the hologram; the center of
+        the hologram if not given
+    size
+        Size of the region, in pixels of the hologram:
+        :data:`FRINGE_CONTRAST_PERIODS` fringe periods if not given
+    width
+        For the :code:`"profile"` method, the number of pixels along the
+        fringes to average over
+    sb_position
+        The sideband position in native (unshifted) FFT coordinates;
+        estimated with :func:`estimate_sideband_position` if not given
+    sb_size
+        For the :code:`"sideband"` method, see :func:`fringe_contrast_map`
+    out_shape
+        For the :code:`"sideband"` method, see :func:`fringe_contrast_map`
+    central_band_mask_radius
+        Used when estimating the sideband position, see
+        :func:`estimate_sideband_position`
+    sb
+        Which sideband to use, 'lower' or 'upper'
+    xp
+        Pass in either the numpy or cupy module to select CPU or GPU
+        processing; the :code:`"profile"` method always runs on the CPU.
+
+    Returns
+    -------
+    contrast
+        The fringe contrast, between 0 and 1
+
+    Examples
+    --------
+    >>> from libertem_holo.base.generate import hologram_frame
+    >>> holo = hologram_frame(np.ones((512, 512)), np.zeros((512, 512)), visibility=0.4)
+    >>> round(fringe_contrast(holo, method="sideband"), 2)
+    0.4
+    >>> 0.3 < fringe_contrast(holo, method="profile") <= 0.4
+    True
+
+    """
+    if method not in ("sideband", "profile"):
+        msg = f"unknown method {method!r}, should be 'sideband' or 'profile'"
+        raise ValueError(msg)
+    shape = tuple(hologram.shape)
+    if sb_position is None:
+        sb_position = estimate_sideband_position(
+            xp.asarray(hologram),
+            holo_sampling=(1, 1),
+            central_band_mask_radius=central_band_mask_radius,
+            sb=sb,
+            xp=xp,
+        )
+    direction, period = fringe_period(sb_position, shape)
+    if center is None:
+        center = (shape[0] / 2, shape[1] / 2)
+    if size is None:
+        size = FRINGE_CONTRAST_PERIODS * period
+
+    if method == "sideband":
+        params = _contrast_params(
+            hologram,
+            sb_position=sb_position,
+            sb_size=sb_size,
+            out_shape=out_shape,
+            central_band_mask_radius=central_band_mask_radius,
+            sb=sb,
+            xp=xp,
+        )
+        contrast = _contrast_map(hologram, params, xp=xp)
+        region = _map_region(center, size, shape, params.out_shape)
+        return float(contrast[region].mean())
+    return _profile_contrast(
+        to_cpu(hologram),
+        center=center,
+        size=size,
+        width=width,
+        direction=direction,
+        period=period,
+    )
+
+
+def _map_region(
+    center: tuple[float, float],
+    size: float,
+    shape: tuple[int, int],
+    out_shape: tuple[int, int],
+) -> tuple[slice, slice]:
+    """Square region of side `size` around `center` (hologram pixels) in the map."""
+    region = []
+    for c, n, n_out in zip(center, shape, out_shape, strict=True):
+        scale = n_out / n
+        half = max(size * scale / 2, 0.5)  # at least one pixel
+        start = round(c * scale - half)
+        stop = max(round(c * scale + half), start + 1)
+        if start < 0 or stop > n_out:
+            msg = (
+                f"region of size {size:.1f} px around {tuple(center)} doesn't fit "
+                f"into the hologram of shape {shape}; pass a smaller `size`"
+            )
+            raise ValueError(msg)
+        region.append(slice(start, stop))
+    return tuple(region)
+
+
+def _profile_contrast(
+    hologram: np.ndarray,
+    *,
+    center: tuple[float, float],
+    size: float,
+    width: int,
+    direction: tuple[float, float],
+    period: float,
+) -> float:
+    center_arr = np.asarray(center, dtype=float)
+    along = np.asarray(direction) * size / 2
+    across = np.asarray((-direction[1], direction[0])) * width / 2
+    start, end = center_arr - along, center_arr + along
+    corners = np.array([p + s * across for p in (start, end) for s in (-1, 1)])
+    if np.any(corners < 0) or np.any(corners > np.asarray(hologram.shape) - 1):
+        msg = (
+            f"profile of length {size:.1f} px and width {width} px around "
+            f"{tuple(center)} doesn't fit into the hologram of shape "
+            f"{hologram.shape}; pass a smaller `size` or `width`"
+        )
+        raise ValueError(msg)
+    profile = profile_line(
+        hologram, start, end, linewidth=width, order=0, mode="reflect",
+    )
+    distance = max(1, int(_PEAK_DISTANCE_RATIO * period))
+    maxima, _ = find_peaks(profile, distance=distance)
+    minima, _ = find_peaks(-profile, distance=distance)
+    if len(maxima) < _MIN_EXTREMA or len(minima) < _MIN_EXTREMA:
+        msg = (
+            f"found only {len(maxima)} maxima and {len(minima)} minima in the "
+            "line profile; pass a larger `size`"
+        )
+        raise ValueError(msg)
+    i_max = profile[maxima].mean()
+    i_min = profile[minima].mean()
+    return float((i_max - i_min) / (i_max + i_min))
 
 
 @lru_cache
