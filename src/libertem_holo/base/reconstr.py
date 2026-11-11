@@ -174,16 +174,87 @@ def _plan_and_spectrum(
     return plan, plan.spectrum(frame)
 
 
+def _resolve_frame_params(
+    frame: np.ndarray | HologramFFT,
+    *,
+    sb_pos: tuple[float, float] | None,
+    aperture: np.ndarray | None,
+    slice_fft: tuple[slice, slice] | None,
+    holoparams: HoloParams | None,
+    xp: XPType | None,
+) -> tuple[tuple[float, float], np.ndarray, tuple[slice, slice], XPType]:
+    """Determine the parameters of :func:`reconstruct_frame`.
+
+    Explicit arguments take precedence over `holoparams`; without either,
+    the parameters are estimated from `frame`.
+    """
+    explicit = {"sb_pos": sb_pos, "aperture": aperture, "slice_fft": slice_fft}
+    if holoparams is None and all(v is None for v in explicit.values()):
+        if isinstance(frame, HologramFFT):
+            msg = (
+                "can't estimate the reconstruction parameters from a HologramFFT;"
+                " pass `holoparams` or `sb_pos`, `aperture` and `slice_fft`"
+            )
+            raise TypeError(msg)
+        xp = np if xp is None else xp
+        holoparams = HoloParams.from_hologram(frame, xp=xp)
+    if holoparams is not None:
+        frame_shape = tuple(frame.shape)
+        if tuple(holoparams.orig_shape) != frame_shape:
+            msg = (
+                f"holoparams were determined for holograms of shape "
+                f"{tuple(holoparams.orig_shape)}, but the frame has shape {frame_shape}"
+            )
+            raise ValueError(msg)
+        defaults = {
+            "sb_pos": holoparams.sb_position,
+            "aperture": holoparams.aperture,
+            "slice_fft": holoparams.slice_fft,
+        }
+        explicit = {
+            k: defaults[k] if v is None else v
+            for k, v in explicit.items()
+        }
+        xp = holoparams.xp if xp is None else xp
+    missing = [k for k, v in explicit.items() if v is None]
+    if missing:
+        msg = (
+            f"missing {', '.join(missing)}: pass either `holoparams`, or all of "
+            "`sb_pos`, `aperture` and `slice_fft`, or none of them"
+        )
+        raise ValueError(msg)
+    if xp is None:
+        xp = frame.xp if isinstance(frame, HologramFFT) else np
+    return explicit["sb_pos"], explicit["aperture"], explicit["slice_fft"], xp
+
+
 def reconstruct_frame(
     frame: np.ndarray[tuple[int, int]] | HologramFFT,
-    sb_pos: tuple[float, float],
-    aperture: np.ndarray,
-    slice_fft: tuple[slice, slice],
+    sb_pos: tuple[float, float] | None = None,
+    aperture: np.ndarray | None = None,
+    slice_fft: tuple[slice, slice] | None = None,
     *,
+    holoparams: HoloParams | None = None,
     precision: bool = True,
-    xp: XPType = np,
+    xp: XPType | None = None,
 ) -> np.ndarray:
     """Reconstruct a single hologram.
+
+    The reconstruction parameters can be given in three ways:
+
+    * as a :class:`~libertem_holo.base.utils.HoloParams` instance in
+      `holoparams`. Any of `sb_pos`, `aperture` and `slice_fft` that are
+      also given take precedence over the values in `holoparams`, for
+      example :code:`sb_pos=(0, 0)` to reconstruct the centerband with the
+      sideband aperture;
+    * explicitly, with all of `sb_pos`, `aperture` and `slice_fft`;
+    * not at all: then they are estimated from the hologram, using
+      :meth:`HoloParams.from_hologram()
+      <libertem_holo.base.utils.HoloParams.from_hologram>` with its default
+      settings (upper sideband, output shape a quarter of the hologram shape,
+      line filter). To inspect or tune them, call
+      :meth:`~libertem_holo.base.utils.HoloParams.from_hologram` yourself
+      and pass the result as `holoparams`.
 
     This is a convenience wrapper around
     :class:`~libertem_holo.base.plan.ReconstructionPlan`; when reconstructing
@@ -193,7 +264,9 @@ def reconstruct_frame(
     ----------
     frame
         A numpy or cupy array containing the input hologram, or a
-        :class:`HologramFFT` of it
+        :class:`HologramFFT` of it. Estimating the parameters needs the
+        hologram itself, so with a :class:`HologramFFT`, pass `holoparams`
+        or `sb_pos`, `aperture` and `slice_fft`.
     sb_pos
         The sideband position in native (unshifted) FFT coordinates, for
         example as returned by `estimate_sideband_position`
@@ -204,15 +277,45 @@ def reconstruct_frame(
     slice_fft
         A slice to crop to the selected output shape in fourier space,
         as returned by `get_slice_fft`.
+    holoparams
+        Reconstruction parameters, for example from
+        :meth:`HoloParams.from_hologram()
+        <libertem_holo.base.utils.HoloParams.from_hologram>`. They must have
+        been determined for holograms of the same shape as `frame`.
     precision
         Defines precision of the reconstruction, True for float64/complex128
         for the resulting complex wave, otherwise float32/complex64.
         Ignored if `frame` is a :class:`HologramFFT`, which has the
         precision set at construction time.
     xp
-        Pass in either the numpy or cupy module to select CPU or GPU processing
+        Pass in either the numpy or cupy module to select CPU or GPU
+        processing. Defaults to `holoparams.xp` if `holoparams` is given,
+        to the module of `frame` if it is a :class:`HologramFFT`, and to
+        numpy otherwise.
+
+    Examples
+    --------
+    >>> from libertem_holo.base.generate import hologram_frame
+    >>> holo = hologram_frame(np.ones((64, 64)), np.zeros((64, 64)))
+
+    Estimate the parameters automatically:
+
+    >>> wave = reconstruct_frame(holo)
+    >>> wave.shape
+    (16, 16)
+
+    Or determine them once, and reuse them for more holograms:
+
+    >>> params = HoloParams.from_hologram(holo, out_shape=(32, 32))
+    >>> wave = reconstruct_frame(holo, holoparams=params)
+    >>> wave.shape
+    (32, 32)
 
     """
+    sb_pos, aperture, slice_fft, xp = _resolve_frame_params(
+        frame, sb_pos=sb_pos, aperture=aperture, slice_fft=slice_fft,
+        holoparams=holoparams, xp=xp,
+    )
     plan, spec = _plan_and_spectrum(
         frame, sb_pos=sb_pos, aperture=aperture, slice_fft=slice_fft,
         precision=precision, xp=xp,
