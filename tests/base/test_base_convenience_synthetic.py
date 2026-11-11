@@ -1,7 +1,11 @@
+import contextlib
+from collections.abc import Iterator
+
 import numpy as np
 import pytest
 from libertem.api import Context
 
+from libertem_holo.base import convenience
 from libertem_holo.base.align import ImageCorrelator
 from libertem_holo.base.convenience import (
     _align_waves,
@@ -184,3 +188,25 @@ def test_align_waves_threads_identical(n_threads: int) -> None:
         assert np.array_equal(a, b)
     drifts = result[2]
     assert np.allclose(drifts, -np.asarray(shifts_true, dtype=float), atol=0.11)
+
+
+@pytest.mark.parametrize(("n_threads", "expected_calls"), [(1, []), (4, [1])])
+def test_align_waves_old_libertem(monkeypatch, n_threads: int, expected_calls):
+    """Alignment works with LiberTEM < 0.16, where `set_num_threads(None)` fails."""
+    calls = []
+
+    @contextlib.contextmanager
+    def set_num_threads_old(n: int) -> Iterator[None]:
+        if n is None:
+            msg = "'>' not supported between instances of 'NoneType' and 'int'"
+            raise TypeError(msg)
+        calls.append(n)
+        yield
+
+    monkeypatch.setattr(convenience, "set_num_threads", set_num_threads_old)
+    rng = np.random.default_rng(3)
+    bfs = rng.random((3, 32, 32)).astype(np.float32)
+    waves = rng.random((3, 32, 32)) + 1j * rng.random((3, 32, 32))
+    correlator = ImageCorrelator(hanning=True, binning=1, upsample_factor=10)
+    _align_waves(waves, bfs, correlator, progress=False, n_threads=n_threads)
+    assert calls == expected_calls
