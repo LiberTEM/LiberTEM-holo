@@ -401,8 +401,13 @@ def _align_waves(
             bfs[i] = xp.abs(shift(bfs[i], shifts))
             drifts[i] = xp.asarray(shifts)
 
+    # limit BLAS only when there are several threads; LiberTEM before 0.16
+    # fails with `set_num_threads(None)`, so don't call it otherwise:
+    limit_threads = (
+        set_num_threads(1) if n_threads > 1 else contextlib.nullcontext()
+    )
     with (
-        set_num_threads(1 if n_threads > 1 else None),
+        limit_threads,
         ThreadPoolExecutor(max_workers=n_threads) as pool,
     ):
         for _ in tqdm(

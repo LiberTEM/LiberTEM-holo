@@ -1,3 +1,6 @@
+import contextlib
+from collections.abc import Iterator
+
 import numpy as np
 import pytest
 from libertem.api import Context
@@ -10,6 +13,7 @@ from libertem_holo.base.align import (
     StarRegistration,
     WaveCorrelator,
 )
+from libertem_holo.base import convenience
 from libertem_holo.base.convenience import (
     _align_waves,
     _reconstruct_stack,
@@ -84,6 +88,53 @@ def test_reconstruct_stack_libertem_vs_numpy(holo_stack, lt_ctx: Context, with_r
     # the object moves, so there should be drift:
     assert np.max(np.abs(res_lt.metadata["drifts_x"])) > 1
     _assert_results_close(res_np, res_lt)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "libertem"])
+@pytest.mark.parametrize("ref_shape", ["stack_of_one", "frame_2d"])
+def test_reconstruct_stack_single_frame_ref(
+    holo_stack, lt_ctx: Context, backend: str, ref_shape: str,
+):
+    """A reference with a single hologram works (issue #173)."""
+    holo, ref, _, _ = holo_stack
+    stack = InputData.from_array(holo.astype(np.float32), exposure_time=1.0)
+    ref = ref.astype(np.float32)
+    single_ref = ref[:1] if ref_shape == "stack_of_one" else ref[0]
+
+    def _run(stack_ref: InputData) -> Results:
+        if backend == "libertem":
+            return reconstruct_stack(
+                stack, stack_ref, holoparams=_params(holo, np),
+                backend="libertem", ctx=lt_ctx, progress=False,
+            )
+        return _reconstruct_stack(
+            stack, stack_ref, _params(holo, np), None,
+            xp=np, ctx=None, progress=False,
+        )
+
+    res_single = _run(InputData.from_array(single_ref, exposure_time=1.0))
+    assert res_single.complex_wave.shape == (64, 64)
+    assert np.all(np.isfinite(res_single.complex_wave))
+    # all reference holograms of `holo_stack` are the same, so a single one
+    # gives the same result as the whole reference stack:
+    res_all = _run(InputData.from_array(ref, exposure_time=1.0))
+    _assert_results_close(res_all, res_single)
+
+
+def test_reconstruct_stack_single_frame_stack(holo_stack):
+    """An object "stack" with a single hologram works, too."""
+    holo, ref, _, _ = holo_stack
+    stack = InputData.from_array(holo[0].astype(np.float32), exposure_time=1.0)
+    stack_ref = InputData.from_array(ref[0].astype(np.float32), exposure_time=1.0)
+    res = _reconstruct_stack(
+        stack, stack_ref, _params(holo, np), None,
+        xp=np, ctx=None, progress=False,
+    )
+    assert res.complex_wave.shape == (64, 64)
+    assert np.all(np.isfinite(res.complex_wave))
+    # a single frame is aligned against itself:
+    np.testing.assert_allclose(res.metadata["drifts_x"], [0.0], atol=1e-6)
+    np.testing.assert_allclose(res.metadata["drifts_y"], [0.0], atol=1e-6)
 
 
 def test_reconstruct_stack_cupy_vs_libertem(holo_stack, lt_ctx: Context):
@@ -297,3 +348,25 @@ def test_reconstruct_stack_anchored_cupy(holo_stack, lt_ctx: Context, correlator
     res = reconstruct_stack(stack, backend="cupy", progress=False, registration=options, **kwargs)
     _assert_results_similar(res, expected)
     assert len(res.metadata["registration"]["psr"]) == len(expected.metadata["registration"]["psr"])
+
+
+@pytest.mark.parametrize(("n_threads", "expected_calls"), [(1, []), (4, [1])])
+def test_align_waves_old_libertem(monkeypatch, n_threads: int, expected_calls):
+    """Alignment works with LiberTEM < 0.16, where `set_num_threads(None)` fails."""
+    calls = []
+
+    @contextlib.contextmanager
+    def set_num_threads_old(n: int) -> Iterator[None]:
+        if n is None:
+            msg = "'>' not supported between instances of 'NoneType' and 'int'"
+            raise TypeError(msg)
+        calls.append(n)
+        yield
+
+    monkeypatch.setattr(convenience, "set_num_threads", set_num_threads_old)
+    rng = np.random.default_rng(3)
+    bfs = rng.random((3, 32, 32)).astype(np.float32)
+    waves = rng.random((3, 32, 32)) + 1j * rng.random((3, 32, 32))
+    correlator = ImageCorrelator(hanning=True, binning=1, upsample_factor=10)
+    _align_waves(waves, bfs, correlator, progress=False, n_threads=n_threads)
+    assert calls == expected_calls

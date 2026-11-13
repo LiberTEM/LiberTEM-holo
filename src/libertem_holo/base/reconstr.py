@@ -517,6 +517,36 @@ def reconstruct_bf(
     return xp.abs(plan.wave(spec))
 
 
+def _single_image_offset_correction(
+    aligned_stack: np.ndarray,
+    *,
+    return_stack: bool,
+    xp: XPType,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+    """Check the input shape of :func:`phase_offset_correction`.
+
+    Returns the result of :func:`phase_offset_correction` if `aligned_stack`
+    is a single image, and None if it is a stack of several images.
+    """
+    if aligned_stack.ndim not in (2, 3):
+        msg = (
+            "expected a stack of shape (N, sy, sx) or a single image of shape"
+            f" (sy, sx), got shape {aligned_stack.shape}"
+        )
+        raise ValueError(msg)
+    stack = aligned_stack.reshape((-1, *aligned_stack.shape[-2:]))
+    if stack.shape[0] == 0:
+        msg = "can't correct the phase offset of an empty stack"
+        raise ValueError(msg)
+    if stack.shape[0] > 1:
+        return None
+    # Nothing to correct. The eigenvalue solver would also fail here, as the
+    # laplacian of a single image (padded with zeros) is all zeros:
+    result = stack[0].astype(complex)
+    phases = xp.ones((1, 1), dtype=complex)
+    return result, phases, aligned_stack.astype(complex) if return_stack else None
+
+
 def phase_offset_correction(
     aligned_stack: np.ndarray[tuple[int, int, int]],
     wtype: Literal["weighted", "unweighted"] = "weighted",
@@ -542,10 +572,14 @@ def phase_offset_correction(
     https://github.com/Ptychography-4-0/ptychography/blob/master/src/ptychography40/stitching/stitching.py
     for more details, see https://arxiv.org/pdf/2005.02032.pdf
 
+    A single image, either as a stack of shape (1, sy, sx) or as a 2D array
+    of shape (sy, sx), has no offset to correct and is returned unchanged.
+
     Parameters:
     -----------
     aligned_stack
-        Array of shape (N, sy, sx) where N is the number of complex images;
+        Array of shape (N, sy, sx) where N is the number of complex images,
+        or a single image of shape (sy, sx);
         should have dtype complex64 or complex128.
 
     threshold
@@ -567,6 +601,12 @@ def phase_offset_correction(
 
     """
     aligned_stack = xp.asarray(aligned_stack)
+    single = _single_image_offset_correction(
+        aligned_stack, return_stack=return_stack, xp=xp,
+    )
+    if single is not None:
+        return single
+
     R = aligned_stack.shape[0]
     orig_R = R
 
