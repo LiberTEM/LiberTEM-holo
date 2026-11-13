@@ -79,6 +79,8 @@ Tests that need real data use the `dm_testdata_path` fixture (`conftest.py`), wh
   (`pyrightconfig.json`, Python 3.10 baseline). Run `uvx pre-commit install` before committing
   to ensure its hooks are installed (idempotent).
 - Docstrings use numpy style; doctests that need data or files use `# doctest: +SKIP`.
+- Annotate array-module parameters as `xp: XPType` (alias in `libertem_holo.base.reconstr`),
+  not `Any`; the alias may become more precise later.
 - API naming (e.g. `load_from_*` vs `from_*` constructors) is not settled; follow the
   surrounding code and mention the choice.
 
