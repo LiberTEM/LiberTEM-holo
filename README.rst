@@ -101,7 +101,7 @@ For GPU support, install the :code:`gpu` extra, and cupy. For example
 
   $ conda create -n holo python=3.12
   $ conda activate holo
-  $ pip install libertem-holo[gpu] cupy-cuda13x 'cuda-toolkit[all]<14'
+  $ pip install libertem-holo[gpu] cupy-cuda13x "cuda-toolkit[all]<14"
 
 Make sure to pick a CUDA version that works with your GPU and its drivers.
 For more details, please check the
