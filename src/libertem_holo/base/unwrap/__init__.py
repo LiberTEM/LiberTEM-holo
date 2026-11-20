@@ -5,6 +5,15 @@ import numpy as np
 import numpy.dtypes as nd
 from skimage.restoration import unwrap_phase
 
+from .irls import (
+    BranchesPrior,
+    CGRound,
+    IRLSOptions,
+    IRLSResult,
+    PhasePrior,
+    amplitude_edge_weights,
+    unwrap_phase_irls,
+)
 from .laplace import prepare_laplacian_unwrap, unwrap_phase_laplacian
 from .quality import derivative_variance, quality_unwrap
 
@@ -16,7 +25,7 @@ ComplexOrFloat = (
 
 def phase_unwrap(
     image: np.ndarray[tuple[int, int], ComplexOrFloat],
-    method: Literal["skimage", "quality", "laplacian"] = "skimage",
+    method: Literal["skimage", "quality", "laplacian", "irls"] = "skimage",
 ) -> np.ndarray[tuple[int, int]]:
     """Unwrap phase from wrapped phase or complex wave.
 
@@ -27,19 +36,28 @@ def phase_unwrap(
     Parameters
     ----------
     image
-        Complex wave or wrapped phase image
+        Complex wave or wrapped phase image. Prefer the complex wave: methods
+        that can use its amplitude (:code:`"irls"`) then weight the image by it,
+        so that discontinuities go where the amplitude is low.
 
     method
         The method to use for unwrapping the phase.
             - skimage: use the unwrap_phase function from scikit-image
             - quality: unwrap based on the variance of the derivative
-            - laplacian: qualitative unwrapping based on
+            - laplacian: least-squares unwrapping by the Laplacian, see
+              :func:`unwrap_phase_laplacian`; not congruent with the input
+            - irls: iteratively reweighted least squares, see
+              :func:`unwrap_phase_irls`; for a complex wave, with edge weights
+              from its amplitude
 
     Returns
     -------
         2d nd array of the unwrapped phase image
 
     """
+    if method == "irls":
+        # Takes the complex wave, for edge weights from its amplitude:
+        return unwrap_phase_irls(image).phase
     phase = np.angle(image) if image.dtype.kind == "c" else image
 
     if method == "skimage":
@@ -54,9 +72,16 @@ def phase_unwrap(
 
 
 __all__ = [
+    "BranchesPrior",
+    "CGRound",
+    "IRLSOptions",
+    "IRLSResult",
+    "PhasePrior",
+    "amplitude_edge_weights",
     "derivative_variance",
     "phase_unwrap",
     "prepare_laplacian_unwrap",
     "quality_unwrap",
+    "unwrap_phase_irls",
     "unwrap_phase_laplacian",
 ]
