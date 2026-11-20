@@ -5,13 +5,22 @@ See :func:`unwrap_phase_irls` for how it works.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
+import numba
 import numpy as np
 import scipy.fft
+from libertem.common.threading import set_num_threads, set_numba_threads
+
+from . import _irls_numba
 
 TAU = 2 * np.pi
+
+# More threads than this made the solve slower on a 24-core machine, even for
+# 2048 x 2048 images: the per-iteration work is too small to spread wider.
+_DEFAULT_MAX_THREADS = 8
 
 IRLSStatus = Literal["converged", "iteration_limit"]
 
@@ -258,7 +267,11 @@ def _is_smooth(value: int, limit: int = 11) -> bool:
 
 
 def _padded_length(length: int) -> int:
-    """Return the smallest even 11-smooth number that is at least `length`."""
+    """Return the smallest even 11-smooth number that is at least `length`.
+
+    Even 5-smooth lengths make single-threaded transforms a few percent faster,
+    but measured no faster end to end, with more padding on 7- or 11-smooth sizes.
+    """
     candidate = max(length, 2)
     while candidate % 2 != 0 or not _is_smooth(candidate):
         candidate += 1
@@ -378,46 +391,58 @@ class _WeightedProblem:
             )
         self.weights_x = self.edge_x.copy()
         self.weights_y = self.edge_y.copy()
+        self._row_sums = np.empty(rows, dtype=np.float64)
         self.precondition = _PoissonPreconditioner(
             (rows, cols), wrapped.dtype, workers=workers,
         )
 
-    def cut_turns(self, branches: np.ndarray) -> int:
+    def cuts(self, branches: np.ndarray) -> tuple[int, float]:
         """Count the turns by which a congruent phase cuts the wrapped gradients.
 
-        Sum over all edges of :code:`|k|`, where :code:`k` is the number of whole
-        turns between the gradient of :code:`wrapped + 2π branches` and the wrapped
-        gradient.
+        Returns the sum over all edges of :code:`|k|`, where :code:`k` is the
+        number of whole turns between the gradient of :code:`wrapped + 2π
+        branches` and the wrapped gradient, and the same sum with each edge
+        weighted by its edge weight.
         """
-        cuts_x, cuts_y = self._cuts(branches)
-        return int(cuts_x.sum(dtype=np.int64) + cuts_y.sum(dtype=np.int64))
-
-    def cut_cost(self, branches: np.ndarray) -> float:
-        """Like :meth:`cut_turns`, with each edge weighted by its edge weight."""
-        cuts_x, cuts_y = self._cuts(branches)
-        return float(
-            np.vdot(cuts_x, self.edge_x.astype(np.float64))
-            + np.vdot(cuts_y, self.edge_y.astype(np.float64)),
+        rows = branches.shape[0]
+        turns = np.empty(rows, dtype=np.int64)
+        cost = np.empty(rows, dtype=np.float64)
+        _irls_numba.cuts_per_row(
+            branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
+            turns, cost,
         )
+        return int(turns.sum()), float(cost.sum())
 
-    def _cuts(self, branches: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return (
-            np.abs(self.jumps_x + np.diff(branches, axis=1)),
-            np.abs(self.jumps_y + np.diff(branches, axis=0)),
+    def apply(self, p: np.ndarray, out: np.ndarray) -> float:
+        """Compute :math:`A p` into `out`, and return :code:`p · A p`."""
+        _irls_numba.apply_operator(
+            p, self.weights_x, self.weights_y, out, self._row_sums,
         )
+        return float(self._row_sums.sum())
 
-    def apply(self, p: np.ndarray, out: np.ndarray) -> np.ndarray:
-        """Compute :math:`A p` into `out`."""
-        flux_x = np.diff(p, axis=1)
-        flux_x *= self.weights_x
-        flux_y = np.diff(p, axis=0)
-        flux_y *= self.weights_y
-        return _negative_divergence(flux_x, flux_y, out)
+    def dot(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Return the dot product :code:`a · b`, the same on any number of threads."""
+        _irls_numba.dot_rows(a, b, self._row_sums)
+        return float(self._row_sums.sum())
+
+    def cg_update(
+        self,
+        phi: np.ndarray,
+        direction: np.ndarray,
+        residual: np.ndarray,
+        operated: np.ndarray,
+        alpha: float,
+    ) -> float:
+        """Step `phi` and `residual` along `direction`; return the new :code:`r · r`."""
+        _irls_numba.cg_update(
+            phi, direction, residual, operated, alpha, self._row_sums,
+        )
+        return float(self._row_sums.sum())
 
     def right_hand_side(self, out: np.ndarray) -> np.ndarray:
         """Compute :math:`b` into `out`, without its mean."""
-        _negative_divergence(
-            self.weights_x * self.target_x, self.weights_y * self.target_y, out,
+        _irls_numba.negative_divergence_of_weighted(
+            self.weights_x, self.target_x, self.weights_y, self.target_y, out,
         )
         # The operator annihilates constants, so its range excludes them:
         out -= out.mean()
@@ -436,18 +461,10 @@ class _WeightedProblem:
 
     def reweight(self, phi: np.ndarray, epsilon: float) -> None:
         """Set the weights from the iterate `phi` at `epsilon`."""
-        squared = phi.dtype.type(epsilon * epsilon)
-        for weights, axis, target, edge in (
-            (self.weights_x, 1, self.target_x, self.edge_x),
-            (self.weights_y, 0, self.target_y, self.edge_y),
-        ):
-            residual = np.diff(phi, axis=axis)
-            residual -= target
-            np.square(residual, out=residual)
-            residual += squared
-            np.sqrt(residual, out=residual)
-            np.divide(squared, residual, out=weights)
-            np.multiply(weights, edge, out=weights)
+        _irls_numba.charbonnier_weights(
+            phi, self.target_x, self.target_y, self.edge_x, self.edge_y,
+            phi.dtype.type(epsilon * epsilon), self.weights_x, self.weights_y,
+        )
 
 
 def _starting_phase(
@@ -474,10 +491,13 @@ def _congruent(
     median offset first keeps the rounding from being biased by the constant the
     solve cannot determine.
     """
-    offset = np.median(_wrap(phi - wrapped))
-    turns = (phi - offset - wrapped) / phi.dtype.type(TAU)
-    branches = np.rint(turns).astype(np.int32)
-    phase = wrapped.astype(np.float64) + TAU * branches
+    tau = phi.dtype.type(TAU)
+    difference = np.empty_like(phi)
+    _irls_numba.wrapped_difference(phi, wrapped, tau, difference)
+    offset = np.median(difference, overwrite_input=True)
+    branches = np.empty(phi.shape, dtype=np.int32)
+    phase = np.empty(phi.shape, dtype=np.float64)
+    _irls_numba.branches_and_phase(phi, wrapped, offset, tau, branches, phase)
     return phase, branches
 
 
@@ -491,7 +511,7 @@ def _conjugate_gradients(
 
     Returns the round's report, and whether `phi` was changed.
     """
-    norm = math.sqrt(np.vdot(b, b))
+    norm = math.sqrt(problem.dot(b, b))
     if not norm > 0:
         # Zero right-hand side: already solved, and the relative residual would
         # be 0/0.
@@ -499,8 +519,9 @@ def _conjugate_gradients(
 
     report = CGRound(iterations=0)
     operated = np.empty_like(phi)
-    residual = b - problem.apply(phi, out=operated)
-    initial = math.sqrt(np.vdot(residual, residual)) / norm
+    problem.apply(phi, out=operated)
+    residual = b - operated
+    initial = math.sqrt(problem.dot(residual, residual)) / norm
     report.residuals.append(initial)
     if initial <= options.cg_relative_tolerance:
         # Already solved, for example by a warm start on a near-identical input.
@@ -509,20 +530,20 @@ def _conjugate_gradients(
 
     z = problem.precondition(residual)
     direction = z.copy()
-    residual_dot_z = float(np.vdot(residual, z))
+    residual_dot_z = problem.dot(residual, z)
     tiny = np.finfo(phi.dtype).tiny
 
     for iteration in range(options.cg_max_iterations):
-        curvature = float(np.vdot(direction, problem.apply(direction, out=operated)))
+        curvature = problem.apply(direction, out=operated)
         # Zero curvature: the direction lies in the nullspace (constants),
         # there is nothing left to descend.
         if abs(curvature) <= tiny:
             report.converged = True
             break
         alpha = phi.dtype.type(residual_dot_z / curvature)
-        phi += alpha * direction
-        residual -= alpha * operated
-        relative = math.sqrt(np.vdot(residual, residual)) / norm
+        relative = math.sqrt(
+            problem.cg_update(phi, direction, residual, operated, alpha),
+        ) / norm
         report.iterations = iteration + 1
         report.residuals.append(relative)
         if relative <= options.cg_relative_tolerance:
@@ -530,11 +551,10 @@ def _conjugate_gradients(
             break
 
         z = problem.precondition(residual)
-        next_residual_dot_z = float(np.vdot(residual, z))
+        next_residual_dot_z = problem.dot(residual, z)
         beta = phi.dtype.type(next_residual_dot_z / residual_dot_z)
         residual_dot_z = next_residual_dot_z
-        direction *= beta
-        direction += z
+        _irls_numba.next_direction(direction, z, beta)
     return report, True
 
 
@@ -570,11 +590,12 @@ class _Candidate:
         round_index: int,
     ) -> _Candidate:
         phase, branches = _congruent(phi, wrapped)
+        cut_turns, cut_cost = problem.cuts(branches)
         return cls(
             phase=phase,
             branches=branches,
-            cut_turns=problem.cut_turns(branches),
-            cut_cost=problem.cut_cost(branches),
+            cut_turns=cut_turns,
+            cut_cost=cut_cost,
             weights_x=problem.weights_x.copy(),
             weights_y=problem.weights_y.copy(),
             weights_epsilon=weights_epsilon,
@@ -795,8 +816,8 @@ def unwrap_phase_irls(
     options
         Solver settings, :class:`IRLSOptions` by default.
     workers
-        Number of threads for the cosine transforms, passed on to
-        :func:`scipy.fft.dctn`.
+        Number of threads. By default, the number of CPUs, but at most 8.
+        The result does not depend on it.
     edge_weights
         Weights :math:`C` of the horizontal and vertical edges between
         neighbouring pixels, with shapes :code:`(rows, cols - 1)` and
@@ -877,6 +898,27 @@ def unwrap_phase_irls(
         options = IRLSOptions()
     if isinstance(prior, IRLSResult):
         prior = prior.as_prior()
+    if workers is None:
+        workers = min(os.cpu_count() or 1, _DEFAULT_MAX_THREADS)
+    # BLAS only computes dot products here, on one thread, so that their summation
+    # order and the result do not depend on the thread count. The kernels and the
+    # cosine transforms use `workers` threads. Only the outermost numba setting
+    # takes effect, so it comes before `set_num_threads`, which sets numba too.
+    with (
+        set_numba_threads(min(workers, numba.config.NUMBA_NUM_THREADS)),
+        set_num_threads(1),
+    ):
+        return _unwrap(wrapped, prior, options, workers, edge_weights)
+
+
+def _unwrap(
+    wrapped: np.ndarray,
+    prior: PhasePrior | BranchesPrior | None,
+    options: IRLSOptions,
+    workers: int,
+    edge_weights: tuple[np.ndarray, np.ndarray] | None,
+) -> IRLSResult:
+    """Run :func:`unwrap_phase_irls` with the threads set up."""
     wrapped, edge_weights = _check_input(wrapped, prior, edge_weights)
     problem = _WeightedProblem(wrapped, workers=workers, edge_weights=edge_weights)
 
