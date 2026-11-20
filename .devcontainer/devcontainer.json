@@ -1,0 +1,53 @@
+// Dev container for LiberTEM-holo, see .devcontainer/README.md
+{
+    "name": "LiberTEM-holo",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    // Pass the GPU through if the host has one (NVIDIA container toolkit),
+    // otherwise start without it.
+    "hostRequirements": {
+        "gpu": "optional"
+    },
+    "runArgs": [
+        // LiberTEM / dask use shared memory, docker's default of 64 MB is too small
+        "--shm-size=4g"
+    ],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/LiberTEM-holo,type=bind",
+    "workspaceFolder": "/workspaces/LiberTEM-holo",
+    "mounts": [
+        // Keep the container's venv and tox envs out of the host checkout
+        // (they are built for the container's OS/arch) and across rebuilds.
+        "source=libertem-holo-venv-${devcontainerId},target=/workspaces/LiberTEM-holo/.venv,type=volume",
+        "source=libertem-holo-tox-${devcontainerId},target=/workspaces/LiberTEM-holo/.tox,type=volume",
+        // Claude Code login + settings, uv cache, neovim plugins: survive rebuilds
+        "source=libertem-holo-claude-${devcontainerId},target=/home/vscode/.claude,type=volume",
+        "source=libertem-holo-cache-${devcontainerId},target=/home/vscode/.cache,type=volume",
+        "source=libertem-holo-nvim-${devcontainerId},target=/home/vscode/.local/share/nvim,type=volume"
+    ],
+    "containerEnv": {
+        // keeps .claude.json inside the persisted ~/.claude volume, too
+        "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+        "UV_LINK_MODE": "copy",
+        "PY_IGNORE_IMPORTMISMATCH": "1"
+    },
+    "remoteUser": "vscode",
+    // Runs on the host: create the mount points for the volumes above as the
+    // host user, otherwise (native Linux docker) docker creates them root-owned
+    // in the checkout.
+    "initializeCommand": ["mkdir", "-p", ".venv", ".tox"],
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "charliermarsh.ruff",
+                "anthropic.claude-code"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/workspaces/LiberTEM-holo/.venv/bin/python",
+                "python.testing.pytestEnabled": true
+            }
+        }
+    }
+}
