@@ -12,6 +12,25 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
         build-essential ripgrep fd-find less htop \
     && rm -rf /var/lib/apt/lists/*
 
+# Nsight Systems (nsys) and Nsight Compute (ncu) for profiling CUDA code,
+# from NVIDIA's CUDA apt repo. The pip cuda-toolkit doesn't ship them.
+# The cuda-nsight-*-X-Y metapackages pick the versions that go with CUDA X.Y
+# and put nsys/ncu into /usr/local/cuda-X.Y/bin.
+ARG CUDA_VERSION=13.5
+RUN case "$(uname -m)" in \
+        x86_64) arch=x86_64 ;; aarch64) arch=sbsa ;; *) exit 1 ;; \
+    esac \
+    && ver="$(echo "${CUDA_VERSION}" | tr . -)" \
+    && curl -fsSL -o /tmp/cuda-keyring.deb \
+        "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/${arch}/cuda-keyring_1.1-1_all.deb" \
+    && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get install -y --no-install-recommends \
+        "cuda-nsight-systems-${ver}" \
+        "cuda-nsight-compute-${ver}" \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/cuda-${CUDA_VERSION}/bin:${PATH}"
+
 # uv / uvx (also used for tox, pre-commit, ruff)
 COPY --from=ghcr.io/astral-sh/uv:0.13.9 /uv /uvx /usr/local/bin/
 
