@@ -30,3 +30,8 @@ pip-wheel-metadata
 src/libertem_holo/_baked_revision.py
 *.dm4
 junit.xml
+
+# Nsight profiler reports
+*.nsys-rep
+*.ncu-rep
+*.qdstrm
