@@ -212,3 +212,39 @@ def test_phase_unwrap_forwards_keyword_arguments():
     )
     with pytest.raises(ValueError, match="unknown phase unwrapping method"):
         phase_unwrap(wrapped, method="magic")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("solve", "options"),
+    [(unwrap_phase_irls, ADMMOptions()), (unwrap_phase_admm, irls.IRLSOptions()),
+     (unwrap_phase_admm, {"rounds": 3})],
+)
+def test_each_solver_takes_only_its_own_options(solve, options):
+    with pytest.raises(TypeError, match="options must be"):
+        solve(_noisy(), options=options)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "match"),
+    [
+        ({"workers": 0}, ValueError, "workers"),
+        ({"workers": -1}, ValueError, "workers"),
+        ({"workers": True}, ValueError, "workers"),
+        ({"workers": 1.5}, ValueError, "workers"),
+        ({"prior": np.zeros((70, 90))}, TypeError, "prior must be"),
+        ({"prior": irls.L1PhasePrior(np.zeros((70, 90)), np.nan)}, ValueError,
+         "epsilon"),
+        ({"prior": irls.L1BranchesPrior(np.zeros((70, 90), np.int32), -1.0)},
+         ValueError, "epsilon"),
+        ({"edge_weights": np.ones((2, 70, 89))}, TypeError, "pair of arrays"),
+    ],
+)
+@pytest.mark.parametrize("solve", [unwrap_phase_irls, unwrap_phase_admm])
+def test_arguments_are_checked(solve, kwargs, error, match):
+    with pytest.raises(error, match=match):
+        solve(_noisy(), **kwargs)
+
+
+def test_boolean_input_is_rejected():
+    with pytest.raises(TypeError, match="real or complex"):
+        unwrap_phase_admm(np.zeros((4, 5), dtype=bool))

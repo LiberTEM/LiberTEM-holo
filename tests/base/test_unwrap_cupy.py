@@ -514,10 +514,7 @@ def test_gpu_kernels_compile_only_their_declared_signatures(dtype):
     declared = _irls_numba_cuda.signatures(real)
     assert kernels.keys() == declared.keys()
     for name, kernel in kernels.items():
-        if name in _irls_numba_cuda.EXPERIMENTAL:
-            assert kernel.signatures in ([], [declared[name]]), name
-        else:
-            assert kernel.signatures == [declared[name]], name
+        assert kernel.signatures == [declared[name]], name
 
 
 def test_irls_gpu_threads_setting_up_at_once():
@@ -590,6 +587,25 @@ def test_admm_gpu_matches_cpu(field, dtype):
     _assert_admm_same(unwrap_phase_admm(cp.asarray(data)), unwrap_phase_admm(data))
 
 
+@pytest.mark.parametrize("shape", [(1, 1), (1, 9), (9, 1)])
+@pytest.mark.parametrize("complex_input", [False, True])
+def test_admm_gpu_single_rows_and_columns(shape, complex_input):
+    """Solved on the host, with the result on the device, and priors from it."""
+    import cupy as cp  # noqa: PLC0415
+    y, x = np.mgrid[:shape[0], :shape[1]]
+    data = _wrap(1.7 * x + 2.1 * y)
+    if complex_input:
+        data = np.exp(1j * data)
+    cpu = unwrap_phase_admm(data)
+    gpu = unwrap_phase_admm(cp.asarray(data))
+    assert isinstance(gpu.phase, cp.ndarray)
+    assert isinstance(gpu.weights_y, cp.ndarray)
+    _assert_admm_same(gpu, cpu)
+    assert gpu.cut_turns == 0
+    warm = unwrap_phase_admm(cp.asarray(data), prior=gpu)
+    _assert_admm_same(warm, unwrap_phase_admm(data, prior=cpu))
+
+
 def test_admm_gpu_warm_starts_and_edge_weights_match_cpu():
     import cupy as cp  # noqa: PLC0415
     wrapped = _noisy().astype(np.float32)
@@ -602,7 +618,10 @@ def test_admm_gpu_warm_starts_and_edge_weights_match_cpu():
     _assert_admm_same(cold_gpu, cold)
     options = ADMMOptions(iterations_per_round=4, rho_scale=1.0)
     for prior in (cold, L1BranchesPrior(cold.branches, epsilon=0.02)):
-        gpu_prior = prior if isinstance(prior, L1BranchesPrior) else cold_gpu
+        gpu_prior = (
+            L1BranchesPrior(cp.asarray(prior.branches), epsilon=prior.epsilon)
+            if isinstance(prior, L1BranchesPrior) else cold_gpu
+        )
         _assert_admm_same(
             unwrap_phase_admm(cp.asarray(wrapped), prior=gpu_prior, options=options),
             unwrap_phase_admm(wrapped, prior=prior, options=options),
@@ -667,3 +686,21 @@ def test_irls_gpu_threads_solving_the_same_shape_do_not_interfere():
     for worker in workers:
         worker.join()
     assert not wrong
+
+
+@pytest.mark.parametrize("solve", [unwrap_phase_irls, unwrap_phase_admm])
+def test_arrays_on_the_other_device_are_rejected(solve):
+    import cupy as cp  # noqa: PLC0415
+    wrapped = _noisy().astype(np.float32)
+    edges = (np.ones((70, 89)), np.ones((69, 90)))
+    result = solve(wrapped)
+    on_gpu = cp.asarray(wrapped)
+    with pytest.raises(TypeError, match="edge_weights must be on the device"):
+        solve(on_gpu, edge_weights=edges)
+    with pytest.raises(TypeError, match="edge_weights must be on the device"):
+        solve(wrapped, edge_weights=tuple(cp.asarray(e) for e in edges))
+    with pytest.raises(TypeError, match="prior's phase must be on the device"):
+        solve(on_gpu, prior=result)
+    gpu_prior = L1BranchesPrior(cp.asarray(result.branches), epsilon=0.5)
+    with pytest.raises(TypeError, match="prior's branches must be on the device"):
+        solve(wrapped, prior=gpu_prior)

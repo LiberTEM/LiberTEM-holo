@@ -21,6 +21,7 @@ from .irls import (
     L1Result,
     L1Round,
     _Candidate,
+    _check_options,
     _run,
     _WeightedProblem,
 )
@@ -191,6 +192,7 @@ class _AdmmProblem(_WeightedProblem):
             for lam in self.duals:
                 for x in lam:
                     x[...] = 0
+        # As the GPU, which gets epsilon squared (in `round_params`):
         delta = phi.dtype.type(math.sqrt(epsilon * epsilon))
         u = phi
         workers = self.precondition.workers
@@ -266,8 +268,9 @@ def unwrap_phase_admm(
     :math:`z` (elementwise; the weights only enter here), and a dual update. This
     follows B. Rouet-Leduc and C. Hulbert, "Phase Unwrapping in Seconds: A
     Spectral ADMM Algorithm for Large-Scale InSAR", Remote Sensing 18, 1801
-    (2026), with the Huber smoothing, the zero start, and the rounds and stop rule
-    of :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`. Results are close to
+    (2026), https://doi.org/10.3390/rs18111801, with the Huber smoothing, the
+    zero start, and the rounds and stop rule of
+    :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`. Results are close to
     those of IRLS, at a fraction of its iterations.
 
     The rounds' reports carry the number of iterations; there are no CG
@@ -286,7 +289,9 @@ def unwrap_phase_admm(
     True
 
     """
-    return _run(wrapped, prior, options or ADMMOptions(), workers, edge_weights)
+    return _run(
+        wrapped, prior, _check_options(options, ADMMOptions), workers, edge_weights,
+    )
 
 
 __all__ = ["ADMMOptions", "unwrap_phase_admm"]
