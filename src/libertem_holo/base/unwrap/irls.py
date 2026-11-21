@@ -7,14 +7,19 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numba
 import numpy as np
 import scipy.fft
 from libertem.common.threading import set_num_threads, set_numba_threads
 
+from libertem_holo.base.align import _array_module
+
 from . import _irls_numba
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 TAU = 2 * np.pi
 
@@ -392,6 +397,8 @@ class _WeightedProblem:
         self.weights_x = self.edge_x.copy()
         self.weights_y = self.edge_y.copy()
         self._row_sums = np.empty(rows, dtype=np.float64)
+        self._b = np.empty((rows, cols), dtype=wrapped.dtype)
+        self._iterations = 0
         self.precondition = _PoissonPreconditioner(
             (rows, cols), wrapped.dtype, workers=workers,
         )
@@ -459,12 +466,91 @@ class _WeightedProblem:
         _negative_divergence(self.target_x, self.target_y, b)
         return np.array(self.precondition(b))
 
-    def reweight(self, phi: np.ndarray, epsilon: float) -> None:
-        """Set the weights from the iterate `phi` at `epsilon`."""
+    def reweight(
+        self, phi: np.ndarray, epsilon: float, *, unless_settled: bool = False,
+    ) -> None:
+        """Set the weights from the iterate `phi` at `epsilon`.
+
+        With `unless_settled`, only if the last :meth:`solve` ran an iteration.
+        """
+        if unless_settled and self._iterations == 0:
+            return
         _irls_numba.charbonnier_weights(
             phi, self.target_x, self.target_y, self.edge_x, self.edge_y,
             phi.dtype.type(epsilon * epsilon), self.weights_x, self.weights_y,
         )
+
+    def solve(
+        self, phi: np.ndarray, options: IRLSOptions,
+    ) -> Callable[[], CGRound]:
+        """Run one round's CG on `phi` (in place), and remove its mean if it changed.
+
+        Returns a function that returns the round's report. (On a GPU, the
+        report is only read back at the next synchronization.)
+        """
+        report, iterated = _conjugate_gradients(
+            self, phi, self.right_hand_side(out=self._b), options,
+        )
+        # Nothing in the solve controls the mean of the iterate, so rounding
+        # errors make it drift; remove it.
+        if iterated:
+            phi -= phi.mean()
+        self._iterations = report.iterations
+        return lambda: report
+
+    def congruent(
+        self, phi: np.ndarray, wrapped: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Snap `phi` onto the branches of `wrapped`, see :func:`_congruent`."""
+        return _congruent(phi, wrapped)
+
+    def run_round(
+        self,
+        phi: np.ndarray,
+        wrapped: np.ndarray,
+        *,
+        epsilon: float,
+        at_end: bool,
+        options: IRLSOptions,
+        index: int,
+    ) -> tuple[CGRound, _Candidate]:
+        """Run one IRLS round on `phi` (in place).
+
+        Solve the weighted problem, reweight at `epsilon` (unless the round
+        settled: no CG iteration, `at_end` of the schedule), and round the result
+        onto the branches. Returns the round's report and its candidate result,
+        whose `weights_epsilon` and `converged` the caller sets.
+        """
+        pending = self.solve(phi, options)
+        self.reweight(phi, epsilon, unless_settled=at_end)
+        candidate = _Candidate.take(
+            self, phi, wrapped,
+            weights_epsilon=math.nan, converged=False, round_index=index,
+        )
+        return pending(), candidate
+
+    def keep(self, candidate: _Candidate) -> _Candidate:
+        """Return the candidate, to keep past the next round (it owns its arrays)."""
+        return candidate
+
+    def cold_start(
+        self, wrapped: np.ndarray, options: IRLSOptions,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve without a prior, see :func:`_cold_start`."""
+        return _cold_start(self, wrapped, options)
+
+    def warm_start(
+        self,
+        wrapped: np.ndarray,
+        prior: PhasePrior | BranchesPrior,
+        options: IRLSOptions,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve from a prior, see :func:`_warm_start`."""
+        return _warm_start(self, wrapped, prior, options)
+
+    def release(self, candidate: _Candidate) -> _Candidate:
+        """Return the result of the solve (it owns its arrays)."""
+        return candidate
 
 
 def _starting_phase(
@@ -472,11 +558,12 @@ def _starting_phase(
     wrapped: np.ndarray,
 ) -> np.ndarray:
     """Turn the prior into a phase that is congruent with `wrapped`."""
+    xp = _array_module(wrapped)
     if isinstance(prior, PhasePrior):
         raw = wrapped.astype(np.float64)
-        branches = np.rint((np.asarray(prior.phase, dtype=np.float64) - raw) / TAU)
+        branches = xp.rint((xp.asarray(prior.phase, dtype=np.float64) - raw) / TAU)
         return (raw + TAU * branches).astype(wrapped.dtype)
-    branches = np.asarray(prior.branches).astype(wrapped.dtype)
+    branches = xp.asarray(prior.branches).astype(wrapped.dtype)
     return wrapped + wrapped.dtype.type(TAU) * branches
 
 
@@ -589,7 +676,7 @@ class _Candidate:
         converged: bool,
         round_index: int,
     ) -> _Candidate:
-        phase, branches = _congruent(phi, wrapped)
+        phase, branches = problem.congruent(phi, wrapped)
         cut_turns, cut_cost = problem.cuts(branches)
         return cls(
             phase=phase,
@@ -627,38 +714,30 @@ def _irls_rounds(
         else max(options.epsilon_min, weights_epsilon * options.decay)
     )
     stale = 0
-    b = np.empty_like(phi)
     rounds: list[CGRound] = []
     for index in range(options.irls_rounds):
-        report, iterated = _conjugate_gradients(
-            problem, phi, problem.right_hand_side(out=b), options,
+        # A fixed point: the iterate did not move and the schedule has reached
+        # its end, so further rounds would repeat this one. Whether the iterate
+        # moved is known only after the solve, so the problem decides itself
+        # whether to reweight; on a GPU, a whole round is then one graph.
+        at_end = epsilon <= options.epsilon_min
+        report, candidate = problem.run_round(
+            phi, wrapped, epsilon=epsilon, at_end=at_end, options=options, index=index,
         )
         rounds.append(report)
-        # Nothing in the solve controls the mean of the iterate, so rounding
-        # errors make it drift; remove it.
-        if iterated:
-            phi -= phi.mean()
-        # A fixed point: the iterate did not move and the schedule has reached
-        # its end, so further rounds would repeat this one.
-        settled = report.iterations == 0 and epsilon <= options.epsilon_min
+        settled = report.iterations == 0 and at_end
         if not settled:
-            problem.reweight(phi, epsilon)
             weights_epsilon = epsilon
             epsilon = max(options.epsilon_min, epsilon * options.decay)
-
-        candidate = _Candidate.take(
-            problem, phi, wrapped,
-            weights_epsilon=weights_epsilon,
-            converged=report.converged,
-            round_index=index,
-        )
+        candidate.weights_epsilon = weights_epsilon
+        candidate.converged = report.converged
         report.cut_turns = candidate.cut_turns
         report.cut_cost = candidate.cut_cost
         threshold = max(_MIN_IMPROVEMENT, options.stop_tolerance * best.cut_cost)
         improved = candidate.cut_cost < best.cut_cost - threshold
         stale = 0 if improved else stale + 1
         if candidate.cut_cost <= best.cut_cost:
-            best = candidate
+            best = problem.keep(candidate)
         patience = options.stop_patience
         if settled or (patience is not None and stale >= patience):
             break
@@ -669,13 +748,65 @@ def _irls_rounds(
     return rounds, best
 
 
+def _cold_start(
+    problem: _WeightedProblem,
+    wrapped: np.ndarray,
+    options: IRLSOptions,
+) -> tuple[np.ndarray, _Candidate, float]:
+    """Start a solve without a prior: return the phase, best candidate, and epsilon.
+
+    The epsilon is the one the current weights were derived at.
+    """
+    # The rounded L2 solution is the first candidate: where the field has no
+    # residues, it is already the answer, and the result is never worse.
+    phi = problem.l2_solution()
+    weights_epsilon = math.inf
+    best = _Candidate.take(
+        problem, phi, wrapped,
+        weights_epsilon=weights_epsilon, converged=True, round_index=-1,
+    )
+    if options.cold_start == "zero" and best.cut_turns > 0:
+        # The L2 solution smears discontinuities and residues, which biases
+        # the rounds towards the wrong ones of equally cheap cuts. From zero,
+        # the first weights make edges with a large wrapped gradient cheap.
+        phi = _array_module(wrapped).zeros_like(wrapped)
+        weights_epsilon = options.epsilon_start
+        problem.reweight(phi, weights_epsilon)
+    return phi, best, weights_epsilon
+
+
+def _warm_start(
+    problem: _WeightedProblem,
+    wrapped: np.ndarray,
+    prior: PhasePrior | BranchesPrior,
+    options: IRLSOptions,
+) -> tuple[np.ndarray, _Candidate, float]:
+    """Start a solve from a prior: return the phase, best candidate, and epsilon.
+
+    Start on the prior, with the weights it implies where its schedule stopped.
+    Restarting the schedule from unit weights would make the first round
+    converge to the L2 solution and discard the prior.
+    """
+    phi = _starting_phase(prior, wrapped)
+    weights_epsilon = min(
+        max(prior.epsilon, options.epsilon_min), options.epsilon_start,
+    )
+    problem.reweight(phi, weights_epsilon)
+    best = _Candidate.take(
+        problem, phi, wrapped,
+        weights_epsilon=weights_epsilon, converged=True, round_index=-1,
+    )
+    return phi, best, weights_epsilon
+
+
 def _check_edge_weights(
     edge_weights: tuple[np.ndarray, np.ndarray],
     shape: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Validate edge weights and scale them to a maximum of one."""
     rows, cols = shape
-    weights = tuple(np.asarray(w, dtype=np.float64) for w in edge_weights)
+    xp = _array_module(edge_weights[0]) if len(edge_weights) else np
+    weights = tuple(xp.asarray(w, dtype=np.float64) for w in edge_weights)
     expected = ((rows, cols - 1), (rows - 1, cols))
     if len(weights) != 2 or any(  # noqa: PLR2004
         w.shape != e for w, e in zip(weights, expected, strict=False)
@@ -685,10 +816,16 @@ def _check_edge_weights(
             f"{expected[0]} and {expected[1]}, got {[w.shape for w in weights]}"
         )
         raise ValueError(msg)
-    if not all(np.all(np.isfinite(w)) and np.all(w > 0) for w in weights):
+    # All checks in one array, so that on a GPU, they cost one synchronization:
+    checks = [xp.all(xp.isfinite(w) & (w > 0)) for w in weights]
+    maxima = [w.max() for w in weights if w.size]
+    values = xp.stack(
+        [xp.asarray(v, dtype=np.float64) for v in (*checks, *maxima)],
+    ).tolist()
+    if not all(values[:len(checks)]):
         msg = "edge_weights must be finite and greater than zero"
         raise ValueError(msg)
-    largest = max((w.max() for w in weights if w.size), default=1.0)
+    largest = max(values[len(checks):], default=1.0)
     return weights[0] / largest, weights[1] / largest
 
 
@@ -696,20 +833,25 @@ def _check_input(
     wrapped: np.ndarray,
     prior: PhasePrior | BranchesPrior | None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
+    *,
+    keep_wave: bool = False,
 ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
     """Validate the input, and convert it to the precision of the solve.
 
     Returns the wrapped phase and the edge weights, which for a complex wave
-    default to :func:`amplitude_edge_weights`.
+    default to :func:`amplitude_edge_weights`. With `keep_wave`, a complex wave
+    without edge weights is returned as it is, for the GPU to convert.
     """
-    wrapped = np.asarray(wrapped)
+    xp = _array_module(wrapped)
+    wrapped = xp.asarray(wrapped)
     if wrapped.ndim != 2 or wrapped.size == 0:  # noqa: PLR2004
         msg = f"wrapped must be a non-empty 2D array, got shape {wrapped.shape}"
         raise ValueError(msg)
-    if np.iscomplexobj(wrapped):
+    keep_wave = keep_wave and xp.iscomplexobj(wrapped) and edge_weights is None
+    if xp.iscomplexobj(wrapped) and not keep_wave:
         if edge_weights is None:
-            edge_weights = amplitude_edge_weights(np.abs(wrapped))
-        wrapped = np.angle(wrapped)
+            edge_weights = amplitude_edge_weights(xp.abs(wrapped))
+        wrapped = xp.angle(wrapped)
     if edge_weights is not None:
         edge_weights = _check_edge_weights(edge_weights, wrapped.shape)
     if prior is not None:
@@ -722,14 +864,20 @@ def _check_input(
                 f"but the wrapped phase has shape {wrapped.shape}"
             )
             raise ValueError(msg)
+    if keep_wave:
+        return wrapped, None
     dtype = np.float32 if wrapped.dtype == np.float32 else np.float64
-    return np.ascontiguousarray(wrapped, dtype=dtype), edge_weights
+    return xp.ascontiguousarray(wrapped, dtype=dtype), edge_weights
+
+
+_AMPLITUDE_FLOOR = 1e-3
+_AMPLITUDE_PERCENTILE = 90.0
 
 
 def amplitude_edge_weights(
     amplitude: np.ndarray,
-    floor: float = 1e-3,
-    percentile: float = 90.0,
+    floor: float = _AMPLITUDE_FLOOR,
+    percentile: float = _AMPLITUDE_PERCENTILE,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Edge weights for :func:`unwrap_phase_irls` from the amplitude of a wave.
 
@@ -762,24 +910,31 @@ def amplitude_edge_weights(
         :code:`(rows, cols - 1)` and :code:`(rows - 1, cols)`.
 
     """
-    amplitude = np.asarray(amplitude, dtype=np.float64)
+    xp = _array_module(amplitude)
+    amplitude = xp.asarray(amplitude, dtype=np.float64)
     if amplitude.ndim != 2:  # noqa: PLR2004
         msg = f"amplitude must be a 2D array, got shape {amplitude.shape}"
         raise ValueError(msg)
     if not 0 < floor <= 1:
         msg = f"floor must be in (0, 1], got {floor}"
         raise ValueError(msg)
-    reference = np.percentile(amplitude, percentile)
-    if not reference > 0:
-        # No signal anywhere: no edge is more reliable than another.
-        return (
-            np.ones((amplitude.shape[0], amplitude.shape[1] - 1)),
-            np.ones((amplitude.shape[0] - 1, amplitude.shape[1])),
+    reference = xp.percentile(amplitude, percentile)
+    if xp is np:
+        if not reference > 0:
+            # No signal anywhere: no edge is more reliable than another.
+            return (
+                np.ones((amplitude.shape[0], amplitude.shape[1] - 1)),
+                np.ones((amplitude.shape[0] - 1, amplitude.shape[1])),
+            )
+        relative = np.clip(amplitude / reference, floor, 1.0)
+    else:
+        # The same, without the synchronization of a host-side check:
+        relative = xp.where(
+            reference > 0, xp.clip(amplitude / reference, floor, 1.0), 1.0,
         )
-    relative = np.clip(amplitude / reference, floor, 1.0)
     return (
-        np.minimum(relative[:, 1:], relative[:, :-1]),
-        np.minimum(relative[1:, :], relative[:-1, :]),
+        xp.minimum(relative[:, 1:], relative[:, :-1]),
+        xp.minimum(relative[1:, :], relative[:-1, :]),
     )
 
 
@@ -898,6 +1053,9 @@ def unwrap_phase_irls(
         options = IRLSOptions()
     if isinstance(prior, IRLSResult):
         prior = prior.as_prior()
+    if _array_module(wrapped) is not np:
+        # On the GPU, CPU threads play no part.
+        return _unwrap(wrapped, prior, options, workers or 1, edge_weights)
     if workers is None:
         workers = min(os.cpu_count() or 1, _DEFAULT_MAX_THREADS)
     # BLAS only computes dot products here, on one thread, so that their summation
@@ -919,38 +1077,31 @@ def _unwrap(
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
 ) -> IRLSResult:
     """Run :func:`unwrap_phase_irls` with the threads set up."""
-    wrapped, edge_weights = _check_input(wrapped, prior, edge_weights)
-    problem = _WeightedProblem(wrapped, workers=workers, edge_weights=edge_weights)
+    xp = _array_module(wrapped)
+    wrapped, edge_weights = _check_input(
+        wrapped, prior, edge_weights, keep_wave=xp is not np,
+    )
+    if xp is np:
+        problem = _WeightedProblem(wrapped, workers=workers, edge_weights=edge_weights)
+    elif xp.iscomplexobj(wrapped):
+        # On the GPU, the phase and the amplitude weights of a wave come from a
+        # few fused kernels:
+        from ._irls_cupy import problem_for_wave  # noqa: PLC0415
+        # The input is only staged; the start (setup, starting point, first
+        # candidate) then runs as one CUDA graph:
+        problem = problem_for_wave(
+            wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE, deferred=True,
+        )
+        wrapped = problem.wrapped
+    else:
+        from ._irls_cupy import problem_for  # noqa: PLC0415
+        problem = problem_for(wrapped, edge_weights, deferred=True)
+        wrapped = problem.wrapped
 
     if prior is None:
-        # The rounded L2 solution is the first candidate: where the field has no
-        # residues, it is already the answer, and the result is never worse.
-        phi = problem.l2_solution()
-        weights_epsilon = math.inf
-        best = _Candidate.take(
-            problem, phi, wrapped,
-            weights_epsilon=weights_epsilon, converged=True, round_index=-1,
-        )
-        if options.cold_start == "zero" and best.cut_turns > 0:
-            # The L2 solution smears discontinuities and residues, which biases
-            # the rounds towards the wrong ones of equally cheap cuts. From zero,
-            # the first weights make edges with a large wrapped gradient cheap.
-            phi = np.zeros_like(wrapped)
-            weights_epsilon = options.epsilon_start
-            problem.reweight(phi, weights_epsilon)
+        phi, best, weights_epsilon = problem.cold_start(wrapped, options)
     else:
-        # Start on the prior, with the weights it implies where its schedule
-        # stopped. Restarting the schedule from unit weights would make the first
-        # round converge to the L2 solution and discard the prior.
-        phi = _starting_phase(prior, wrapped)
-        weights_epsilon = min(
-            max(prior.epsilon, options.epsilon_min), options.epsilon_start,
-        )
-        problem.reweight(phi, weights_epsilon)
-        best = _Candidate.take(
-            problem, phi, wrapped,
-            weights_epsilon=weights_epsilon, converged=True, round_index=-1,
-        )
+        phi, best, weights_epsilon = problem.warm_start(wrapped, prior, options)
 
     if best.cut_turns == 0:
         rounds: list[CGRound] = []
@@ -967,6 +1118,7 @@ def _unwrap(
         max(resume_epsilon, options.epsilon_min), options.epsilon_start,
     )
 
+    best = problem.release(best)
     return IRLSResult(
         phase=best.phase,
         branches=best.branches,
