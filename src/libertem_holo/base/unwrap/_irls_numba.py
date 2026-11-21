@@ -15,6 +15,8 @@ All arrays are 2D and C-contiguous. Horizontal edges have shape
 # ruff: noqa: PLR0917
 from __future__ import annotations
 
+import math
+
 import numba
 import numpy as np
 
@@ -206,3 +208,205 @@ def cuts_per_row(
                 row_cost += k * np.float64(edge_y[i, j])
         turns[i] = row_turns
         cost[i] = row_cost
+
+
+# ---- Setup: targets, order statistics, amplitude edge weights --------------------
+
+
+@numba.njit(cache=True, parallel=True)
+def targets_and_jumps(
+    wrapped: np.ndarray,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    jumps_x: np.ndarray,
+    jumps_y: np.ndarray,
+) -> None:
+    """Compute the wrapped target gradients and their whole-turn jumps, in one pass.
+
+    As :code:`_wrap(np.diff(wrapped))` and :code:`np.rint((np.diff(wrapped) -
+    target) / TAU)`: the same operations, in the dtype of `wrapped`.
+    """
+    rows, cols = wrapped.shape
+    tau = wrapped.dtype.type(2 * np.pi)
+    for i in numba.prange(rows):
+        for j in range(cols):
+            if j < cols - 1:
+                d = wrapped[i, j + 1] - wrapped[i, j]
+                g = d - np.rint(d / tau) * tau
+                target_x[i, j] = g
+                jumps_x[i, j] = np.int32(np.rint((d - g) / tau))
+            if i < rows - 1:
+                d = wrapped[i + 1, j] - wrapped[i, j]
+                g = d - np.rint(d / tau) * tau
+                target_y[i, j] = g
+                jumps_y[i, j] = np.int32(np.rint((d - g) / tau))
+
+
+_SELECT_BINS = 4096
+_SELECT_SMALL = 1 << 15  # sort what is left at this size
+
+
+@numba.njit(cache=True, parallel=True)
+def _min_max_nan(x: np.ndarray, chunks: int) -> tuple[float, float, bool]:
+    n = x.size
+    chunks = max(1, min(chunks, n))
+    per = (n + chunks - 1) // chunks
+    lows = np.full(chunks, np.inf)
+    highs = np.full(chunks, -np.inf)
+    nans = np.zeros(chunks, dtype=np.bool_)
+    for c in numba.prange(chunks):
+        lo, hi, nan = np.inf, -np.inf, False
+        for k in range(c * per, min(n, (c + 1) * per)):
+            v = np.float64(x[k])
+            if np.isnan(v):
+                nan = True
+            else:
+                lo = min(lo, v)
+                hi = max(hi, v)
+        lows[c], highs[c], nans[c] = lo, hi, nan
+    return lows.min(), highs.max(), nans.any()
+
+
+@numba.njit(cache=True, parallel=True)
+def _bucket(
+    x: np.ndarray, lo: float, hi: float, k: int, chunks: int,
+) -> tuple[np.ndarray, int]:
+    """Return the values of the histogram bucket over [lo, hi] that holds rank k.
+
+    Returns them and the number of values in lower buckets. The bucket of a
+    value is monotonic in it, so ranks carry over.
+    """
+    n = x.size
+    chunks = max(1, min(chunks, n))
+    per = (n + chunks - 1) // chunks
+    scale = _SELECT_BINS / (hi - lo)
+    hist = np.zeros((chunks, _SELECT_BINS), dtype=np.int64)
+    for c in numba.prange(chunks):
+        for i in range(c * per, min(n, (c + 1) * per)):
+            hist[c, min(int((np.float64(x[i]) - lo) * scale), _SELECT_BINS - 1)] += 1
+    totals = hist.sum(axis=0)
+    before = 0
+    b = 0
+    while before + totals[b] <= k:
+        before += totals[b]
+        b += 1
+    offsets = np.zeros(chunks + 1, dtype=np.int64)
+    for c in range(chunks):
+        offsets[c + 1] = offsets[c] + hist[c, b]
+    values = np.empty(offsets[chunks], dtype=np.float64)
+    for c in numba.prange(chunks):
+        o = offsets[c]
+        for i in range(c * per, min(n, (c + 1) * per)):
+            v = np.float64(x[i])
+            if min(int((v - lo) * scale), _SELECT_BINS - 1) == b:
+                values[o] = v
+                o += 1
+    return values, before
+
+
+def _select(x: np.ndarray, k: int) -> float:
+    """Return the value of rank k of finite values `x`, exactly (as np.partition)."""
+    chunks = numba.get_num_threads() * 4
+    while x.size > _SELECT_SMALL:
+        lo, hi, _ = _min_max_nan(x, chunks)
+        if lo == hi:  # all values equal
+            return float(lo)
+        x, before = _bucket(x, lo, hi, k, chunks)
+        k -= before
+    return float(np.partition(np.asarray(x, dtype=np.float64), k)[k])
+
+
+def select_pair(x: np.ndarray, k0: int, k1: int) -> tuple[float, float, bool]:
+    """Return the values of ranks k0 <= k1 in the 1D array `x`, and if it has NaN.
+
+    Exact, like :code:`np.partition`: parallel histograms over the value range
+    narrow down the bucket of each rank (the bucket of a value is monotonic in
+    it), until few values are left to partition.
+    """
+    lo, hi, nan = _min_max_nan(x, numba.get_num_threads() * 4)
+    if nan:
+        return math.nan, math.nan, True
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        s = np.partition(np.asarray(x, dtype=np.float64), (k0, k1))
+        return float(s[k0]), float(s[k1]), False
+    return _select(x, k0), _select(x, k1), False
+
+
+@numba.njit(cache=True, parallel=True)
+def amplitude_edges(
+    amplitude: np.ndarray,
+    reference: float,
+    floor: float,
+    edge_x: np.ndarray,
+    edge_y: np.ndarray,
+    row_max: np.ndarray,
+    row_ok: np.ndarray,
+) -> None:
+    """Edge weights from the amplitude, as `irls.amplitude_edge_weights`, in float64.
+
+    :code:`np.minimum` of :code:`np.clip(amplitude / reference, floor, 1)` of the
+    edge's pixels (NaN propagates through both); per row also the largest weight,
+    and whether all are finite and greater than zero (as `_check_edge_weights`).
+    """
+    rows, cols = amplitude.shape
+    for i in numba.prange(rows):
+        largest = -np.inf
+        ok = True
+        for j in range(cols):
+            a = _clip(amplitude[i, j] / reference, floor)
+            if j < cols - 1:
+                w = _nan_min(a, _clip(amplitude[i, j + 1] / reference, floor))
+                edge_x[i, j] = w
+                ok = ok and np.isfinite(w) and w > 0
+                largest = max(largest, w)
+            if i < rows - 1:
+                w = _nan_min(a, _clip(amplitude[i + 1, j] / reference, floor))
+                edge_y[i, j] = w
+                ok = ok and np.isfinite(w) and w > 0
+                largest = max(largest, w)
+        row_max[i] = largest
+        row_ok[i] = ok
+
+
+@numba.njit(cache=True, inline="always")
+def _clip(v: float, floor: float) -> float:
+    """:code:`np.clip(v, floor, 1.0)`, NaN propagating."""
+    if np.isnan(v):
+        return v
+    return min(max(v, floor), 1.0)
+
+
+@numba.njit(cache=True, inline="always")
+def _nan_min(a: float, b: float) -> float:
+    """:code:`np.minimum(a, b)`, NaN propagating."""
+    if np.isnan(a) or np.isnan(b):
+        return np.nan
+    return min(a, b)
+
+
+@numba.njit(cache=True, parallel=True)
+def negative_divergence(
+    flux_x: np.ndarray, flux_y: np.ndarray, out: np.ndarray,
+) -> None:
+    """Compute :code:`-div` of edge values into `out` (`irls._negative_divergence`)."""
+    rows, cols = out.shape
+    for i in numba.prange(rows):
+        for j in range(cols):
+            out[i, j] = 0
+            if j > 0:
+                out[i, j] += flux_x[i, j - 1]
+            if j < cols - 1:
+                out[i, j] -= flux_x[i, j]
+            if i > 0:
+                out[i, j] += flux_y[i - 1, j]
+            if i < rows - 1:
+                out[i, j] -= flux_y[i, j]
+
+
+@numba.njit(cache=True, parallel=True)
+def scale_into(src: np.ndarray, divisor: float, out: np.ndarray) -> None:
+    """Compute :code:`out[...] = src / divisor` (float64, then cast to out's dtype)."""
+    rows, cols = src.shape
+    for i in numba.prange(rows):
+        for j in range(cols):
+            out[i, j] = src[i, j] / divisor

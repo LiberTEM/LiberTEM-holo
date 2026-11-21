@@ -4,10 +4,12 @@ See :func:`unwrap_phase_irls` for how it works.
 """
 from __future__ import annotations
 
+import functools
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import numba
 import numpy as np
@@ -23,11 +25,13 @@ if TYPE_CHECKING:
 
 TAU = 2 * np.pi
 
-# More threads than this made the solve slower on a 24-core machine, even for
-# 2048 x 2048 images: the per-iteration work is too small to spread wider.
-_DEFAULT_MAX_THREADS = 8
+# On a 72-core GH200, 16 threads made IRLS 8-22 % and ADMM 22-39 % faster than
+# 8, from ~500^2 to 2048^2 images; 32 were slower again at ~500^2 (the
+# per-iteration work is too small to spread wider). On a 24-core machine, more
+# than 8 used to make IRLS slower.
+_DEFAULT_MAX_THREADS = 16
 
-IRLSStatus = Literal["converged", "iteration_limit"]
+L1Status = Literal["converged", "iteration_limit"]
 
 
 @dataclass(frozen=True)
@@ -39,10 +43,10 @@ class IRLSOptions:
 
     Parameters
     ----------
-    irls_rounds
+    rounds
         Maximum number of reweighting rounds. Epsilon reaches
         :code:`epsilon_min` in the last of them.
-    cg_max_iterations
+    iterations_per_round
         Maximum number of conjugate gradient (CG) iterations per round.
     epsilon_start
         The Charbonnier scale (in radians) of the first round: differences between
@@ -56,7 +60,7 @@ class IRLSOptions:
     stop_patience
         Stop once the cut cost (see :func:`unwrap_phase_irls`) of the rounded
         result has not improved for this many rounds. :code:`None` runs all
-        :code:`irls_rounds`.
+        :code:`rounds`.
     stop_tolerance
         A round counts as an improvement only if it lowers the cut cost by more
         than this fraction of it, and by more than half a cut through edges of
@@ -70,8 +74,8 @@ class IRLSOptions:
 
     """
 
-    irls_rounds: int = 30
-    cg_max_iterations: int = 15
+    rounds: int = 30
+    iterations_per_round: int = 15
     epsilon_start: float = 0.1
     epsilon_min: float = 1e-3
     cg_relative_tolerance: float = 1e-5
@@ -79,13 +83,18 @@ class IRLSOptions:
     stop_tolerance: float = 0.01
     cold_start: Literal["zero", "least_squares"] = "zero"
 
+    method: ClassVar[str] = "irls"
+
     def __post_init__(self) -> None:
         """Check that the options describe a valid solve."""
-        if self.irls_rounds < 1:
-            msg = f"irls_rounds must be at least 1, got {self.irls_rounds}"
+        if self.rounds < 1:
+            msg = f"rounds must be at least 1, got {self.rounds}"
             raise ValueError(msg)
-        if self.cg_max_iterations < 1:
-            msg = f"cg_max_iterations must be at least 1, got {self.cg_max_iterations}"
+        if self.iterations_per_round < 1:
+            msg = (
+                "iterations_per_round must be at least 1, "
+                f"got {self.iterations_per_round}"
+            )
             raise ValueError(msg)
         # `not x > 0` instead of `x <= 0`, so that NaN is rejected too:
         if not self.cg_relative_tolerance > 0:
@@ -119,11 +128,11 @@ class IRLSOptions:
     @property
     def decay(self) -> float:
         """The factor by which epsilon shrinks from one round to the next."""
-        return (self.epsilon_min / self.epsilon_start) ** (1.0 / self.irls_rounds)
+        return (self.epsilon_min / self.epsilon_start) ** (1.0 / self.rounds)
 
 
 @dataclass
-class CGRound:
+class L1Round:
     """How one IRLS round ended.
 
     Attributes
@@ -136,7 +145,7 @@ class CGRound:
         was zero.
     converged
         Whether CG reached :code:`cg_relative_tolerance` within
-        :code:`cg_max_iterations`.
+        :code:`iterations_per_round`.
     cut_turns, cut_cost
         The cut count and cut cost of the round's iterate, rounded onto the
         branches of the input (see :func:`unwrap_phase_irls`).
@@ -151,7 +160,7 @@ class CGRound:
 
 
 @dataclass(frozen=True)
-class PhasePrior:
+class L1PhasePrior:
     r"""Start an IRLS solve from an unwrapped phase of a similar input.
 
     For example, the result phase of the previous frame of a series, or of the
@@ -166,7 +175,7 @@ class PhasePrior:
         The unwrapped phase, with the same shape as the wrapped input.
     epsilon
         Where the prior's epsilon schedule stopped: its
-        :attr:`IRLSResult.resume_epsilon`. The solve resumes the schedule there.
+        :attr:`L1Result.resume_epsilon`. The solve resumes the schedule there.
 
     """
 
@@ -175,20 +184,20 @@ class PhasePrior:
 
 
 @dataclass(frozen=True)
-class BranchesPrior:
+class L1BranchesPrior:
     r"""Start an IRLS solve from the branch field of an earlier solve of the same input.
 
     For example, to solve the same wrapped phase again with other options. Against a
     different wrapped input, the branches are off by one wherever a value crossed
     :math:`\pm\pi`, which plants :math:`2\pi` spikes in the starting phase and
-    slows the solve down badly; use :class:`PhasePrior` there.
+    slows the solve down badly; use :class:`L1PhasePrior` there.
 
     Parameters
     ----------
     branches
-        Integer branch field, :attr:`IRLSResult.branches` of the earlier solve.
+        Integer branch field, :attr:`L1Result.branches` of the earlier solve.
     epsilon
-        :attr:`IRLSResult.resume_epsilon` of the earlier solve.
+        :attr:`L1Result.resume_epsilon` of the earlier solve.
 
     """
 
@@ -197,7 +206,7 @@ class BranchesPrior:
 
 
 @dataclass
-class IRLSResult:
+class L1Result:
     r"""The result of :func:`unwrap_phase_irls`.
 
     Attributes
@@ -213,7 +222,7 @@ class IRLSResult:
         where the solve placed a discontinuity. If the starting point is selected
         without a prior, these are the edge weights.
     rounds
-        One :class:`CGRound` per IRLS round that ran. Empty if the starting point
+        One :class:`L1Round` per IRLS round that ran. Empty if the starting point
         already had no cuts.
     selected_round
         Index into :attr:`rounds` of the round whose iterate is returned: the
@@ -227,11 +236,11 @@ class IRLSResult:
     status
         :code:`"converged"` if every round's CG reached the tolerance,
         :code:`"iteration_limit"` if at least one round stopped at
-        :code:`cg_max_iterations`. Either way, :attr:`phase` is the selected
+        :code:`iterations_per_round`. Either way, :attr:`phase` is the selected
         iterate, snapped onto the branches of the input.
     resume_epsilon
         Where a solve started from this result resumes the epsilon schedule (see
-        :class:`PhasePrior`): the epsilon the returned weights were derived at, or
+        :class:`L1PhasePrior`): the epsilon the returned weights were derived at, or
         one round coarser if the selected round did not converge.
 
     """
@@ -240,11 +249,11 @@ class IRLSResult:
     branches: np.ndarray
     weights_x: np.ndarray
     weights_y: np.ndarray
-    rounds: list[CGRound]
+    rounds: list[L1Round]
     selected_round: int
     cut_turns: int
     cut_cost: float
-    status: IRLSStatus
+    status: L1Status
     resume_epsilon: float
 
     @property
@@ -254,9 +263,9 @@ class IRLSResult:
             return math.nan
         return self.rounds[-1].residuals[-1]
 
-    def as_prior(self) -> PhasePrior:
-        """Return a :class:`PhasePrior` that starts another solve from this result."""
-        return PhasePrior(phase=self.phase, epsilon=self.resume_epsilon)
+    def as_prior(self) -> L1PhasePrior:
+        """Return a :class:`L1PhasePrior` that starts another solve from this result."""
+        return L1PhasePrior(phase=self.phase, epsilon=self.resume_epsilon)
 
 
 def _wrap(value: np.ndarray) -> np.ndarray:
@@ -311,13 +320,7 @@ class _PoissonPreconditioner:
             (_padded_length(shape[0]), _padded_length(shape[1])) if pad else shape
         )
         self.workers = workers
-        rows, cols = self.padded_shape
-        u = np.arange(rows)[:, np.newaxis]
-        v = np.arange(cols)[np.newaxis, :]
-        symbol = 4 - 2 * np.cos(np.pi * u / rows) - 2 * np.cos(np.pi * v / cols)
-        inverse = np.zeros_like(symbol)
-        np.divide(1.0, symbol, out=inverse, where=symbol != 0)
-        self.inverse_symbol = inverse.astype(dtype)
+        self.inverse_symbol = _inverse_symbol(self.padded_shape, np.dtype(dtype).str)
         self._padded = np.zeros(self.padded_shape, dtype=dtype)
 
     def __call__(self, residual: np.ndarray) -> np.ndarray:
@@ -332,6 +335,20 @@ class _PoissonPreconditioner:
             spectrum, type=2, norm="ortho", workers=self.workers, overwrite_x=True,
         )
         return result[:rows, :cols]
+
+
+@functools.lru_cache(maxsize=4)
+def _inverse_symbol(shape: tuple[int, int], dtype: str) -> np.ndarray:
+    """Return the inverse of the Neumann Laplacian's DCT symbol (0 at DC), read-only."""
+    rows, cols = shape
+    u = np.arange(rows)[:, np.newaxis]
+    v = np.arange(cols)[np.newaxis, :]
+    symbol = 4 - 2 * np.cos(np.pi * u / rows) - 2 * np.cos(np.pi * v / cols)
+    inverse = np.zeros_like(symbol)
+    np.divide(1.0, symbol, out=inverse, where=symbol != 0)
+    inverse = inverse.astype(dtype)
+    inverse.flags.writeable = False
+    return inverse
 
 
 def _negative_divergence(
@@ -371,36 +388,41 @@ class _WeightedProblem:
         wrapped: np.ndarray,
         workers: int | None,
         edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
+        *,
+        pad: bool = True,
     ) -> None:
         rows, cols = wrapped.shape
         # Wrapping the target gradients is what makes this an unwrapping problem:
         # a difference of two wrapped values is only known modulo 2π, and this
-        # picks the smallest representative.
-        self.target_x = _wrap(np.diff(wrapped, axis=1))
-        self.target_y = _wrap(np.diff(wrapped, axis=0))
-        # The whole turns the wrapping removed from each gradient: a congruent
-        # phase `wrapped + 2π branches` disagrees with the target gradient on an
-        # edge by `jumps + diff(branches)` turns.
-        self.jumps_x = np.rint(
-            (np.diff(wrapped, axis=1) - self.target_x) / TAU,
-        ).astype(np.int32)
-        self.jumps_y = np.rint(
-            (np.diff(wrapped, axis=0) - self.target_y) / TAU,
-        ).astype(np.int32)
+        # picks the smallest representative: `_wrap(np.diff(wrapped))`. And the
+        # whole turns the wrapping removed from each gradient: a congruent phase
+        # `wrapped + 2π branches` disagrees with the target gradient on an edge
+        # by `jumps + diff(branches)` turns. Both in one pass:
+        self.target_x = np.empty((rows, cols - 1), dtype=wrapped.dtype)
+        self.target_y = np.empty((rows - 1, cols), dtype=wrapped.dtype)
+        self.jumps_x = np.empty((rows, cols - 1), dtype=np.int32)
+        self.jumps_y = np.empty((rows - 1, cols), dtype=np.int32)
+        _irls_numba.targets_and_jumps(
+            wrapped, self.target_x, self.target_y, self.jumps_x, self.jumps_y,
+        )
+        # The edge weights, in one buffer (for a selection over all of them):
+        n_x = rows * (cols - 1)
+        self.edges = np.empty(n_x + (rows - 1) * cols, dtype=wrapped.dtype)
+        self.edge_x = self.edges[:n_x].reshape(rows, cols - 1)
+        self.edge_y = self.edges[n_x:].reshape(rows - 1, cols)
         if edge_weights is None:
-            self.edge_x = np.ones((rows, cols - 1), dtype=wrapped.dtype)
-            self.edge_y = np.ones((rows - 1, cols), dtype=wrapped.dtype)
+            self.edges[...] = 1
         else:
-            self.edge_x, self.edge_y = (
-                np.asarray(w, dtype=wrapped.dtype) for w in edge_weights
-            )
+            for source, target in zip(edge_weights, (self.edge_x, self.edge_y),
+                                      strict=True):
+                _irls_numba.scale_into(np.asarray(source), 1.0, target)
         self.weights_x = self.edge_x.copy()
         self.weights_y = self.edge_y.copy()
         self._row_sums = np.empty(rows, dtype=np.float64)
         self._b = np.empty((rows, cols), dtype=wrapped.dtype)
         self._iterations = 0
         self.precondition = _PoissonPreconditioner(
-            (rows, cols), wrapped.dtype, workers=workers,
+            (rows, cols), wrapped.dtype, workers=workers, pad=pad,
         )
 
     def cuts(self, branches: np.ndarray) -> tuple[int, float]:
@@ -462,8 +484,8 @@ class _WeightedProblem:
         the inverse of the operator. With edge weights, this is only the starting
         point of the weighted solve.
         """
-        b = np.zeros(self.precondition.shape, dtype=self.target_x.dtype)
-        _negative_divergence(self.target_x, self.target_y, b)
+        b = np.empty(self.precondition.shape, dtype=self.target_x.dtype)
+        _irls_numba.negative_divergence(self.target_x, self.target_y, b)
         return np.array(self.precondition(b))
 
     def reweight(
@@ -482,7 +504,7 @@ class _WeightedProblem:
 
     def solve(
         self, phi: np.ndarray, options: IRLSOptions,
-    ) -> Callable[[], CGRound]:
+    ) -> Callable[[], L1Round]:
         """Run one round's CG on `phi` (in place), and remove its mean if it changed.
 
         Returns a function that returns the round's report. (On a GPU, the
@@ -513,7 +535,7 @@ class _WeightedProblem:
         at_end: bool,
         options: IRLSOptions,
         index: int,
-    ) -> tuple[CGRound, _Candidate]:
+    ) -> tuple[L1Round, _Candidate]:
         """Run one IRLS round on `phi` (in place).
 
         Solve the weighted problem, reweight at `epsilon` (unless the round
@@ -542,7 +564,7 @@ class _WeightedProblem:
     def warm_start(
         self,
         wrapped: np.ndarray,
-        prior: PhasePrior | BranchesPrior,
+        prior: L1PhasePrior | L1BranchesPrior,
         options: IRLSOptions,
     ) -> tuple[np.ndarray, _Candidate, float]:
         """Start a solve from a prior, see :func:`_warm_start`."""
@@ -554,12 +576,12 @@ class _WeightedProblem:
 
 
 def _starting_phase(
-    prior: PhasePrior | BranchesPrior,
+    prior: L1PhasePrior | L1BranchesPrior,
     wrapped: np.ndarray,
 ) -> np.ndarray:
     """Turn the prior into a phase that is congruent with `wrapped`."""
     xp = _array_module(wrapped)
-    if isinstance(prior, PhasePrior):
+    if isinstance(prior, L1PhasePrior):
         raw = wrapped.astype(np.float64)
         branches = xp.rint((xp.asarray(prior.phase, dtype=np.float64) - raw) / TAU)
         return (raw + TAU * branches).astype(wrapped.dtype)
@@ -593,7 +615,7 @@ def _conjugate_gradients(
     phi: np.ndarray,
     b: np.ndarray,
     options: IRLSOptions,
-) -> tuple[CGRound, bool]:
+) -> tuple[L1Round, bool]:
     """Run preconditioned CG on `phi` (updated in place) against `b`.
 
     Returns the round's report, and whether `phi` was changed.
@@ -602,9 +624,9 @@ def _conjugate_gradients(
     if not norm > 0:
         # Zero right-hand side: already solved, and the relative residual would
         # be 0/0.
-        return CGRound(iterations=0, residuals=[0.0], converged=True), False
+        return L1Round(iterations=0, residuals=[0.0], converged=True), False
 
-    report = CGRound(iterations=0)
+    report = L1Round(iterations=0)
     operated = np.empty_like(phi)
     problem.apply(phi, out=operated)
     residual = b - operated
@@ -620,7 +642,7 @@ def _conjugate_gradients(
     residual_dot_z = problem.dot(residual, z)
     tiny = np.finfo(phi.dtype).tiny
 
-    for iteration in range(options.cg_max_iterations):
+    for iteration in range(options.iterations_per_round):
         curvature = problem.apply(direction, out=operated)
         # Zero curvature: the direction lies in the nullspace (constants),
         # there is nothing left to descend.
@@ -699,7 +721,7 @@ def _irls_rounds(
     options: IRLSOptions,
     *,
     best: _Candidate,
-) -> tuple[list[CGRound], _Candidate]:
+) -> tuple[list[L1Round], _Candidate]:
     """Run the IRLS rounds on `phi` (updated in place).
 
     `weights_epsilon` is the epsilon the current weights were derived at (infinity
@@ -714,8 +736,8 @@ def _irls_rounds(
         else max(options.epsilon_min, weights_epsilon * options.decay)
     )
     stale = 0
-    rounds: list[CGRound] = []
-    for index in range(options.irls_rounds):
+    rounds: list[L1Round] = []
+    for index in range(options.rounds):
         # A fixed point: the iterate did not move and the schedule has reached
         # its end, so further rounds would repeat this one. Whether the iterate
         # moved is known only after the solve, so the problem decides itself
@@ -778,7 +800,7 @@ def _cold_start(
 def _warm_start(
     problem: _WeightedProblem,
     wrapped: np.ndarray,
-    prior: PhasePrior | BranchesPrior,
+    prior: L1PhasePrior | L1BranchesPrior,
     options: IRLSOptions,
 ) -> tuple[np.ndarray, _Candidate, float]:
     """Start a solve from a prior: return the phase, best candidate, and epsilon.
@@ -831,10 +853,11 @@ def _check_edge_weights(
 
 def _check_input(
     wrapped: np.ndarray,
-    prior: PhasePrior | BranchesPrior | None,
+    prior: L1PhasePrior | L1BranchesPrior | None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
     *,
     keep_wave: bool = False,
+    workers: int | None = None,
 ) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
     """Validate the input, and convert it to the precision of the solve.
 
@@ -848,15 +871,18 @@ def _check_input(
         msg = f"wrapped must be a non-empty 2D array, got shape {wrapped.shape}"
         raise ValueError(msg)
     keep_wave = keep_wave and xp.iscomplexobj(wrapped) and edge_weights is None
-    if xp.iscomplexobj(wrapped) and not keep_wave:
+    if xp is np and np.iscomplexobj(wrapped) and edge_weights is None:
+        # The same as below, on several threads:
+        wrapped, edge_weights = _wave_setup(wrapped, workers or 1)
+    elif xp.iscomplexobj(wrapped) and not keep_wave:
         if edge_weights is None:
             edge_weights = amplitude_edge_weights(xp.abs(wrapped))
         wrapped = xp.angle(wrapped)
-    if edge_weights is not None:
+    if edge_weights is not None and not isinstance(edge_weights, _CheckedEdges):
         edge_weights = _check_edge_weights(edge_weights, wrapped.shape)
     if prior is not None:
         prior_shape = np.shape(
-            prior.phase if isinstance(prior, PhasePrior) else prior.branches,
+            prior.phase if isinstance(prior, L1PhasePrior) else prior.branches,
         )
         if prior_shape != wrapped.shape:
             msg = (
@@ -872,6 +898,94 @@ def _check_input(
 
 _AMPLITUDE_FLOOR = 1e-3
 _AMPLITUDE_PERCENTILE = 90.0
+
+
+class _CheckedEdges(tuple):
+    """Edge weights that are already checked and normalized (`_wave_setup`)."""
+
+    __slots__ = ()
+
+
+_pools: dict[int, ThreadPoolExecutor] = {}
+
+
+def _by_rows(
+    func: Callable[[np.ndarray, np.ndarray], object],
+    x: np.ndarray,
+    dtype: np.dtype,
+    workers: int,
+) -> np.ndarray:
+    """Return `func(x)` into a new array of `dtype`, by blocks of rows on threads.
+
+    `func(block, out)` must work row by row, as numpy's elementwise functions
+    do, which also release the GIL: so the result is that of one call.
+    """
+    out = np.empty(x.shape, dtype=dtype)
+    blocks = min(workers, x.shape[0])
+    if blocks <= 1 or x.size < 1 << 16:  # not worth the threads
+        func(x, out)
+        return out
+    pool = _pools.get(workers)
+    if pool is None:
+        pool = _pools[workers] = ThreadPoolExecutor(workers)
+    bounds = np.linspace(0, x.shape[0], blocks + 1).astype(int)
+    list(pool.map(
+        lambda b: func(x[bounds[b]:bounds[b + 1]], out[bounds[b]:bounds[b + 1]]),
+        range(blocks),
+    ))
+    return out
+
+
+def _percentile(x: np.ndarray, q: float) -> float:
+    """:code:`np.percentile(x, q)` of float64 values, by a parallel selection."""
+    n = x.size
+    virtual = (n - 1) * np.true_divide(q, 100)
+    previous = int(np.floor(virtual))
+    a, b, nan = _irls_numba.select_pair(x.ravel(), previous, min(previous + 1, n - 1))
+    if nan:
+        return math.nan
+    # numpy's `_lerp`:
+    t = virtual - previous
+    difference = b - a
+    return b - difference * (1 - t) if t >= 0.5 else a + difference * t  # noqa: PLR2004
+
+
+def _wave_setup(
+    wave: np.ndarray, workers: int,
+) -> tuple[np.ndarray, _CheckedEdges]:
+    """Return the phase of `wave`, and its normalized amplitude edge weights.
+
+    The same as :func:`amplitude_edge_weights` of :code:`np.abs(wave)`, checked
+    and normalized by :func:`_check_edge_weights`, and :code:`np.angle(wave)`,
+    with identical results: numpy's functions on blocks of rows, a parallel
+    selection for the percentile, and one fused pass for the weights.
+    """
+    real = np.float32 if wave.dtype == np.complex64 else np.float64
+    amplitude = _by_rows(lambda z, out: np.abs(z, out=out), wave, real, workers)
+    phase = _by_rows(
+        lambda z, out: np.arctan2(z.imag, z.real, out=out), wave, real, workers,
+    )
+    rows, cols = wave.shape
+    reference = _percentile(amplitude, _AMPLITUDE_PERCENTILE)
+    if not reference > 0:
+        # No signal anywhere: no edge is more reliable than another.
+        return phase, _CheckedEdges((
+            np.ones((rows, cols - 1)), np.ones((rows - 1, cols)),
+        ))
+    edge_x = np.empty((rows, cols - 1))
+    edge_y = np.empty((rows - 1, cols))
+    row_max = np.empty(rows)
+    row_ok = np.empty(rows, dtype=np.bool_)
+    _irls_numba.amplitude_edges(
+        amplitude, reference, _AMPLITUDE_FLOOR, edge_x, edge_y, row_max, row_ok,
+    )
+    if not row_ok.all():
+        msg = "edge_weights must be finite and greater than zero"
+        raise ValueError(msg)
+    largest = float(row_max.max()) if edge_x.size + edge_y.size else 1.0
+    for edges in (edge_x, edge_y):
+        _irls_numba.scale_into(edges, largest, edges)
+    return phase, _CheckedEdges((edge_x, edge_y))
 
 
 def amplitude_edge_weights(
@@ -940,11 +1054,12 @@ def amplitude_edge_weights(
 
 def unwrap_phase_irls(
     wrapped: np.ndarray,
-    prior: PhasePrior | BranchesPrior | IRLSResult | None = None,
+    *,
+    prior: L1PhasePrior | L1BranchesPrior | L1Result | None = None,
     options: IRLSOptions | None = None,
     workers: int | None = None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
-) -> IRLSResult:
+) -> L1Result:
     r"""Unwrap a 2D phase by iteratively reweighted least squares.
 
     The result is congruent with the input: it differs from it by an integer
@@ -964,14 +1079,14 @@ def unwrap_phase_irls(
         (:func:`amplitude_edge_weights`) unless :code:`edge_weights` is given.
     prior
         Start from an earlier solution instead of from scratch, and resume its
-        epsilon schedule; see :class:`PhasePrior` and :class:`BranchesPrior`.
-        Passing an :class:`IRLSResult` is the same as passing
-        :meth:`IRLSResult.as_prior`. A warm start from the previous frame of a
+        epsilon schedule; see :class:`L1PhasePrior` and :class:`L1BranchesPrior`.
+        Passing an :class:`L1Result` is the same as passing
+        :meth:`L1Result.as_prior`. A warm start from the previous frame of a
         series typically needs far fewer CG iterations than a cold start.
     options
         Solver settings, :class:`IRLSOptions` by default.
     workers
-        Number of threads. By default, the number of CPUs, but at most 8.
+        Number of threads. By default, the number of CPUs, but at most 16.
         The result does not depend on it.
     edge_weights
         Weights :math:`C` of the horizontal and vertical edges between
@@ -982,7 +1097,7 @@ def unwrap_phase_irls(
 
     Returns
     -------
-    IRLSResult
+    L1Result
         The unwrapped phase, the branch field, the weights of the selected
         iterate, the cut count and cost, and a report of each round.
 
@@ -1049,9 +1164,18 @@ def unwrap_phase_irls(
     True
 
     """
-    if options is None:
-        options = IRLSOptions()
-    if isinstance(prior, IRLSResult):
+    return _run(wrapped, prior, options or IRLSOptions(), workers, edge_weights)
+
+
+def _run(
+    wrapped: np.ndarray,
+    prior: L1PhasePrior | L1BranchesPrior | L1Result | None,
+    options: IRLSOptions,
+    workers: int | None,
+    edge_weights: tuple[np.ndarray, np.ndarray] | None,
+) -> L1Result:
+    """Set up the threads and run :func:`_unwrap` (any method of `options`)."""
+    if isinstance(prior, L1Result):
         prior = prior.as_prior()
     if _array_module(wrapped) is not np:
         # On the GPU, CPU threads play no part.
@@ -1071,17 +1195,21 @@ def unwrap_phase_irls(
 
 def _unwrap(
     wrapped: np.ndarray,
-    prior: PhasePrior | BranchesPrior | None,
+    prior: L1PhasePrior | L1BranchesPrior | None,
     options: IRLSOptions,
     workers: int,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
-) -> IRLSResult:
+) -> L1Result:
     """Run :func:`unwrap_phase_irls` with the threads set up."""
     xp = _array_module(wrapped)
     wrapped, edge_weights = _check_input(
-        wrapped, prior, edge_weights, keep_wave=xp is not np,
+        wrapped, prior, edge_weights, keep_wave=xp is not np, workers=workers,
     )
-    if xp is np:
+    admm = options.method == "admm"
+    if xp is np and admm:
+        from .admm import _AdmmProblem  # noqa: PLC0415
+        problem = _AdmmProblem(wrapped, workers, edge_weights, options)
+    elif xp is np:
         problem = _WeightedProblem(wrapped, workers=workers, edge_weights=edge_weights)
     elif xp.iscomplexobj(wrapped):
         # On the GPU, the phase and the amplitude weights of a wave come from a
@@ -1091,11 +1219,14 @@ def _unwrap(
         # candidate) then runs as one CUDA graph:
         problem = problem_for_wave(
             wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE, deferred=True,
+            method=options.method,
         )
         wrapped = problem.wrapped
     else:
         from ._irls_cupy import problem_for  # noqa: PLC0415
-        problem = problem_for(wrapped, edge_weights, deferred=True)
+        problem = problem_for(
+            wrapped, edge_weights, deferred=True, method=options.method,
+        )
         wrapped = problem.wrapped
 
     if prior is None:
@@ -1104,11 +1235,15 @@ def _unwrap(
         phi, best, weights_epsilon = problem.warm_start(wrapped, prior, options)
 
     if best.cut_turns == 0:
-        rounds: list[CGRound] = []
+        rounds: list[L1Round] = []
     else:
-        rounds, best = _irls_rounds(
-            problem, phi, wrapped, weights_epsilon, options, best=best,
-        )
+        run_rounds = getattr(problem, "run_rounds", None)
+        if run_rounds is not None:  # a problem may run its own rounds (on the GPU)
+            rounds, best = run_rounds(phi, wrapped, weights_epsilon, options, best=best)
+        else:
+            rounds, best = _irls_rounds(
+                problem, phi, wrapped, weights_epsilon, options, best=best,
+            )
     # If the selected round did not converge, its iterate does not solve the
     # system at its epsilon, so a warm start resumes one round coarser:
     resume_epsilon = best.weights_epsilon
@@ -1119,7 +1254,7 @@ def _unwrap(
     )
 
     best = problem.release(best)
-    return IRLSResult(
+    return L1Result(
         phase=best.phase,
         branches=best.branches,
         weights_x=best.weights_x,
@@ -1128,18 +1263,22 @@ def _unwrap(
         selected_round=best.round_index,
         cut_turns=best.cut_turns,
         cut_cost=best.cut_cost,
-        status="converged" if all(r.converged for r in rounds) else "iteration_limit",
+        status=(
+            ("converged" if len(rounds) < options.rounds else "iteration_limit")
+            if admm
+            else "converged" if all(r.converged for r in rounds) else "iteration_limit"
+        ),
         resume_epsilon=resume_epsilon,
     )
 
 
 __all__ = [
-    "BranchesPrior",
-    "CGRound",
     "IRLSOptions",
-    "IRLSResult",
-    "IRLSStatus",
-    "PhasePrior",
+    "L1BranchesPrior",
+    "L1PhasePrior",
+    "L1Result",
+    "L1Round",
+    "L1Status",
     "amplitude_edge_weights",
     "unwrap_phase_irls",
 ]

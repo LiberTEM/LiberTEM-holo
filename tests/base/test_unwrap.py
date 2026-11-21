@@ -3,9 +3,9 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.unwrap import (
-    BranchesPrior,
     IRLSOptions,
-    PhasePrior,
+    L1BranchesPrior,
+    L1PhasePrior,
     amplitude_edge_weights,
     derivative_variance,
     phase_unwrap,
@@ -33,7 +33,7 @@ def test_phase_unwrap_helper_smoke():
 
 
 @pytest.mark.parametrize(
-    "method", ["skimage", "quality", "laplacian", "irls"],
+    "method", ["skimage", "quality", "laplacian", "irls", "admm"],
 )
 def test_phase_unwrap_helper_methods(method: str):
     rng = np.random.default_rng()
@@ -157,7 +157,7 @@ def test_irls_iteration_limit_is_reported():
     wrapped = _vortex((40, 40))
     result = unwrap_phase_irls(
         wrapped,
-        options=IRLSOptions(cg_max_iterations=1, cg_relative_tolerance=1e-14),
+        options=IRLSOptions(iterations_per_round=1, cg_relative_tolerance=1e-14),
     )
     assert result.status == "iteration_limit"
     assert any(not r.converged for r in result.rounds)
@@ -186,8 +186,8 @@ def test_irls_warm_start_from_own_answer(settles):
         wrapped = _dipole()
     cold = unwrap_phase_irls(wrapped)
     priors = [
-        BranchesPrior(branches=cold.branches, epsilon=cold.resume_epsilon),
-        PhasePrior(phase=cold.phase, epsilon=cold.resume_epsilon),
+        L1BranchesPrior(branches=cold.branches, epsilon=cold.resume_epsilon),
+        L1PhasePrior(phase=cold.phase, epsilon=cold.resume_epsilon),
         cold,
     ]
     for prior in priors:
@@ -222,8 +222,8 @@ def test_irls_wrong_prior_still_converges_to_the_cold_answer():
     branches.ravel()[::97] += 1
     warm = unwrap_phase_irls(
         wrapped,
-        prior=BranchesPrior(branches=branches, epsilon=0.0),
-        options=IRLSOptions(cg_max_iterations=200, irls_rounds=30),
+        prior=L1BranchesPrior(branches=branches, epsilon=0.0),
+        options=IRLSOptions(iterations_per_round=200, rounds=30),
     )
     _assert_congruent(warm.phase, wrapped)
     np.testing.assert_array_equal(warm.branches, cold.branches)
@@ -237,7 +237,7 @@ def test_irls_wrong_prior_still_converges_to_the_cold_answer():
 )
 def test_irls_resume_epsilon_is_where_the_schedule_stopped(cold_start, steps):
     wrapped = _dipole()
-    options = IRLSOptions(irls_rounds=3, cg_max_iterations=500, cold_start=cold_start)
+    options = IRLSOptions(rounds=3, iterations_per_round=500, cold_start=cold_start)
     decay = options.decay
 
     converged = unwrap_phase_irls(wrapped, options=options)
@@ -249,7 +249,7 @@ def test_irls_resume_epsilon_is_where_the_schedule_stopped(cold_start, steps):
 
     limited = unwrap_phase_irls(
         wrapped,
-        options=IRLSOptions(irls_rounds=3, cg_max_iterations=1, cold_start=cold_start),
+        options=IRLSOptions(rounds=3, iterations_per_round=1, cold_start=cold_start),
     )
     assert limited.status == "iteration_limit"
     # One round coarser, since the last round's iterate does not solve its system:
@@ -272,8 +272,8 @@ def test_irls_single_precision_finds_the_same_branches():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"irls_rounds": 0},
-        {"cg_max_iterations": 0},
+        {"rounds": 0},
+        {"iterations_per_round": 0},
         {"cg_relative_tolerance": 0.0},
         {"cg_relative_tolerance": float("nan")},
         {"epsilon_min": 0.0},
@@ -290,8 +290,8 @@ def test_irls_invalid_options_are_rejected(kwargs):
 @pytest.mark.parametrize(
     "prior",
     [
-        BranchesPrior(branches=np.zeros((10, 10), dtype=np.int32), epsilon=0.0),
-        PhasePrior(phase=np.zeros((10, 10)), epsilon=0.0),
+        L1BranchesPrior(branches=np.zeros((10, 10), dtype=np.int32), epsilon=0.0),
+        L1PhasePrior(phase=np.zeros((10, 10)), epsilon=0.0),
     ],
 )
 def test_irls_prior_of_the_wrong_shape_is_rejected(prior):
@@ -348,7 +348,9 @@ def test_irls_cut_turns_are_reported():
 def test_irls_rounds_improve_on_a_short_solve():
     _, wrapped = _noisy_cliff(sigma=0.9)
     # One round of one CG iteration barely moves from the start.
-    start = unwrap_phase_irls(wrapped, options=IRLSOptions(irls_rounds=1, cg_max_iterations=1))
+    start = unwrap_phase_irls(
+        wrapped, options=IRLSOptions(rounds=1, iterations_per_round=1),
+    )
     result = unwrap_phase_irls(wrapped)
     assert result.cut_turns < start.cut_turns
 
@@ -371,7 +373,7 @@ def test_irls_stops_once_the_cut_count_settles():
     early = unwrap_phase_irls(wrapped)
     assert len(early.rounds) == IRLSOptions().stop_patience
     full = unwrap_phase_irls(wrapped, options=IRLSOptions(stop_patience=None))
-    assert len(full.rounds) == IRLSOptions().irls_rounds
+    assert len(full.rounds) == IRLSOptions().rounds
     np.testing.assert_array_equal(early.branches, full.branches)
     assert early.cut_turns == full.cut_turns
 

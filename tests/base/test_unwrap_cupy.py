@@ -17,14 +17,16 @@ import pytest
 from libertem.utils.devices import detect
 
 from libertem_holo.base.unwrap import (
-    BranchesPrior,
+    ADMMOptions,
     IRLSOptions,
-    IRLSResult,
-    PhasePrior,
+    L1BranchesPrior,
+    L1PhasePrior,
+    L1Result,
     _irls_cupy,
     amplitude_edge_weights,
     irls,
     phase_unwrap,
+    unwrap_phase_admm,
     unwrap_phase_irls,
 )
 
@@ -86,7 +88,7 @@ def _wave(shape: tuple[int, int] = (64, 80), seed: int = 5) -> np.ndarray:
     return (amplitude * np.exp(1j * phase)).astype(np.complex64)
 
 
-def _assert_same(gpu: IRLSResult, cpu: IRLSResult) -> None:
+def _assert_same(gpu: L1Result, cpu: L1Result) -> None:
     """Check the same result, up to the summation order of the dot products."""
     import cupy as cp  # noqa: PLC0415
     for name in ("phase", "branches", "weights_x", "weights_y"):
@@ -190,10 +192,10 @@ def test_irls_gpu_odd_and_rectangular_shapes(shape):
     "options",
     [
         # Several graphs per round, and the iteration limit:
-        IRLSOptions(cg_max_iterations=200, irls_rounds=5),
-        IRLSOptions(cg_max_iterations=1, cg_relative_tolerance=1e-14),
-        IRLSOptions(cg_max_iterations=40, cg_relative_tolerance=1e-3),
-        IRLSOptions(cold_start="least_squares", stop_patience=None, irls_rounds=8),
+        IRLSOptions(iterations_per_round=200, rounds=5),
+        IRLSOptions(iterations_per_round=1, cg_relative_tolerance=1e-14),
+        IRLSOptions(iterations_per_round=40, cg_relative_tolerance=1e-3),
+        IRLSOptions(cold_start="least_squares", stop_patience=None, rounds=8),
     ],
 )
 def test_irls_gpu_matches_cpu_with_options(options):
@@ -211,9 +213,9 @@ def test_irls_gpu_warm_starts_match_cpu():
     cold = unwrap_phase_irls(wrapped)
     cold_gpu = unwrap_phase_irls(cp.asarray(wrapped))
     priors = [
-        (BranchesPrior(branches=cold.branches, epsilon=cold.resume_epsilon),
-         BranchesPrior(branches=cold_gpu.branches, epsilon=cold_gpu.resume_epsilon)),
-        (PhasePrior(phase=cold.phase, epsilon=cold.resume_epsilon),
+        (L1BranchesPrior(branches=cold.branches, epsilon=cold.resume_epsilon),
+         L1BranchesPrior(branches=cold_gpu.branches, epsilon=cold_gpu.resume_epsilon)),
+        (L1PhasePrior(phase=cold.phase, epsilon=cold.resume_epsilon),
          cold_gpu.as_prior()),
         (cold, cold_gpu),
     ]
@@ -391,7 +393,7 @@ def _start_on(
     problem: _irls_cupy.CupyWeightedProblem,
     start: str,
     options: IRLSOptions,
-    prior: PhasePrior | BranchesPrior | None,
+    prior: L1PhasePrior | L1BranchesPrior | None,
 ) -> dict:
     """Run a start on `problem`; everything it returns and leaves, on the host."""
     if start == "cold":
@@ -432,8 +434,8 @@ def test_gpu_start_graphs_are_the_generic_starts(source, start):
     )
     reference = unwrap_phase_irls(np.asarray(wrapped.get(), dtype=np.float64))
     prior = {
-        "phase prior": PhasePrior(phase=reference.phase + 0.4, epsilon=0.05),
-        "branches prior": BranchesPrior(branches=reference.branches, epsilon=0.3),
+        "phase prior": L1PhasePrior(phase=reference.phase + 0.4, epsilon=0.05),
+        "branches prior": L1BranchesPrior(branches=reference.branches, epsilon=0.3),
     }.get(start)
     kind = "cold" if prior is None else "warm"
     floor, percentile = irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE  # noqa: SLF001
@@ -496,18 +498,131 @@ def test_gpu_kernels_compile_only_their_declared_signatures(dtype):
     wave = cp.asarray((rng.uniform(0.1, 1, shape) * np.exp(
         1j * _vortex(shape) + 0.2j * rng.standard_normal(shape))).astype(dtype))
     edges = (cp.ones((shape[0], shape[1] - 1)), cp.ones((shape[0] - 1, shape[1])))
-    for options in (IRLSOptions(), IRLSOptions(cold_start="least_squares")):
+    for solve, options in (
+        (unwrap_phase_irls, IRLSOptions()),
+        (unwrap_phase_irls, IRLSOptions(cold_start="least_squares")),
+        (unwrap_phase_admm, ADMMOptions()),
+        (unwrap_phase_admm, ADMMOptions(cold_start="least_squares")),
+    ):
         for wrapped, edge_weights in ((wave, None), (cp.angle(wave), edges)):
             kwargs = {"options": options, "edge_weights": edge_weights}
-            result = unwrap_phase_irls(wrapped, **kwargs)
-            for prior in (result, BranchesPrior(result.branches, epsilon=0.5)):
-                unwrap_phase_irls(wrapped, prior=prior, **kwargs)
+            result = solve(wrapped, **kwargs)
+            for prior in (result, L1BranchesPrior(result.branches, epsilon=0.5)):
+                solve(wrapped, prior=prior, **kwargs)
     real = np.float32 if dtype == np.complex64 else np.float64
     kernels = _irls_numba_cuda.kernels(real)
     declared = _irls_numba_cuda.signatures(real)
     assert kernels.keys() == declared.keys()
     for name, kernel in kernels.items():
-        assert kernel.signatures == [declared[name]], name
+        if name in _irls_numba_cuda.EXPERIMENTAL:
+            assert kernel.signatures in ([], [declared[name]]), name
+        else:
+            assert kernel.signatures == [declared[name]], name
+
+
+def test_irls_gpu_threads_setting_up_at_once():
+    """Threads whose first solves capture their graphs at the same time.
+
+    Each thread uses its own stream, as workers should: a device-wide
+    synchronization in another thread would invalidate the captures.
+    """
+    import threading  # noqa: PLC0415
+
+    import cupy as cp  # noqa: PLC0415
+    threads = 8
+    fields = [_noisy(shape=(96, 80), seed=s) for s in range(threads)]
+    expected = [unwrap_phase_irls(f).branches for f in fields]
+    start = threading.Barrier(threads)
+    failures = []
+
+    def solve(i: int) -> None:
+        try:
+            with cp.cuda.Stream(non_blocking=True) as stream:
+                start.wait()
+                for _ in range(3):
+                    result = unwrap_phase_irls(cp.asarray(fields[i]))
+                    branches = result.branches.get(stream=stream)
+                    if not np.array_equal(branches, expected[i]):
+                        failures.append((i, "differs"))
+        except Exception as e:  # noqa: BLE001
+            failures.append((i, repr(e)))
+
+    workers = [threading.Thread(target=solve, args=(i,)) for i in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert not failures
+
+
+def _assert_admm_same(gpu: L1Result, cpu: L1Result) -> None:
+    """Check the same ADMM result: the same arithmetic, up to the transforms."""
+    np.testing.assert_array_equal(gpu.branches.get(), cpu.branches)
+    np.testing.assert_allclose(gpu.phase.get(), cpu.phase, rtol=0, atol=1e-5)
+    assert [r.cut_turns for r in gpu.rounds] == [r.cut_turns for r in cpu.rounds]
+    assert gpu.selected_round == cpu.selected_round
+    assert gpu.cut_turns == cpu.cut_turns
+    assert gpu.cut_cost == pytest.approx(cpu.cut_cost, rel=1e-9)
+    assert gpu.status == cpu.status
+    assert gpu.resume_epsilon == pytest.approx(cpu.resume_epsilon, rel=1e-12)
+    tol = 1e-5 if cpu.weights_x.dtype == np.float32 else 1e-12
+    np.testing.assert_allclose(gpu.weights_x.get(), cpu.weights_x, rtol=tol, atol=tol)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "field",
+    [
+        pytest.param(_dipole, id="dipole"),
+        pytest.param(_noisy, id="noisy"),
+        pytest.param(lambda: _vortex((33, 47)), id="vortex odd shape"),
+        pytest.param(lambda: np.full((16, 20), 0.4), id="constant"),
+        pytest.param(lambda: _wave().astype(np.complex64), id="wave"),
+    ],
+)
+def test_admm_gpu_matches_cpu(field, dtype):
+    import cupy as cp  # noqa: PLC0415
+    data = field()
+    if not np.iscomplexobj(data):
+        data = data.astype(dtype)
+    elif dtype == np.float64:
+        data = data.astype(np.complex128)
+    _assert_admm_same(unwrap_phase_admm(cp.asarray(data)), unwrap_phase_admm(data))
+
+
+def test_admm_gpu_warm_starts_and_edge_weights_match_cpu():
+    import cupy as cp  # noqa: PLC0415
+    wrapped = _noisy().astype(np.float32)
+    rng = np.random.default_rng(6)
+    edges = (rng.uniform(0.2, 1, (70, 89)), rng.uniform(0.2, 1, (69, 90)))
+    cold = unwrap_phase_admm(wrapped, edge_weights=edges)
+    cold_gpu = unwrap_phase_admm(
+        cp.asarray(wrapped), edge_weights=tuple(cp.asarray(e) for e in edges),
+    )
+    _assert_admm_same(cold_gpu, cold)
+    options = ADMMOptions(iterations_per_round=4, rho_scale=1.0)
+    for prior in (cold, L1BranchesPrior(cold.branches, epsilon=0.02)):
+        gpu_prior = prior if isinstance(prior, L1BranchesPrior) else cold_gpu
+        _assert_admm_same(
+            unwrap_phase_admm(cp.asarray(wrapped), prior=gpu_prior, options=options),
+            unwrap_phase_admm(wrapped, prior=prior, options=options),
+        )
+
+
+@pytest.mark.parametrize(
+    "method", ["skimage", "quality", "laplacian", "irls", "admm"],
+)
+def test_phase_unwrap_returns_the_kind_of_array_it_is_given(method):
+    """Cupy in, cupy out: on the GPU where the method can, else via the host."""
+    import cupy as cp  # noqa: PLC0415
+    wave = _wave()
+    cpu = phase_unwrap(wave, method=method)
+    gpu = phase_unwrap(cp.asarray(wave), method=method)
+    assert isinstance(gpu, cp.ndarray)
+    assert isinstance(cpu, np.ndarray)
+    # The phase of the wave rounds differently on the GPU, by an ulp or so; a
+    # wrong branch would be off by 2 pi:
+    np.testing.assert_allclose(gpu.get(), cpu, rtol=0, atol=1e-4)
 
 
 def test_irls_gpu_nan_in_the_wave_is_handled_as_on_the_cpu():
