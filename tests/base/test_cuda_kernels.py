@@ -10,6 +10,7 @@ slow, and its shared arrays race under coverage.
 # the kernels under test are private:
 # ruff: noqa: SLF001
 import os
+from types import SimpleNamespace
 
 import pytest
 from numba import cuda, typeof, types
@@ -94,4 +95,36 @@ def test_compile_sideband_max(fft_type):
     )
     for cc in _compute_capabilities():
         ptx, _ = cuda.compile_ptx(utils._sideband_max_gpu.py_func, arg_types, cc=cc)
+        assert f".target sm_{cc[0]}{cc[1]}" in ptx
+
+
+def _irls_kernel_names() -> list[str]:
+    import numpy as np  # noqa: PLC0415
+
+    from libertem_holo.base.unwrap import _irls_numba_cuda  # noqa: PLC0415
+    return sorted(_irls_numba_cuda.signatures(np.float32))
+
+
+@pytest.mark.cuda_compile
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("name", _irls_kernel_names())
+def test_compile_irls_kernel(name, dtype, monkeypatch):
+    """The GPU IRLS kernels, for the argument types they are launched with.
+
+    That these are the types of every launch is tested on a GPU, in
+    `test_unwrap_cupy.py`.
+    """
+    from numba.cuda import dispatcher  # noqa: PLC0415
+
+    from libertem_holo.base.unwrap import _irls_numba_cuda  # noqa: PLC0415
+    kernel = _irls_numba_cuda.kernels(dtype)[name]
+    arg_types = _irls_numba_cuda.signatures(dtype)[name]
+    for cc in _compute_capabilities():
+        # numba-cuda compiles device functions that call device functions for
+        # the current device, even in `compile_ptx`; without a GPU, give it `cc`:
+        monkeypatch.setattr(
+            dispatcher, "get_current_device",
+            lambda cc=cc: SimpleNamespace(compute_capability=cc),
+        )
+        ptx, _ = cuda.compile_ptx(kernel.py_func, arg_types, cc=cc)
         assert f".target sm_{cc[0]}{cc[1]}" in ptx

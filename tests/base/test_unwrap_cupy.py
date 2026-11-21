@@ -124,14 +124,8 @@ def _assert_same(gpu: IRLSResult, cpu: IRLSResult) -> None:
         ),
     ],
 )
-@pytest.mark.parametrize(
-    ("kernels", "preconditioner"),
-    [("numba", "makhoul"), ("cuda", "makhoul"), ("cuda", "mirror")],
-)
-def test_irls_gpu_matches_cpu(field, dtype, kernels, preconditioner, monkeypatch):
+def test_irls_gpu_matches_cpu(field, dtype):
     import cupy as cp  # noqa: PLC0415
-    monkeypatch.setattr(_irls_cupy, "_KERNELS", kernels)
-    monkeypatch.setattr(_irls_cupy, "PRECONDITIONER", preconditioner)
     wrapped = field().astype(dtype)
     _assert_same(unwrap_phase_irls(cp.asarray(wrapped)), unwrap_phase_irls(wrapped))
 
@@ -211,10 +205,8 @@ def test_irls_gpu_matches_cpu_with_options(options):
     )
 
 
-@pytest.mark.parametrize("kernels", ["numba", "cuda"])
-def test_irls_gpu_warm_starts_match_cpu(kernels, monkeypatch):
+def test_irls_gpu_warm_starts_match_cpu():
     import cupy as cp  # noqa: PLC0415
-    monkeypatch.setattr(_irls_cupy, "_KERNELS", kernels)
     wrapped = _dipole()
     cold = unwrap_phase_irls(wrapped)
     cold_gpu = unwrap_phase_irls(cp.asarray(wrapped))
@@ -416,15 +408,13 @@ def _start_on(
     }
 
 
-@pytest.mark.parametrize("kernels", ["numba", "cuda"])
 @pytest.mark.parametrize("source", ["wave", "phase", "phase with edge weights"])
 @pytest.mark.parametrize(
     "start", ["zero", "least_squares", "phase prior", "branches prior"],
 )
-def test_gpu_start_graphs_are_the_generic_starts(kernels, source, start, monkeypatch):
+def test_gpu_start_graphs_are_the_generic_starts(source, start):
     """A staged start (one graph) equals filling and starting step by step."""
     import cupy as cp  # noqa: PLC0415
-    monkeypatch.setattr(_irls_cupy, "_KERNELS", kernels)
     rng = np.random.default_rng(7)
     shape = (37, 29)
     wave = rng.uniform(0.05, 2, size=shape) * np.exp(1j * (
@@ -488,6 +478,36 @@ def test_gpu_start_graphs_follow_the_options():
         assert actual["epsilon"] == epsilon_start
         for name, value in expected.items():
             np.testing.assert_array_equal(actual[name], value, err_msg=name)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_gpu_kernels_compile_only_their_declared_signatures(dtype):
+    """Every path launches each kernel with its declared argument types.
+
+    So `_irls_numba_cuda.signatures` is what the compile-only tests check
+    (`test_cuda_kernels.py`), and no argument of another type makes numba
+    compile a second variant.
+    """
+    import cupy as cp  # noqa: PLC0415
+
+    from libertem_holo.base.unwrap import _irls_numba_cuda  # noqa: PLC0415
+    rng = np.random.default_rng(3)
+    shape = (24, 19)
+    wave = cp.asarray((rng.uniform(0.1, 1, shape) * np.exp(
+        1j * _vortex(shape) + 0.2j * rng.standard_normal(shape))).astype(dtype))
+    edges = (cp.ones((shape[0], shape[1] - 1)), cp.ones((shape[0] - 1, shape[1])))
+    for options in (IRLSOptions(), IRLSOptions(cold_start="least_squares")):
+        for wrapped, edge_weights in ((wave, None), (cp.angle(wave), edges)):
+            kwargs = {"options": options, "edge_weights": edge_weights}
+            result = unwrap_phase_irls(wrapped, **kwargs)
+            for prior in (result, BranchesPrior(result.branches, epsilon=0.5)):
+                unwrap_phase_irls(wrapped, prior=prior, **kwargs)
+    real = np.float32 if dtype == np.complex64 else np.float64
+    kernels = _irls_numba_cuda.kernels(real)
+    declared = _irls_numba_cuda.signatures(real)
+    assert kernels.keys() == declared.keys()
+    for name, kernel in kernels.items():
+        assert kernel.signatures == [declared[name]], name
 
 
 def test_irls_gpu_nan_in_the_wave_is_handled_as_on_the_cpu():
