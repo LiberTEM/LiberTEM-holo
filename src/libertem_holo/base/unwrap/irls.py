@@ -4,6 +4,7 @@ See :func:`unwrap_phase_irls` for how it works.
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 import os
@@ -870,6 +871,9 @@ def _check_input(
     if wrapped.ndim != 2 or wrapped.size == 0:  # noqa: PLR2004
         msg = f"wrapped must be a non-empty 2D array, got shape {wrapped.shape}"
         raise ValueError(msg)
+    if wrapped.dtype.kind not in "iufc":
+        msg = f"wrapped must be a real or complex array, got dtype {wrapped.dtype}"
+        raise TypeError(msg)
     keep_wave = keep_wave and xp.iscomplexobj(wrapped) and edge_weights is None
     if xp is np and np.iscomplexobj(wrapped) and edge_weights is None:
         # The same as below, on several threads:
@@ -1164,7 +1168,77 @@ def unwrap_phase_irls(
     True
 
     """
-    return _run(wrapped, prior, options or IRLSOptions(), workers, edge_weights)
+    return _run(
+        wrapped, prior, _check_options(options, IRLSOptions), workers, edge_weights,
+    )
+
+
+def _check_options(options: object, expected: type) -> object:
+    """Return `options`, or the defaults of `expected` if None; check the type."""
+    if options is None:
+        return expected()
+    if not isinstance(options, expected):
+        msg = (
+            f"options must be {expected.__name__}, got {type(options).__name__}; "
+            "each of unwrap_phase_irls and unwrap_phase_admm takes its own"
+        )
+        raise TypeError(msg)
+    return options
+
+
+def _check_arguments(
+    wrapped: np.ndarray,
+    prior: L1PhasePrior | L1BranchesPrior | L1Result | None,
+    workers: int | None,
+    edge_weights: tuple[np.ndarray, np.ndarray] | None,
+) -> None:
+    """Check the arguments of a solve besides the arrays' shapes and values.
+
+    The device is the one of `wrapped`: the edge weights and the prior must be
+    cupy arrays for cupy input, and not for numpy input.
+    """
+    if workers is not None and (
+        isinstance(workers, bool) or not isinstance(workers, (int, np.integer))
+        or workers < 1
+    ):
+        msg = f"workers must be a positive integer or None, got {workers!r}"
+        raise ValueError(msg)
+    if prior is not None and not isinstance(
+        prior, (L1PhasePrior, L1BranchesPrior, L1Result),
+    ):
+        msg = (
+            "prior must be an L1PhasePrior, L1BranchesPrior or L1Result, "
+            f"got {type(prior).__name__}"
+        )
+        raise TypeError(msg)
+    arrays = []
+    if edge_weights is not None:
+        if not isinstance(edge_weights, (tuple, list)):
+            msg = (
+                "edge_weights must be a pair of arrays, "
+                f"got {type(edge_weights).__name__}"
+            )
+            raise TypeError(msg)
+        arrays += [("edge_weights", w) for w in edge_weights]
+    if prior is not None:
+        if isinstance(prior, L1BranchesPrior):
+            arrays.append(("the prior's branches", prior.branches))
+        else:
+            arrays.append(("the prior's phase", prior.phase))
+        epsilon = (
+            prior.resume_epsilon if isinstance(prior, L1Result) else prior.epsilon
+        )
+        if not (math.isfinite(epsilon) and epsilon >= 0):
+            msg = f"the prior's epsilon must be finite and not negative, got {epsilon}"
+            raise ValueError(msg)
+    on_gpu = _array_module(wrapped) is not np
+    for name, array in arrays:
+        if (_array_module(array) is not np) != on_gpu:
+            msg = (
+                f"{name} must be on the device of wrapped: "
+                f"{'cupy' if on_gpu else 'numpy'} arrays, got {type(array).__name__}"
+            )
+            raise TypeError(msg)
 
 
 def _run(
@@ -1175,9 +1249,12 @@ def _run(
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
 ) -> L1Result:
     """Set up the threads and run :func:`_unwrap` (any method of `options`)."""
+    _check_arguments(wrapped, prior, workers, edge_weights)
     if isinstance(prior, L1Result):
         prior = prior.as_prior()
     if _array_module(wrapped) is not np:
+        if options.method == "admm" and 1 in wrapped.shape:
+            return _on_host(wrapped, prior, options, edge_weights)
         # On the GPU, CPU threads play no part.
         return _unwrap(wrapped, prior, options, workers or 1, edge_weights)
     if workers is None:
@@ -1191,6 +1268,36 @@ def _run(
         set_num_threads(1),
     ):
         return _unwrap(wrapped, prior, options, workers, edge_weights)
+
+
+def _on_host(
+    wrapped: np.ndarray,
+    prior: L1PhasePrior | L1BranchesPrior | None,
+    options: IRLSOptions,
+    edge_weights: tuple[np.ndarray, np.ndarray] | None,
+) -> L1Result:
+    """Solve a cupy problem on the CPU, with the result as cupy arrays.
+
+    For images of a single row or column, which the GPU's ADMM cannot transform
+    (their FFT plans would be of length 1): without loops, their unwrapping is an
+    integration of the edge targets, a matter of microseconds.
+    """
+    import cupy as cp  # noqa: PLC0415
+
+    def host(x: object) -> object:
+        return cp.asnumpy(x) if isinstance(x, cp.ndarray) else x
+
+    if prior is not None:
+        prior = dataclasses.replace(prior, **{
+            f.name: host(getattr(prior, f.name)) for f in dataclasses.fields(prior)
+        })
+    if edge_weights is not None:
+        edge_weights = (host(edge_weights[0]), host(edge_weights[1]))
+    result = _run(host(wrapped), prior, options, 1, edge_weights)
+    return dataclasses.replace(result, **{
+        f.name: cp.asarray(value) for f in dataclasses.fields(result)
+        if isinstance(value := getattr(result, f.name), np.ndarray)
+    })
 
 
 def _unwrap(

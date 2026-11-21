@@ -1,6 +1,6 @@
-"""GPU (cupy) implementation of the weighted problem of the IRLS phase unwrapping.
+"""GPU (cupy) implementation of the weighted problems of the IRLS and ADMM unwrapping.
 
-PROTOTYPE. The counterpart of :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`
+The counterpart of :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`
 for cupy input, with the same results: the same arithmetic in the same order per
 pixel, and dot products summed in float64. At the image sizes of holography (~500²
 to 2048²), the work per CG iteration is a few passes over one image, so kernel
@@ -28,7 +28,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import math
-import os
 import threading
 import warnings
 from collections import OrderedDict
@@ -63,7 +62,7 @@ _GRAPH_ITERATIONS = 16  # even: see `_cg_iterations`
 # thread, which keeps the reduction tails of small images short.
 _THREADS_PER_SM = 2048  # the most an SM holds at once
 _MIN_PER_THREAD = 2
-# PROTOTYPE switches: which CG dot products are added up from their partial sums
+# Which CG dot products are added up from their partial sums
 # by the kernels that need them, instead of by the last block of the kernel that
 # computes them. That takes the last block's serial tail (~0.5 us) off the
 # critical path, which gains ~4 % at ~500^2 for all three, but every block of the
@@ -73,18 +72,12 @@ _DEFER_RZ = True  # r . z, in apply_operator (beta) and cg_update (alpha)
 _DEFER_ALPHA = True  # p . Ap, in cg_update
 _DEFER_RR = True  # r . r, in makhoul_spectrum (the convergence check)
 _DEFER_MAX_GRID = 512
-# EXPERIMENT: rounds of a solve that use the Poisson (Makhoul) preconditioner; the
-# later ones use the Jacobi preconditioner. None: all rounds Poisson.
 # ADMM (`admm.ADMMOptions`): the grid of `admm_update` (no reductions, so one
 # pixel per thread), and the rounds per graph launch: 2 on small images (a round
 # costs little more than a host round trip, ~25 us), else 1 (a round after the
 # stop would be wasted work).
 _ADMM_GRID = (lambda n: max(1, -(-n // _BLOCK)))  # noqa: E731
 _ADMM_CHUNK = (lambda n: 2 if n <= 512 * 512 else 1)  # noqa: E731
-_POISSON_ROUNDS: int | None = (
-    int(os.environ["IRLS_POISSON_ROUNDS"])
-    if "IRLS_POISSON_ROUNDS" in os.environ else None
-)
 
 # Indices into the double scalars `s` on the device:
 (_S_NORM, _S_RZ, _S_ALPHA, _S_BETA, _S_MEAN, _S_TURNS, _S_COST, _S_LARGEST, _S_INVALID,
@@ -108,8 +101,9 @@ def _fft_plans(extended: cp.ndarray, spectrum: cp.ndarray) -> tuple:
     )
 
 
-# PROTOTYPE switch, for comparisons with the CPU:
-PADDED_LENGTH: Callable[[int], int] | None = None  # None: irls._padded_length
+# The padded lengths of IRLS's Poisson preconditioner. None: `_gpu_padded_length`.
+# The tests set `irls._padded_length`, for the CPU's results bit for bit.
+PADDED_LENGTH: Callable[[int], int] | None = None
 
 _local = threading.local()
 _CACHE_SIZE = 2
@@ -328,8 +322,6 @@ class CupyWeightedProblem:
         self._history_length = 0
         self._graph = None
         self._graph_key = None
-        self._graph_sets: dict[tuple, tuple] = {}
-        self._kind = "poisson"  # the preconditioner of the current round
         self._start_graphs: dict[tuple, cp.cuda.graph.Graph] = {}
         self._host_start_params = _pinned(2, np.float64)
         self._check_weights = False
@@ -724,31 +716,6 @@ class CupyWeightedProblem:
         iteration from the partial sums of r . r (see `_DEFER_RR`).
         """
         rows, cols = self.shape
-        if self._kind == "sgs":
-            self._launch(
-                "sgs_black",
-                (residual, self.weights_x, self.weights_y, out, np.int32(rows),
-                 np.int32(cols), flags),
-            )
-            self._launch(
-                "sgs_red",
-                (residual, self.weights_x, self.weights_y, out,
-                 direction if direction is not None else out,
-                 np.int32(rows), np.int32(cols),
-                 rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
-                 flags, np.int32(mode)),
-            )
-            return
-        if self._kind == "jacobi":
-            self._launch(
-                "jacobi",
-                (residual, self.weights_x, self.weights_y, out,
-                 direction if direction is not None else out,
-                 np.int32(rows), np.int32(cols),
-                 rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
-                 flags, np.int32(mode)),
-            )
-            return
         p1, p2 = self.padded_shape
         size = self.extended.size
         grid = max(1, min(-(-size // self.block), 8 * self.grid))
@@ -773,9 +740,7 @@ class CupyWeightedProblem:
             (self.extended, residual, out,
              direction if direction is not None else out, *dims,
              rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
-             flags, np.int32(mode), np.int32(check is not None),
-             self.weights_x, self.weights_y, self.round_params,
-             np.int32(self._kind == "additive")),
+             flags, np.int32(mode), np.int32(check is not None)),
         )
 
     def _select(
@@ -882,8 +847,6 @@ class CupyWeightedProblem:
         tol = np.float64(options.cg_relative_tolerance)
         limit = np.int32(options.iterations_per_round)
         absent = self.absent_f64
-        poisson = self._kind in ("poisson", "additive")
-        defer_rr = self.defer_rr and poisson
         phi = self.phi
         for i in range(count):
             current = self.directions[self._direction]
@@ -905,13 +868,13 @@ class CupyWeightedProblem:
                  self.partials_pap if self.defer_alpha else absent,
                  latest_rz if self.defer_rz else absent, np.int32(self.grid),
                  np.float64(np.finfo(self.dtype).tiny),
-                 self.partials_rr if defer_rr else absent),
+                 self.partials_rr if self.defer_rr else absent),
             )
             # z = M r; r . z: beta now, or the partial sums, into the other buffer
             self._precondition(
                 self.r, self.z, self.f, mode=3 if self.defer_rz else 1,
-                reordered=poisson, rz_out=self.partials_rz[1 - self._rz_index],
-                check=options if defer_rr else None,
+                reordered=True, rz_out=self.partials_rz[1 - self._rz_index],
+                check=options if self.defer_rr else None,
             )
             if self.defer_rz:
                 self._rz_index = 1 - self._rz_index
@@ -983,12 +946,8 @@ class CupyWeightedProblem:
         more, and the tail graph the tail. The graphs with the tail exist once per
         candidate slot.
         """
-        key = (options.iterations_per_round, options.cg_relative_tolerance, self._kind)
+        key = (options.iterations_per_round, options.cg_relative_tolerance)
         if self._graph_key == key:
-            return
-        if key in self._graph_sets:
-            (self._graphs, self._graph_more, self._graph_tails) = self._graph_sets[key]
-            self._graph, self._graph_key = self._graphs[0], key
             return
         if self._history_length < options.iterations_per_round + 1:
             self._history_length = options.iterations_per_round + 1
@@ -1021,7 +980,6 @@ class CupyWeightedProblem:
         )
         self._graph = self._graphs[0]
         self._graph_key = key
-        self._graph_sets[key] = (self._graphs, self._graph_more, self._graph_tails)
 
     # -- the interface of _WeightedProblem -----------------------------------
 
@@ -1043,20 +1001,7 @@ class CupyWeightedProblem:
         """
         from .irls import L1Round, _Candidate  # noqa: PLC0415
 
-        self._kind = (
-            os.environ.get("IRLS_GLOBAL", "poisson")
-            if _POISSON_ROUNDS is None or index < _POISSON_ROUNDS
-            else os.environ.get("IRLS_LOCAL", "jacobi")
-        )
-        # EXPERIMENT: CG iterations per kind of round
-        override = os.environ.get(
-            "IRLS_POISSON_ITERS" if self._kind in ("poisson", "additive")
-            else "IRLS_LOCAL_ITERS",
-        )
-        if override:
-            options = dataclasses.replace(options, iterations_per_round=int(override))
         self._prepare_graph(options)
-        self._kind = "poisson"  # the default, e.g. for the start graphs
         # Read by the graph when it runs; the last round has synchronized.
         self._host_params[0] = epsilon * epsilon
         self._host_params[1] = float(at_end)
