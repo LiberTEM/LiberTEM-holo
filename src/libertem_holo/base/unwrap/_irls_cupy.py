@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import math
+import os
 import threading
 import warnings
 from collections import OrderedDict
@@ -49,10 +50,11 @@ from .irls import _is_smooth
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from .irls import BranchesPrior, CGRound, IRLSOptions, PhasePrior, _Candidate
+    from .admm import ADMMOptions
+    from .irls import IRLSOptions, L1BranchesPrior, L1PhasePrior, L1Round, _Candidate
 
 _BLOCK = 256
-# CG iterations per captured graph: the default `cg_max_iterations` fits in one.
+# CG iterations per captured graph: the default `iterations_per_round` fits in one.
 _GRAPH_ITERATIONS = 16  # even: see `_cg_iterations`
 # Grid of the grid-stride kernels: at most 8 blocks of 256 threads per
 # multiprocessor, which is full occupancy (4 left the streaming kernels at 45 %
@@ -71,6 +73,18 @@ _DEFER_RZ = True  # r . z, in apply_operator (beta) and cg_update (alpha)
 _DEFER_ALPHA = True  # p . Ap, in cg_update
 _DEFER_RR = True  # r . r, in makhoul_spectrum (the convergence check)
 _DEFER_MAX_GRID = 512
+# EXPERIMENT: rounds of a solve that use the Poisson (Makhoul) preconditioner; the
+# later ones use the Jacobi preconditioner. None: all rounds Poisson.
+# ADMM (`admm.ADMMOptions`): the grid of `admm_update` (no reductions, so one
+# pixel per thread), and the rounds per graph launch: 2 on small images (a round
+# costs little more than a host round trip, ~25 us), else 1 (a round after the
+# stop would be wasted work).
+_ADMM_GRID = (lambda n: max(1, -(-n // _BLOCK)))  # noqa: E731
+_ADMM_CHUNK = (lambda n: 2 if n <= 512 * 512 else 1)  # noqa: E731
+_POISSON_ROUNDS: int | None = (
+    int(os.environ["IRLS_POISSON_ROUNDS"])
+    if "IRLS_POISSON_ROUNDS" in os.environ else None
+)
 
 # Indices into the double scalars `s` on the device:
 (_S_NORM, _S_RZ, _S_ALPHA, _S_BETA, _S_MEAN, _S_TURNS, _S_COST, _S_LARGEST, _S_INVALID,
@@ -106,6 +120,7 @@ def problem_for(
     edge_weights: tuple[cp.ndarray, cp.ndarray] | None,
     *,
     deferred: bool = False,
+    method: str = "irls",
 ) -> CupyWeightedProblem:
     """Return a problem for `wrapped`, reusing a workspace of the same shape.
 
@@ -115,9 +130,9 @@ def problem_for(
     :code:`_CACHE_SIZE` shapes. With `deferred`, the input is only copied into the
     workspace, and :meth:`CupyWeightedProblem.cold_start` or
     :meth:`~CupyWeightedProblem.warm_start` sets the problem up, which must come
-    next.
+    next. Workspaces are kept per `method` ("irls" or "admm").
     """
-    problem = _workspace(wrapped.shape, wrapped.dtype)
+    problem = _workspace(wrapped.shape, wrapped.dtype, method)
     if deferred:
         problem.stage_phase(wrapped, edge_weights)
     else:
@@ -127,6 +142,7 @@ def problem_for(
 
 def problem_for_wave(
     wave: cp.ndarray, floor: float, percentile: float, *, deferred: bool = False,
+    method: str = "irls",
 ) -> CupyWeightedProblem:
     """Return a problem for the phase of `wave`, with edge weights from its amplitude.
 
@@ -137,7 +153,7 @@ def problem_for_wave(
     """
     dtype = np.float32 if wave.dtype == np.complex64 else np.float64
     wave = cp.ascontiguousarray(wave, dtype=np.result_type(dtype, np.complex64))
-    problem = _workspace(wave.shape, np.dtype(dtype))
+    problem = _workspace(wave.shape, np.dtype(dtype), method)
     if deferred:
         problem.stage_wave(wave, floor, percentile)
     else:
@@ -145,19 +161,23 @@ def problem_for_wave(
     return problem
 
 
-def _workspace(shape: tuple[int, int], dtype: np.dtype) -> CupyWeightedProblem:
+def _workspace(
+    shape: tuple[int, int], dtype: np.dtype, method: str = "irls",
+) -> CupyWeightedProblem:
     """Return the cached workspace for `shape` and `dtype` (see :func:`problem_for`)."""
     cache = getattr(_local, "cache", None)
     if cache is None:
         cache = _local.cache = OrderedDict()
     key = (
-        shape, np.dtype(dtype).str, cp.cuda.Device().id,
+        shape, np.dtype(dtype).str, cp.cuda.Device().id, method,
         PADDED_LENGTH, _BLOCK, _MIN_PER_THREAD,
         _DEFER_RZ, _DEFER_ALPHA, _DEFER_RR, _DEFER_MAX_GRID,
     )
     problem = cache.pop(key, None)
     if problem is None:
-        problem = CupyWeightedProblem(shape, dtype, padded_length=PADDED_LENGTH)
+        problem = CupyWeightedProblem(
+            shape, dtype, padded_length=PADDED_LENGTH, method=method,
+        )
     cache[key] = problem
     while len(cache) > _CACHE_SIZE:
         cache.popitem(last=False)
@@ -214,6 +234,7 @@ class CupyWeightedProblem:
         shape: tuple[int, int],
         dtype: np.dtype,
         padded_length: Callable[[int], int] | None = None,
+        method: str = "irls",
     ) -> None:
         self.dtype = np.dtype(dtype)
         self.shape = rows, cols = shape
@@ -232,14 +253,23 @@ class CupyWeightedProblem:
             self.target_x, self.target_y = image(edges_x), image(edges_y)
             self.jumps_x = cp.empty((rows, cols - 1), dtype=cp.int32)
             self.jumps_y = cp.empty((rows - 1, cols), dtype=cp.int32)
-            self.edge_x, self.edge_y = image(edges_x), image(edges_y)
+            n_x, n_y = rows * (cols - 1), (rows - 1) * cols
+            self.edges = cp.empty(n_x + n_y, dtype=self.dtype)
+            self.edge_x = self.edges[:n_x].reshape(edges_x)
+            self.edge_y = self.edges[n_x:].reshape(edges_y)
             self.weights_x, self.weights_y = image(edges_x), image(edges_y)
             self.unit_x = cp.ones((rows, cols - 1), dtype=self.dtype)
             self.unit_y = cp.ones((rows - 1, cols), dtype=self.dtype)
 
             self._allocate_scalars()
 
-            self._setup_preconditioner(padded_length or _gpu_padded_length)
+            # ADMM's u-step must solve its least-squares problem exactly: on a
+            # padded grid, the padding's edges would pull on the result.
+            self.method = method
+            self._setup_preconditioner(
+                (lambda n: n) if method == "admm"
+                else padded_length or _gpu_padded_length,
+            )
 
             # CG work arrays; the graph runs on `phi`, see `solve`:
             self.phi, self.b, self.q, self.r, self.z = (image() for _ in range(5))
@@ -255,7 +285,8 @@ class CupyWeightedProblem:
             self.prior_branches = None
             self.start_params = cp.zeros(2, dtype=cp.float64)  # eps^2 of a prior
             self.l2 = image()  # the L2 solution of the cold start
-            self.round_params = cp.zeros(2, dtype=cp.float64)  # eps^2, unless settled
+            # eps^2, unless settled (and unused):
+            self.round_params = cp.zeros(3, dtype=cp.float64)
             self.direct_params = cp.zeros(2, dtype=cp.float64)  # the same, ungraphed
             # Two slots for a round's candidate result (phase, branches, weights):
             # a round writes into the slot that does not hold the best result so
@@ -291,10 +322,14 @@ class CupyWeightedProblem:
     def _init_host_state(self) -> None:
         """Pinned host buffers, captured graphs, and the state of a solve."""
         self._host_s = _pinned(self.s.size, np.float64)
-        self._host_params = _pinned(2, np.float64)
+        self._host_params = _pinned(3, np.float64)
+        self._admm_graphs: dict[bool, cp.cuda.graph.Graph] = {}
+        self._admm_key = None
         self._history_length = 0
         self._graph = None
         self._graph_key = None
+        self._graph_sets: dict[tuple, tuple] = {}
+        self._kind = "poisson"  # the preconditioner of the current round
         self._start_graphs: dict[tuple, cp.cuda.graph.Graph] = {}
         self._host_start_params = _pinned(2, np.float64)
         self._check_weights = False
@@ -440,7 +475,7 @@ class CupyWeightedProblem:
     def warm_start(
         self,
         wrapped: cp.ndarray,
-        prior: PhasePrior | BranchesPrior,
+        prior: L1PhasePrior | L1BranchesPrior,
         options: IRLSOptions,
     ) -> tuple[cp.ndarray, _Candidate, float]:
         """Start a solve from a prior; see `irls._warm_start`.
@@ -449,12 +484,12 @@ class CupyWeightedProblem:
         prior, its weights, and it rounded as the first candidate. The epsilon of
         the weights comes from pinned memory, so one graph serves every prior.
         """
-        from .irls import PhasePrior, _warm_start  # noqa: PLC0415
+        from .irls import L1PhasePrior, _warm_start  # noqa: PLC0415
 
         if self._staged is None:
             return _warm_start(self, wrapped, prior, options)
         epsilon = min(max(prior.epsilon, options.epsilon_min), options.epsilon_start)
-        phase_prior = isinstance(prior, PhasePrior)
+        phase_prior = isinstance(prior, L1PhasePrior)
         with self._on_stream():
             if self.prior_phase is None:
                 self.prior_phase = cp.empty(self.shape, dtype=cp.float64)
@@ -689,6 +724,31 @@ class CupyWeightedProblem:
         iteration from the partial sums of r . r (see `_DEFER_RR`).
         """
         rows, cols = self.shape
+        if self._kind == "sgs":
+            self._launch(
+                "sgs_black",
+                (residual, self.weights_x, self.weights_y, out, np.int32(rows),
+                 np.int32(cols), flags),
+            )
+            self._launch(
+                "sgs_red",
+                (residual, self.weights_x, self.weights_y, out,
+                 direction if direction is not None else out,
+                 np.int32(rows), np.int32(cols),
+                 rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
+                 flags, np.int32(mode)),
+            )
+            return
+        if self._kind == "jacobi":
+            self._launch(
+                "jacobi",
+                (residual, self.weights_x, self.weights_y, out,
+                 direction if direction is not None else out,
+                 np.int32(rows), np.int32(cols),
+                 rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
+                 flags, np.int32(mode)),
+            )
+            return
         p1, p2 = self.padded_shape
         size = self.extended.size
         grid = max(1, min(-(-size // self.block), 8 * self.grid))
@@ -704,7 +764,7 @@ class CupyWeightedProblem:
              self.partials_rr if check is not None else self.absent_f64,
              np.int32(self.grid), self.s, history,
              np.float64(check.cg_relative_tolerance if check else 0),
-             np.int32(check.cg_max_iterations if check else 0)),
+             np.int32(check.iterations_per_round if check else 0)),
             grid=grid,
         )
         self.plan_inverse.fft(self.spectrum_out, self.extended, cufft.CUFFT_INVERSE)
@@ -713,7 +773,9 @@ class CupyWeightedProblem:
             (self.extended, residual, out,
              direction if direction is not None else out, *dims,
              rz_out if mode in (3, 4) else self.partials, self.counter, self.s,
-             flags, np.int32(mode), np.int32(check is not None)),
+             flags, np.int32(mode), np.int32(check is not None),
+             self.weights_x, self.weights_y, self.round_params,
+             np.int32(self._kind == "additive")),
         )
 
     def _select(
@@ -818,8 +880,10 @@ class CupyWeightedProblem:
         p1, p2 = self.padded_shape
         n = np.int64(self.size)
         tol = np.float64(options.cg_relative_tolerance)
-        limit = np.int32(options.cg_max_iterations)
+        limit = np.int32(options.iterations_per_round)
         absent = self.absent_f64
+        poisson = self._kind in ("poisson", "additive")
+        defer_rr = self.defer_rr and poisson
         phi = self.phi
         for i in range(count):
             current = self.directions[self._direction]
@@ -841,13 +905,13 @@ class CupyWeightedProblem:
                  self.partials_pap if self.defer_alpha else absent,
                  latest_rz if self.defer_rz else absent, np.int32(self.grid),
                  np.float64(np.finfo(self.dtype).tiny),
-                 self.partials_rr if self.defer_rr else absent),
+                 self.partials_rr if defer_rr else absent),
             )
             # z = M r; r . z: beta now, or the partial sums, into the other buffer
             self._precondition(
                 self.r, self.z, self.f, mode=3 if self.defer_rz else 1,
-                reordered=True, rz_out=self.partials_rz[1 - self._rz_index],
-                check=options if self.defer_rr else None,
+                reordered=poisson, rz_out=self.partials_rz[1 - self._rz_index],
+                check=options if defer_rr else None,
             )
             if self.defer_rz:
                 self._rz_index = 1 - self._rz_index
@@ -855,6 +919,13 @@ class CupyWeightedProblem:
         self._launch("subtract_mean_if_iterated", (phi, n, self.s, self.f))
 
     def _capture(self, enqueue: Callable[[], None]) -> cp.cuda.graph.Graph:
+        """Capture what `enqueue` enqueues on the workspace's stream as a graph.
+
+        A device-wide synchronization (`cudaDeviceSynchronize`) in any thread
+        while this captures invalidates the capture. That happens only while a
+        workspace is set up (the first solve of a shape in a thread); workers
+        should synchronize their own streams instead.
+        """
         with self.stream:
             self.stream.begin_capture()
             try:
@@ -912,17 +983,21 @@ class CupyWeightedProblem:
         more, and the tail graph the tail. The graphs with the tail exist once per
         candidate slot.
         """
-        key = (options.cg_max_iterations, options.cg_relative_tolerance)
-        if self._graph is not None and self._graph_key == key:
+        key = (options.iterations_per_round, options.cg_relative_tolerance, self._kind)
+        if self._graph_key == key:
             return
-        if self._history_length < options.cg_max_iterations + 1:
-            self._history_length = options.cg_max_iterations + 1
+        if key in self._graph_sets:
+            (self._graphs, self._graph_more, self._graph_tails) = self._graph_sets[key]
+            self._graph, self._graph_key = self._graphs[0], key
+            return
+        if self._history_length < options.iterations_per_round + 1:
+            self._history_length = options.iterations_per_round + 1
             with self.stream:
                 self.history = cp.zeros(self._history_length, dtype=cp.float64)
             self._host_flags = _pinned(self.f.size, np.int32)
             self._host_history = _pinned(self.history.size, np.float64)
-        chunk = min(options.cg_max_iterations, _GRAPH_ITERATIONS)
-        single = options.cg_max_iterations <= chunk
+        chunk = min(options.iterations_per_round, _GRAPH_ITERATIONS)
+        single = options.iterations_per_round <= chunk
         # A replayed chunk must leave the direction in the buffer it found it in:
         assert single or chunk % 2 == 0  # noqa: S101
 
@@ -946,6 +1021,7 @@ class CupyWeightedProblem:
         )
         self._graph = self._graphs[0]
         self._graph_key = key
+        self._graph_sets[key] = (self._graphs, self._graph_more, self._graph_tails)
 
     # -- the interface of _WeightedProblem -----------------------------------
 
@@ -958,16 +1034,29 @@ class CupyWeightedProblem:
         at_end: bool,
         options: IRLSOptions,
         index: int,
-    ) -> tuple[CGRound, _Candidate]:
+    ) -> tuple[L1Round, _Candidate]:
         """Run one IRLS round on `phi` (in place); see `_WeightedProblem.run_round`.
 
         One graph launch and one synchronization. The candidate's arrays are a
         workspace slot, valid until the next round unless it is kept (:meth:`keep`),
         and until the end of the solve (:meth:`release`) if it is.
         """
-        from .irls import CGRound, _Candidate  # noqa: PLC0415
+        from .irls import L1Round, _Candidate  # noqa: PLC0415
 
+        self._kind = (
+            os.environ.get("IRLS_GLOBAL", "poisson")
+            if _POISSON_ROUNDS is None or index < _POISSON_ROUNDS
+            else os.environ.get("IRLS_LOCAL", "jacobi")
+        )
+        # EXPERIMENT: CG iterations per kind of round
+        override = os.environ.get(
+            "IRLS_POISSON_ITERS" if self._kind in ("poisson", "additive")
+            else "IRLS_LOCAL_ITERS",
+        )
+        if override:
+            options = dataclasses.replace(options, iterations_per_round=int(override))
         self._prepare_graph(options)
+        self._kind = "poisson"  # the default, e.g. for the start graphs
         # Read by the graph when it runs; the last round has synchronized.
         self._host_params[0] = epsilon * epsilon
         self._host_params[1] = float(at_end)
@@ -992,9 +1081,9 @@ class CupyWeightedProblem:
         iterations = int(flags[_F_ITER])
         self._iterations = iterations
         if flags[_F_ZERO]:
-            report = CGRound(iterations=0, residuals=[0.0], converged=True)
+            report = L1Round(iterations=0, residuals=[0.0], converged=True)
         else:
-            report = CGRound(
+            report = L1Round(
                 iterations=iterations,
                 residuals=[float(x) for x in self._host_history[: iterations + 1]],
                 converged=bool(flags[_F_DONE] == 1),
@@ -1012,6 +1101,182 @@ class CupyWeightedProblem:
             round_index=index,
         )
         return report, candidate
+
+    def run_rounds(
+        self,
+        phi: cp.ndarray,
+        wrapped: cp.ndarray,
+        weights_epsilon: float,
+        options: IRLSOptions | ADMMOptions,
+        *,
+        best: _Candidate,
+    ) -> tuple[list[L1Round], _Candidate]:
+        """Run the rounds of a solve; see `irls._irls_rounds`.
+
+        IRLS runs `irls._irls_rounds`, one graph launch per round. ADMM runs its
+        stop rule on the device (in `cuts_decide`), and a graph launch runs
+        `_ADMM_CHUNK` rounds: one host synchronization per chunk.
+        """
+        from .irls import _MIN_IMPROVEMENT, L1Round, _Candidate, _irls_rounds  # noqa: PLC0415
+
+        if self.method != "admm":
+            return _irls_rounds(self, phi, wrapped, weights_epsilon, options, best=best)
+        self._prepare_admm(options)
+        eps = (
+            options.epsilon_start if math.isinf(weights_epsilon)
+            else max(options.epsilon_min, weights_epsilon * options.decay)
+        )
+        state = self._host_round_state
+        state[:] = 0.0
+        state[0], state[1], state[2] = best.cut_cost, best.cut_turns, -1.0
+        state[5], state[6] = eps, best.weights_epsilon
+        state[8] = options.rounds
+        state[9] = 1e300 if options.stop_patience is None else options.stop_patience
+        state[10], state[11] = options.stop_tolerance, options.epsilon_min
+        state[12], state[13] = options.decay, _MIN_IMPROVEMENT
+        state[16], state[17] = 1.0, 0.0  # the candidate slot, the best's slot
+        self._host_params[0], self._host_params[1] = eps * eps, 0.0
+        with self._on_stream():
+            if phi.data.ptr != self.phi.data.ptr:
+                self._memcpy(self.phi, phi)
+            first = True
+            while True:
+                self._admm_graphs[first].launch(self.stream)
+                self.stream.synchronize()
+                first = False
+                if state[4]:
+                    break
+        hist = self._host_round_hist
+        rounds = [
+            L1Round(iterations=options.iterations_per_round, residuals=[],
+                    converged=True, cut_turns=int(hist[2 * i]),
+                    cut_cost=float(hist[2 * i + 1]))
+            for i in range(int(state[7]))
+        ]
+        best_slot = int(state[17])
+        self._kept = best_slot
+        if state[2] < 0:  # no round improved on the start
+            return rounds, best
+        phase, branches, weights_x, weights_y = self.slots[best_slot]
+        return rounds, _Candidate(
+            phase=phase, branches=branches,
+            cut_turns=int(state[1]), cut_cost=float(state[0]),
+            weights_x=weights_x, weights_y=weights_y,
+            weights_epsilon=float(state[6]), converged=True, round_index=int(state[2]),
+        )
+
+    def _prepare_admm(self, options: ADMMOptions) -> None:
+        """Buffers and the graphs of ADMM's rounds: a solve's first chunk, and later.
+
+        The round state `round_state` is documented at `cuts_decide`.
+        """
+        key = (options.rounds, options.iterations_per_round, options.rho_scale)
+        if self._admm_key == key:
+            return
+        rows, cols = self.shape
+        with self.stream:
+            self.rho = cp.full(1, options.rho_scale / math.pi, dtype=cp.float64)
+            self.lam = tuple(
+                (cp.zeros((rows, cols - 1), dtype=self.dtype),
+                 cp.zeros((rows - 1, cols), dtype=self.dtype))
+                for _ in range(2)
+            )
+            self.round_state = cp.zeros(32, dtype=cp.float64)
+            self.round_hist = cp.zeros(2 * options.rounds, dtype=cp.float64)
+        self._host_round_state = _pinned(32, np.float64)
+        self._host_round_hist = _pinned(2 * options.rounds, np.float64)
+        p1, p2 = self.padded_shape
+        dims = (np.int32(rows), np.int32(cols), np.int32(p1), np.int32(p2))
+        tau = self.dtype.type(2 * np.pi)
+        n = np.int64(self.size)
+        (ph0, br0, wx0, wy0), (ph1, br1, wx1, wy1) = self.slots
+        spectrum_grid = max(1, min(-(-self.extended.size // self.block), 8 * self.grid))
+
+        def one_round() -> None:
+            for it in range(options.iterations_per_round):
+                (lx, ly), (lx_new, ly_new) = self.lam[it % 2], self.lam[1 - it % 2]
+                self._launch(
+                    "admm_update",
+                    (self.extended if it else self.phi, np.int32(it > 0),
+                     self.target_x, self.target_y, self.edge_x, self.edge_y,
+                     lx, ly, lx_new, ly_new, self.fft_input, *dims,
+                     self.round_params, self.rho),
+                    grid=_ADMM_GRID(self.size),
+                )
+                self.plan_forward.fft(
+                    self.fft_input, self.spectrum, cufft.CUFFT_FORWARD,
+                )
+                self._launch(
+                    "makhoul_spectrum",
+                    (self.spectrum, self.spectrum_out, self.inverse_symbol,
+                     *self.twiddles, np.int32(p1), np.int32(p2), self.f_free,
+                     self.absent_f64, np.int32(self.grid), self.s, self.s,
+                     np.float64(0), np.int32(0)),
+                    grid=spectrum_grid,
+                )
+                self.plan_inverse.fft(
+                    self.spectrum_out, self.extended, cufft.CUFFT_INVERSE,
+                )
+            # u of the last solve into phi (crop, mode 2: only z):
+            self._launch(
+                "crop",
+                (self.extended, self.r, self.phi, self.phi, *dims, self.partials,
+                 self.counter, self.s, self.f_free, np.int32(2), np.int32(0),
+                 self.weights_x, self.weights_y, self.round_params, np.int32(0)),
+            )
+            self._launch(
+                "circular_offset",
+                (self.phi, self.wrapped, tau, self.difference, n, self.partials,
+                 self.counter, self.offset),
+            )
+            self._launch(
+                "branches_and_phase_slot",
+                (self.phi, self.wrapped, self.offset, tau, br0, ph0, br1, ph1,
+                 self.round_state, n),
+            )
+            self._launch(
+                "cuts_decide",
+                (br0, br1, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
+                 np.int32(rows), np.int32(cols), self.partials, self.counter, self.s,
+                 self.round_state, self.round_hist, self.round_params),
+            )
+
+        def chunk(*, first: bool) -> None:
+            if first:  # a new solve: its state, rho = scale * median(C) / pi, duals 0
+                self._memcpy(self.round_params, self._host_params)
+                self._memcpy(self.round_state, self._host_round_state)
+                edges = self.edges.size
+                if edges:
+                    self._select(
+                        self.edges, ((edges - 1) // 2, edges // 2), mode=1, t=0.5,
+                    )
+                    self._launch(
+                        "scale_into",
+                        (self.select_out, self.rho,
+                         np.float64(options.rho_scale / math.pi)),
+                        grid=1, block=1,
+                    )
+                for lam in self.lam:
+                    for x in lam:
+                        cp.cuda.runtime.memsetAsync(
+                            x.data.ptr, 0, x.nbytes, self.stream.ptr)
+            for _ in range(_ADMM_CHUNK(self.size)):
+                one_round()
+            # once the rounds have stopped, the result's weights:
+            self._launch(
+                "admm_weights",
+                (self.round_state, ph0, ph1, self.target_x, self.target_y,
+                 self.edge_x, self.edge_y, wx0, wy0, wx1, wy1,
+                 np.int32(rows), np.int32(cols)),
+            )
+            self._memcpy(self._host_round_state, self.round_state)
+            self._memcpy(self._host_round_hist, self.round_hist)
+
+        self._admm_graphs = {
+            first: self._capture(lambda first=first: chunk(first=first))
+            for first in (True, False)
+        }
+        self._admm_key = key
 
     def _slot_of(self, candidate: _Candidate) -> int | None:
         for index, slot in enumerate(self.slots):
@@ -1111,6 +1376,18 @@ class CupyWeightedProblem:
     ) -> None:
         tau = self.dtype.type(2 * np.pi)
         n = np.int64(self.size)
+        if self.method == "admm":
+            # the circular mean instead of the median, in one pass
+            self._launch(
+                "circular_offset",
+                (phi, wrapped, tau, self.difference, n, self.partials, self.counter,
+                 self.offset),
+            )
+            self._launch(
+                "branches_and_phase",
+                (phi, wrapped, self.offset, tau, branches, phase, n),
+            )
+            return
         self._launch("wrapped_difference", (phi, wrapped, tau, self.difference, n))
         # The median, as np.median: the mean of the two middle values.
         self._select(

@@ -138,7 +138,7 @@ class PaperResult:
         result of :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`.
     cut_turns, cut_cost
         Cut count and edge-weighted cut cost of :attr:`phase`, as in
-        :class:`~libertem_holo.base.unwrap.IRLSResult`.
+        :class:`~libertem_holo.base.unwrap.L1Result`.
     slack_x, slack_y
         The slack variables :math:`V^h` and :math:`V^v`.
     iterations

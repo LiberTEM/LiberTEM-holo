@@ -368,6 +368,11 @@ def _find_bucket(hist, offset, k, found, found_rank, which, sh):
     cuda.syncthreads()
 
 
+# Kernels of the IRLS preconditioner experiments (`_irls_cupy._POISSON_ROUNDS`),
+# which no default path launches:
+EXPERIMENTAL = frozenset({"jacobi", "sgs_black", "sgs_red"})
+
+
 def kernels(dtype: np.dtype) -> dict:
     """Return the kernels for `dtype` (float32 or float64), by name."""
     return _kernels(np.dtype(dtype), exact=EXACT)[0]
@@ -791,9 +796,12 @@ def _kernels(dtype: np.dtype, *, exact: bool) -> dict:
                                                        mul(cx, im) + mul(cy, re)))
             k = u32(k + step)
 
-    @kernel(A, A, A, A, i32, i32, i32, i32, F64A, U32A, F64A, I32A, i32, i32)
+    @kernel(
+        A, A, A, A, i32, i32, i32, i32, F64A, U32A, F64A, I32A, i32, i32,
+        A, A, F64A, i32,
+    )
     def crop(e, r, z, d, rows, cols, p1, p2, partials, counter, s, f, mode,
-             count_iteration):
+             count_iteration, wx, wy, params, additive):
         """Crop z = x[:rows, :cols] for x the Makhoul-reordered (P1, P2) array e.
 
         mode 0: rz = r . z, and d = z (the start of CG). mode 1: beta =
@@ -810,7 +818,11 @@ def _kernels(dtype: np.dtype, *, exact: bool) -> dict:
         if f[F_DONE]:
             return
         cols_u, p1_u, p2_u = u32(cols), u32(p1), u32(p2)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
         n = u32(u32(rows) * cols_u)
+        # EXPERIMENT (`additive`): z = L^-1 r / eps + r / diag(A), eps^2 = params[0]
+        scale = T(1.0 / math.sqrt(params[0])) if additive else T(1)
         acc = 0.0
         k = start()
         step = stride()
@@ -818,6 +830,17 @@ def _kernels(dtype: np.dtype, *, exact: bool) -> dict:
             i = u32(k // cols_u)
             j = u32(k - i * cols_u)
             value = e[u32(_reordered(i, p1_u) * p2_u + _reordered(j, p2_u))]
+            if additive:
+                diag = T(0)
+                if j > U0:
+                    diag += wx[u32(i * cm1 + j - U1)]
+                if j < cm1:
+                    diag += wx[u32(i * cm1 + j)]
+                if i > U0:
+                    diag += wy[u32((i - U1) * cols_u + j)]
+                if i < rm1:
+                    diag += wy[u32(i * cols_u + j)]
+                value = mul(value, scale) + (r[k] / diag if diag > T(0) else T(0))
             z[k] = value
             if mode == 0 or mode == 4:
                 d[k] = value
@@ -833,6 +856,382 @@ def _kernels(dtype: np.dtype, *, exact: bool) -> dict:
             if mode == 1:
                 s[S_BETA] = numba.float64(T(total / s[S_RZ]))
             s[S_RZ] = total
+
+    @kernel(A, A, A, A, A, i32, i32, F64A, U32A, F64A, I32A, i32)
+    def jacobi(r, wx, wy, z, d, rows, cols, partials, counter, s, f, mode):
+        """EXPERIMENT: z = r / diag(A), the Jacobi preconditioner; modes as `crop`."""
+        if f[F_DONE]:
+            return
+        cols_u = u32(cols)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        acc = 0.0
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            diag = T(0)
+            if j > U0:
+                diag += wx[u32(i * cm1 + j - U1)]
+            if j < cm1:
+                diag += wx[u32(i * cm1 + j)]
+            if i > U0:
+                diag += wy[u32((i - U1) * cols_u + j)]
+            if i < rm1:
+                diag += wy[u32(i * cols_u + j)]
+            value = r[k] / diag if diag > T(0) else T(0)
+            z[k] = value
+            if mode == 0 or mode == 4:
+                d[k] = value
+            acc += _dmul(numba.float64(r[k]), numba.float64(value))
+            k = u32(k + step)
+        if mode == 2:
+            return
+        if mode == 3 or mode == 4:
+            _block_partial(acc, partials)
+            return
+        last, total = _last_block(acc, partials, counter)
+        if last and cuda.threadIdx.x == 0:
+            if mode == 1:
+                s[S_BETA] = numba.float64(T(total / s[S_RZ]))
+            s[S_RZ] = total
+
+    @cuda.jit(device=True, inline=True)
+    def neighbours(x, wx, wy, k, i, j, cols_u, cm1, rm1):
+        """Return (sum of w x over the 4 neighbours of k, sum of their w)."""
+        acc = T(0)
+        diag = T(0)
+        if j > U0:
+            w = wx[u32(i * cm1 + j - U1)]
+            acc += mul(w, x[u32(k - U1)])
+            diag += w
+        if j < cm1:
+            w = wx[u32(i * cm1 + j)]
+            acc += mul(w, x[u32(k + U1)])
+            diag += w
+        if i > U0:
+            w = wy[u32((i - U1) * cols_u + j)]
+            acc += mul(w, x[u32(k - cols_u)])
+            diag += w
+        if i < rm1:
+            w = wy[u32(i * cols_u + j)]
+            acc += mul(w, x[u32(k + cols_u)])
+            diag += w
+        return acc, diag
+
+    @cuda.jit(device=True, inline=True)
+    def red_from_residual(r, wx, wy, k, i, j, cols_u, cm1, rm1):
+        """Return the first red half sweep from zero: r / diag."""
+        _, diag = neighbours(r, wx, wy, k, i, j, cols_u, cm1, rm1)
+        return r[k] / diag if diag > T(0) else T(0)
+
+    @kernel(A, A, A, A, i32, i32, I32A)
+    def sgs_black(r, wx, wy, z, rows, cols, f):
+        """EXPERIMENT: the black half sweep of a red-black symmetric Gauss-Seidel.
+
+        z[black] = (r + sum w z[red]) / diag, with z[red] = r / diag from the first
+        red half sweep (from zero), computed on the fly.
+        """
+        if f[F_DONE]:
+            return
+        cols_u = u32(cols)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            if u32(u32(i + j) & U1) == U1:  # black
+                acc = T(0)
+                diag = T(0)
+                if j > U0:
+                    w = wx[u32(i * cm1 + j - U1)]
+                    acc += mul(w, red_from_residual(
+                        r, wx, wy, u32(k - U1), i, u32(j - U1), cols_u, cm1, rm1))
+                    diag += w
+                if j < cm1:
+                    w = wx[u32(i * cm1 + j)]
+                    acc += mul(w, red_from_residual(
+                        r, wx, wy, u32(k + U1), i, u32(j + U1), cols_u, cm1, rm1))
+                    diag += w
+                if i > U0:
+                    w = wy[u32((i - U1) * cols_u + j)]
+                    acc += mul(w, red_from_residual(
+                        r, wx, wy, u32(k - cols_u), u32(i - U1), j, cols_u, cm1, rm1))
+                    diag += w
+                if i < rm1:
+                    w = wy[u32(i * cols_u + j)]
+                    acc += mul(w, red_from_residual(
+                        r, wx, wy, u32(k + cols_u), u32(i + U1), j, cols_u, cm1, rm1))
+                    diag += w
+                z[k] = (r[k] + acc) / diag if diag > T(0) else T(0)
+            k = u32(k + step)
+
+    @kernel(A, A, A, A, A, i32, i32, F64A, U32A, F64A, I32A, i32)
+    def sgs_red(r, wx, wy, z, d, rows, cols, partials, counter, s, f, mode):
+        """EXPERIMENT: the last red half sweep; then the modes of `crop` for z."""
+        if f[F_DONE]:
+            return
+        cols_u = u32(cols)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        acc = 0.0
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            if u32(u32(i + j) & U1) == U0:  # red
+                nb, diag = neighbours(z, wx, wy, k, i, j, cols_u, cm1, rm1)
+                value = (r[k] + nb) / diag if diag > T(0) else T(0)
+                z[k] = value
+            else:
+                value = z[k]
+            if mode == 0 or mode == 4:
+                d[k] = value
+            acc += _dmul(numba.float64(r[k]), numba.float64(value))
+            k = u32(k + step)
+        if mode == 2:
+            return
+        if mode == 3 or mode == 4:
+            _block_partial(acc, partials)
+            return
+        last, total = _last_block(acc, partials, counter)
+        if last and cuda.threadIdx.x == 0:
+            if mode == 1:
+                s[S_BETA] = numba.float64(T(total / s[S_RZ]))
+            s[S_RZ] = total
+
+    @cuda.jit(device=True, inline=True)
+    def admm_u(src, from_fft, k, i, j, p1_u, p2_u):
+        """Return u at pixel k: from `phi`, or the inverse FFT's (reordered) output."""
+        if from_fft:
+            return src[u32(_reordered(i, p1_u) * p2_u + _reordered(j, p2_u))]
+        return src[k]
+
+    @cuda.jit(device=True, inline=True)
+    def admm_edge(grad, g, c, lam, rho, inv_rho, delta):
+        """One edge: z = prox of (c / rho) huber_delta at t; returns (lam', v).
+
+        t = grad u - g + lam / rho; lam' = lam + rho (grad u - g - z); v = g + z -
+        lam' / rho, the edge's target of the next u-solve.
+        """
+        tau = c * inv_rho
+        t = grad - g + mul(lam, inv_rho)
+        if abs(t) <= delta + tau:
+            z = mul(t, delta) / (delta + tau)
+        elif t > T(0):
+            z = t - tau
+        else:
+            z = t + tau
+        lam_new = lam + mul(rho, grad - g - z)
+        return lam_new, g + z - mul(lam_new, inv_rho)
+
+    @kernel(
+        A, i32, A, A, A, A, A, A, A, A, A, i32, i32, i32, i32, F64A, F64A,
+    )
+    def admm_update(src, from_fft, gx, gy, cx, cy, lx, ly, lx_new, ly_new, v,
+                    rows, cols, p1, p2, params, rho_):
+        """EXPERIMENT: one ADMM step for min sum C huber_delta(grad u - g).
+
+        From u (`src`: `phi`, or the inverse FFT's output if `from_fft`), the
+        z- and dual updates on the 4 edges of each pixel (each thread writes the
+        duals of its right and lower edge, into the other buffer), and the
+        right-hand side G^T v of the next u-solve, Makhoul-reordered into
+        `v` (the FFT's input). params[0]: delta^2; rho_[0]: rho.
+        """
+        cols_u, p1_u, p2_u = u32(cols), u32(p1), u32(p2)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        delta = T(math.sqrt(params[0]))
+        rho = T(rho_[0])
+        inv_rho = T(1.0 / rho_[0])
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            u = admm_u(src, from_fft, k, i, j, p1_u, p2_u)
+            rhs = T(0)
+            if j < cm1:  # right edge (own): k -> k + 1, contributes -v
+                e = u32(i * cm1 + j)
+                right = admm_u(src, from_fft, u32(k + U1), i, u32(j + U1), p1_u, p2_u)
+                grad = right - u
+                lam, val = admm_edge(grad, gx[e], cx[e], lx[e], rho, inv_rho, delta)
+                lx_new[e] = lam
+                rhs -= val
+            if j > U0:  # left edge: k - 1 -> k, contributes +v
+                e = u32(i * cm1 + j - U1)
+                left = admm_u(src, from_fft, u32(k - U1), i, u32(j - U1), p1_u, p2_u)
+                grad = u - left
+                _, val = admm_edge(grad, gx[e], cx[e], lx[e], rho, inv_rho, delta)
+                rhs += val
+            if i < rm1:  # lower edge (own)
+                below = admm_u(src, from_fft, u32(k + cols_u), u32(i + U1), j,
+                               p1_u, p2_u)
+                grad = below - u
+                lam, val = admm_edge(grad, gy[k], cy[k], ly[k], rho, inv_rho, delta)
+                ly_new[k] = lam
+                rhs -= val
+            if i > U0:  # upper edge
+                e = u32(k - cols_u)
+                grad = u - admm_u(src, from_fft, e, u32(i - U1), j, p1_u, p2_u)
+                _, val = admm_edge(grad, gy[e], cy[e], ly[e], rho, inv_rho, delta)
+                rhs += val
+            v[u32(_reordered(i, p1_u) * p2_u + _reordered(j, p2_u))] = rhs
+            k = u32(k + step)
+
+    @kernel(A, A, A, T, I32A, F64A, I32A, F64A, F64A, i64)
+    def branches_and_phase_slot(phi, wrapped, offset, tau, br0, ph0, br1, ph1, rs, n):
+        """EXPERIMENT: `branches_and_phase` into the candidate slot rs[16] (0 or 1)."""
+        if rs[4] != 0.0:
+            return
+        current = rs[16] != 0.0
+        branches = br1 if current else br0
+        phase = ph1 if current else ph0
+        off = offset[0]
+        n_u = u32(n)
+        k = start()
+        step = stride()
+        while k < n_u:
+            b = numba.int32(rint((phi[k] - off - wrapped[k]) / tau))
+            branches[k] = b
+            turns = _dmul(2.0 * math.pi, numba.float64(b))
+            phase[k] = numba.float64(wrapped[k]) + turns
+            k = u32(k + step)
+
+    @kernel(
+        I32A, I32A, I32A, I32A, A, A, i32, i32, F64A, U32A, F64A, F64A, F64A, F64A,
+    )
+    def cuts_decide(br0, br1, jx, jy, cx, cy, rows, cols, partials, counter, s, rs,
+                    hist, params):
+        """ADMM: `cuts` of the candidate in slot rs[16], then the stop rule.
+
+        In the last block, the stop rule of `irls._irls_rounds` on the device,
+        with the candidate slots chosen on the device: a candidate that is kept
+        becomes the best (rs[17]), and the next round writes into the other slot.
+        rs: 0 best cost, 1 best turns, 2 best round, 3 stale rounds, 4 done,
+        5 epsilon, 6 epsilon of the best, 7 round index, 8 rounds, 9 patience,
+        10 stop tolerance, 11 epsilon_min, 12 decay, 13 minimal improvement,
+        16 candidate slot, 17 best's slot. Records the round's turns and cost into
+        hist, and the next epsilon^2 into params[0].
+        """
+        if rs[4] != 0.0:
+            return
+        br = br1 if rs[16] != 0.0 else br0
+        turns = 0.0
+        cost = 0.0
+        cols_u = u32(cols)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            if j < cm1:
+                e = u32(i * cm1 + j)
+                t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cx[e]))
+            if i < rm1:
+                t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cy[k]))
+            k = u32(k + step)
+        last, turns, cost = _last_block2(turns, cost, partials, counter)
+        if not (last and cuda.threadIdx.x == 0):
+            return
+        s[S_TURNS] = turns
+        s[S_COST] = cost
+        index = numba.int64(rs[7])
+        hist[2 * index] = turns
+        hist[2 * index + 1] = cost
+        best = rs[0]
+        threshold = rs[13] if rs[13] > rs[10] * best else rs[10] * best
+        stale = 0.0 if cost < best - threshold else rs[3] + 1.0
+        rs[3] = stale
+        if cost <= best:
+            rs[0] = cost
+            rs[1] = turns
+            rs[2] = numba.float64(index)
+            rs[6] = rs[5]
+            rs[17] = rs[16]
+            rs[16] = 1.0 - rs[16]
+        eps = rs[5] * rs[12]
+        rs[5] = eps if eps > rs[11] else rs[11]
+        params[0] = rs[5] * rs[5]
+        rs[7] = numba.float64(index + 1)
+        if stale >= rs[9] or rs[1] == 0.0 or index + 1 >= numba.int64(rs[8]):
+            rs[4] = 1.0
+
+    @kernel(F64A, F64A, F64A, A, A, A, A, A, A, A, A, i32, i32)
+    def admm_weights(rs, ph0, ph1, tx, ty, cx, cy, wx0, wy0, wx1, wy1, rows, cols):
+        """EXPERIMENT: once the rounds stopped, the result's Charbonnier weights.
+
+        From the best candidate's phase (slot rs[17]) at its epsilon (rs[6]). At
+        the end of each chunk of rounds, so after the stop exactly once.
+        """
+        if rs[4] == 0.0:
+            return
+        best = rs[17] != 0.0
+        phase = ph1 if best else ph0
+        wx = wx1 if best else wx0
+        wy = wy1 if best else wy0
+        squared = rs[6] * rs[6]
+        cols_u = u32(cols)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(u32(rows) - U1)
+        n = u32(u32(rows) * cols_u)
+        k = start()
+        step = stride()
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            if j < cm1:
+                e = u32(i * cm1 + j)
+                r = (phase[u32(k + U1)] - phase[k]) - numba.float64(tx[e])
+                wx[e] = T(squared / math.sqrt(_dmul(r, r) + squared)) * cx[e]
+            if i < rm1:
+                r = (phase[u32(k + cols_u)] - phase[k]) - numba.float64(ty[k])
+                wy[k] = T(squared / math.sqrt(_dmul(r, r) + squared)) * cy[k]
+            k = u32(k + step)
+
+    @kernel(A, A, T, A, i64, F64A, U32A, A)
+    def circular_offset(phi, wrapped, tau, out, n, partials, counter, offset):
+        """ADMM: out = wrap(phi - wrapped); offset[0] = its circular mean.
+
+        angle(sum exp(i out)): the offset removed before rounding, in one pass
+        (the exact median's selection takes three for float32).
+        """
+        s_acc = 0.0
+        c_acc = 0.0
+        n_u = u32(n)
+        k = start()
+        step = stride()
+        while k < n_u:
+            v = phi[k] - wrapped[k]
+            v = v - mul(rint(v / tau), tau)
+            out[k] = v
+            s_acc += math.sin(numba.float64(v))
+            c_acc += math.cos(numba.float64(v))
+            k = u32(k + step)
+        last, s_tot, c_tot = _last_block2(s_acc, c_acc, partials, counter)
+        if last and cuda.threadIdx.x == 0:
+            offset[0] = T(math.atan2(s_tot, c_tot))
+
+    @kernel(F64A, F64A, f64)
+    def scale_into(x, out, factor):
+        """out[0] = x[0] * factor (as a node of a captured graph)."""
+        if cuda.threadIdx.x == 0 and cuda.blockIdx.x == 0:
+            out[0] = x[0] * factor
 
     @kernel(A, i64, F64A, U32A, F64A, I32A)
     def mean(x, n, partials, counter, s, f):
