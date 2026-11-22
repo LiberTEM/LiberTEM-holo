@@ -497,7 +497,7 @@ def test_gpu_start_graphs_follow_the_options():
 
 
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
-def test_gpu_kernels_compile_only_their_declared_signatures(dtype):
+def test_gpu_kernels_compile_only_their_declared_signatures(dtype, monkeypatch):
     """Every path launches each kernel with its declared argument types.
 
     So the compile-only tests in `test_cuda_kernels.py`, which compile
@@ -515,6 +515,10 @@ def test_gpu_kernels_compile_only_their_declared_signatures(dtype):
     with_invalid = wave.copy()
     with_invalid[3, 4] = np.nan  # launches `restore_invalid`
     unwrap_phase_irls(with_invalid)
+    with monkeypatch.context() as patch, Workspace() as workspace:
+        # Bands of rows: `admm_update` instead of `admm_update_pixels`
+        patch.setattr(_irls_cupy, "_multiprocessor_count", lambda: 1)
+        unwrap_phase_admm(wave, workspace=workspace)
     for solve, options in (
         (unwrap_phase_irls, IRLSOptions()),
         (unwrap_phase_irls, IRLSOptions(cold_start="least_squares")),
@@ -888,3 +892,16 @@ def test_gpu_invalid_pixels_of_one_input_do_not_stay_for_the_next(solve, input_)
                 err_msg=name,
             )
         assert result.cut_cost == expected.cut_cost
+
+
+@pytest.mark.parametrize("shape", [(70, 300), (37, 41), (16, 600), (300, 33)])
+def test_admm_gpu_bands_of_rows_give_the_cpus_result(shape, monkeypatch):
+    """`admm_update` with many rows per thread (one multiprocessor's worth)."""
+    import cupy as cp  # noqa: PLC0415
+    monkeypatch.setattr(_irls_cupy, "_multiprocessor_count", lambda: 1)
+    _, per = _irls_cupy._admm_shape(*shape)  # noqa: SLF001
+    assert per > 1
+    wrapped = _noisy(shape=shape)
+    with Workspace() as workspace:
+        gpu = unwrap_phase_admm(cp.asarray(wrapped), workspace=workspace)
+    _assert_admm_same(gpu, unwrap_phase_admm(wrapped))

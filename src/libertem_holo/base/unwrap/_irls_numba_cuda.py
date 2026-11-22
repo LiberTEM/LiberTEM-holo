@@ -861,18 +861,104 @@ def _kernels(dtype: np.dtype) -> dict:
         return lam_new, g + z - mul(lam_new, inv_rho)
 
     @kernel(
-        A, i32, A, A, A, A, A, A, A, A, A, i32, i32, i32, i32, F64A, F64A,
+        A, i32, A, A, A, A, A, A, A, A, A, i32, i32, i32, i32, F64A, F64A, i32,
     )
     def admm_update(src, from_fft, gx, gy, cx, cy, lx, ly, lx_new, ly_new, v,
-                    rows, cols, p1, p2, params, rho_):
+                    rows, cols, p1, p2, params, rho_, per):
         """One ADMM step for min sum C huber_delta(grad u - g).
 
         From u (`src`: `phi`, or the inverse FFT's output if `from_fft`), the
-        z- and dual updates on the 4 edges of each pixel (each thread writes the
-        duals of its right and lower edge, into the other buffer), and the
+        z- and dual updates on the edges of each pixel (each thread writes the
+        duals of its right and lower edges, into the other buffer), and the
         right-hand side G^T v of the next u-solve, Makhoul-reordered into
         `v` (the FFT's input). params[0]: epsilon^2 (delta = epsilon, the Huber
         scale); rho_[0]: rho.
+
+        Each thread takes one column of a band of `per` rows (see
+        `_irls_cupy._admm_shape`). Each edge is evaluated once: a thread keeps
+        the value v of the edge below a pixel for the pixel below, and takes the
+        value of the edge to the left from the lane to its left (`shfl`). Only
+        a band's first row and lane 0 evaluate their upper and left edges
+        themselves. A pixel adds up its values in the order of the CPU's
+        `_admm_numba.admm_update`: right, left, lower, upper.
+        """
+        cols_u, rows_u, p1_u, p2_u = u32(cols), u32(rows), u32(p1), u32(p2)
+        cm1 = u32(cols_u - U1)
+        rm1 = u32(rows_u - U1)
+        col_blocks = u32(u32(cols_u + UBLOCK - U1) // UBLOCK)
+        block = u32(cuda.blockIdx.x)
+        band = u32(block // col_blocks)
+        j = u32(u32(block - band * col_blocks) * UBLOCK + u32(cuda.threadIdx.x))
+        lane = u32(cuda.threadIdx.x) & u32(31)
+        i = u32(band * u32(per))
+        end = u32(min(i + u32(per), rows_u))
+        inside = j < cols_u
+        delta = T(math.sqrt(params[0]))
+        rho = T(rho_[0])
+        inv_rho = T(1.0 / rho_[0])
+        u = T(0)
+        upper = T(0)  # v of the edge above the current pixel
+        if inside and i < end:
+            k = u32(i * cols_u + j)
+            u = admm_u(src, from_fft, k, i, j, p1_u, p2_u)
+            if i > U0:
+                e = u32(k - cols_u)
+                grad = u - admm_u(src, from_fft, e, u32(i - U1), j, p1_u, p2_u)
+                _, upper = admm_edge(grad, gy[e], cy[e], ly[e], rho, inv_rho, delta)
+        while i < end:  # the same rows for the whole block
+            k = u32(i * cols_u + j)
+            # right edge (own): k -> k + 1, contributes -v
+            right_u = cuda.shfl_down_sync(FULL_MASK, u, 1)
+            right = T(0)
+            if inside and j < cm1:
+                if lane == u32(31):
+                    right_u = admm_u(src, from_fft, u32(k + U1), i, u32(j + U1),
+                                     p1_u, p2_u)
+                e = u32(i * cm1 + j)
+                lam, right = admm_edge(right_u - u, gx[e], cx[e], lx[e], rho, inv_rho,
+                                       delta)
+                lx_new[e] = lam
+            # left edge: k - 1 -> k, the right edge of the lane to the left
+            left = cuda.shfl_up_sync(FULL_MASK, right, 1)
+            if inside and j > U0 and lane == U0:
+                e = u32(i * cm1 + j - U1)
+                left_u = admm_u(src, from_fft, u32(k - U1), i, u32(j - U1), p1_u, p2_u)
+                grad = u - left_u
+                _, left = admm_edge(grad, gx[e], cx[e], lx[e], rho, inv_rho, delta)
+            # lower edge (own)
+            below_u = T(0)
+            lower = T(0)
+            if inside and i < rm1:
+                below_u = admm_u(src, from_fft, u32(k + cols_u), u32(i + U1), j,
+                                 p1_u, p2_u)
+                lam, lower = admm_edge(below_u - u, gy[k], cy[k], ly[k], rho, inv_rho,
+                                       delta)
+                ly_new[k] = lam
+            if inside:
+                rhs = T(0)
+                if j < cm1:
+                    rhs -= right
+                if j > U0:
+                    rhs += left
+                if i < rm1:
+                    rhs -= lower
+                if i > U0:
+                    rhs += upper
+                v[u32(_reordered(i, p1_u) * p2_u + _reordered(j, p2_u))] = rhs
+            upper = lower
+            u = below_u
+            i = u32(i + U1)
+
+    @kernel(
+        A, i32, A, A, A, A, A, A, A, A, A, i32, i32, i32, i32, F64A, F64A,
+    )
+    def admm_update_pixels(src, from_fft, gx, gy, cx, cy, lx, ly, lx_new, ly_new, v,
+                           rows, cols, p1, p2, params, rho_):
+        """`admm_update` with one pixel per thread, and a grid-stride loop.
+
+        Each edge is evaluated by both of its pixels. Faster than `admm_update`
+        where that would take one row per thread (see `_irls_cupy._admm_shape`):
+        all lanes do work, without shuffles.
         """
         cols_u, p1_u, p2_u = u32(cols), u32(p1), u32(p2)
         cm1 = u32(cols_u - U1)
