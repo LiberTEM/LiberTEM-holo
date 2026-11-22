@@ -1153,12 +1153,7 @@ class CupyWeightedProblem:
             first = True
             unit = self._unit_edges and not self._invalid_pixels()
             while True:
-                key = (first, unit and first)
-                if key not in self._admm_graphs:
-                    self._admm_graphs[key] = self._capture(
-                        lambda: self._admm_chunk(first=True, unit=True),
-                    )
-                self._admm_graphs[key].launch(self.stream)
+                self._admm_graphs[first, unit and first].launch(self.stream)
                 self.stream.synchronize()
                 first = False
                 if state[4]:
@@ -1289,12 +1284,15 @@ class CupyWeightedProblem:
             self._memcpy(self._host_round_state, self.round_state)
             self._memcpy(self._host_round_hist, self.round_hist)
 
-        # By (first chunk, all edge weights 1); the latter is captured when needed:
+        # By (first chunk, all edge weights 1), all captured here: keeping `chunk`
+        # to capture one later would make the problem reference itself, a cycle
+        # that keeps its memory until Python's garbage collector runs.
         self._admm_graphs = {
-            (first, False): self._capture(lambda first=first: chunk(first=first))
-            for first in (True, False)
+            (first, unit): self._capture(
+                lambda first=first, unit=unit: chunk(first=first, unit=unit),
+            )
+            for first, unit in ((True, False), (True, True), (False, False))
         }
-        self._admm_chunk = chunk
         self._admm_key = key
 
     def _enqueue_rho(self, scale: float, *, unit: bool) -> None:

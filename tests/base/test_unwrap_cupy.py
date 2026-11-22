@@ -902,6 +902,40 @@ def test_arrays_on_the_other_device_are_rejected(solve):
         solve(wrapped, prior=gpu_prior)
 
 
+@pytest.fixture
+def without_gc():
+    """Run without Python's garbage collector.
+
+    Memory that a reference cycle keeps alive then shows up at once.
+    """
+    import gc  # noqa: PLC0415
+    gc.collect()
+    gc.disable()
+    yield
+    gc.enable()
+
+
+@pytest.mark.usefixtures("without_gc")
+@pytest.mark.parametrize("solve", [unwrap_phase_irls, unwrap_phase_admm])
+@pytest.mark.parametrize("input_", ["wave", "phase"])
+def test_gpu_problems_are_freed_when_replaced(solve, input_):
+    """A replaced problem is freed at once: no reference cycle keeps it alive."""
+    import weakref  # noqa: PLC0415
+
+    import cupy as cp  # noqa: PLC0415
+
+    from libertem_holo.base.workspace import default_workspace  # noqa: PLC0415
+    data = _wave() if input_ == "wave" else np.angle(_wave())
+    clear_default_workspace()
+    solve(cp.asarray(data))
+    (_, problem), = default_workspace()._entries.values()  # noqa: SLF001
+    replaced = weakref.ref(problem)
+    del problem
+    solve(cp.asarray(data[:-1]))  # another shape
+    assert replaced() is None
+
+
+@pytest.mark.usefixtures("without_gc")
 def test_gpu_default_workspace_holds_one_problem():
     """A solve of another shape (or method) frees the problem and replaces it."""
     import cupy as cp  # noqa: PLC0415
