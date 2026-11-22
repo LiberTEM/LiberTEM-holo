@@ -77,12 +77,12 @@ _DEFER_RZ = True  # r . z, in apply_operator (beta) and cg_update (alpha)
 _DEFER_ALPHA = True  # p . Ap, in cg_update
 _DEFER_RR = True  # r . r, in makhoul_spectrum (the convergence check)
 _DEFER_MAX_GRID = 512
-# ADMM (`admm.ADMMOptions`): the grid of `admm_update` (no reductions, so one
-# pixel per thread), and the rounds per graph launch: 2 up to 512^2 pixels, where
-# a round costs little more than a host round trip (~25 us on a GH200), else 1,
-# since a round after the stop is wasted work.
-_ADMM_GRID = (lambda n: max(1, -(-n // _BLOCK)))  # noqa: E731
+# ADMM (`admm.ADMMOptions`): the rounds per graph launch: 2 up to 512^2 pixels,
+# where a round costs little more than a host round trip (~25 us on a GH200),
+# else 1, since a round after the stop is wasted work.
 _ADMM_CHUNK = (lambda n: 2 if n <= 512 * 512 else 1)  # noqa: E731
+# The most rows that a thread of `admm_update` takes:
+_ADMM_MAX_ROWS = 4
 
 # Indices into the double scalars `s` on the device:
 (_S_NORM, _S_RZ, _S_ALPHA, _S_BETA, _S_MEAN, _S_TURNS, _S_COST, _S_LARGEST, _S_INVALID,
@@ -194,6 +194,21 @@ def _workspace(
             )
 
     return workspace.entry(_SLOT, key, build)
+
+
+def _admm_shape(rows: int, cols: int) -> tuple[int, int]:
+    """Return the grid of `admm_update`, and the rows each of its threads takes.
+
+    A thread takes one column of a band of rows. The fewer bands, the fewer
+    edges are evaluated twice (the upper edges of a band's first row); the bands
+    are as tall as leaves a full GPU of threads, up to `_ADMM_MAX_ROWS` rows (4
+    and 8 were fastest at 2048 x 2048 on a GH200, 1 and 32 about 4 % slower per
+    solve). For one row per thread, `admm_update_pixels` is faster.
+    """
+    col_blocks = -(-cols // _BLOCK)
+    threads = _multiprocessor_count() * _THREADS_PER_SM
+    per = max(1, min(_ADMM_MAX_ROWS, rows * col_blocks * _BLOCK // threads))
+    return col_blocks * -(-rows // per), per
 
 
 def _gpu_padded_length(length: int) -> int:
@@ -341,7 +356,7 @@ class CupyWeightedProblem:
         """Set up the pinned host buffers, the graph caches, and a solve's state."""
         self._host_s = _pinned(self.s.size, np.float64)
         self._host_params = _pinned(3, np.float64)
-        self._admm_graphs: dict[bool, cp.cuda.graph.Graph] = {}
+        self._admm_graphs: dict[tuple[bool, bool], cp.cuda.graph.Graph] = {}
         self._admm_key = None
         self._history_length = 0
         self._graph = None
@@ -351,6 +366,7 @@ class CupyWeightedProblem:
         self._check_weights = False
         # whether _host_s holds the number of invalid pixels:
         self._invalid_on_host = False
+        self._unit_edges = False  # whether the input came without edge weights
         self._staged = None
         self._iterations = 0
 
@@ -406,6 +422,7 @@ class CupyWeightedProblem:
                 unit_edges=edge_weights is None, detect=True,
             )
         self._invalid_on_host = False
+        self._unit_edges = edge_weights is None
         self._iterations = 0
         self._kept = None
         self._staged = None
@@ -421,6 +438,7 @@ class CupyWeightedProblem:
         with self._on_stream():
             self._enqueue_fill_from_wave(wave, floor, percentile)
         self._invalid_on_host = False
+        self._unit_edges = False
         self._check_weights = True
         self._iterations = 0
         self._kept = None
@@ -477,6 +495,7 @@ class CupyWeightedProblem:
 
     def _stage(self, staged: tuple) -> None:
         self._staged = staged
+        self._unit_edges = staged == ("phase", False)
         self._check_weights = False
         self._iterations = 0
         self._kept = None
@@ -1162,8 +1181,14 @@ class CupyWeightedProblem:
             if phi.data.ptr != self.phi.data.ptr:
                 self._memcpy(self.phi, phi)
             first = True
+            unit = self._unit_edges and not self._invalid_pixels()
             while True:
-                self._admm_graphs[first].launch(self.stream)
+                key = (first, unit and first)
+                if key not in self._admm_graphs:
+                    self._admm_graphs[key] = self._capture(
+                        lambda: self._admm_chunk(first=True, unit=True),
+                    )
+                self._admm_graphs[key].launch(self.stream)
                 self.stream.synchronize()
                 first = False
                 if state[4]:
@@ -1199,6 +1224,7 @@ class CupyWeightedProblem:
         rows, cols = self.shape
         with self.stream:
             self.rho = cp.full(1, options.rho_scale / math.pi, dtype=cp.float64)
+            self._one = cp.ones(1, dtype=cp.float64)
             self.lam = tuple(
                 (cp.zeros((rows, cols - 1), dtype=self.dtype),
                  cp.zeros((rows - 1, cols), dtype=self.dtype))
@@ -1215,17 +1241,25 @@ class CupyWeightedProblem:
         (ph0, br0, wx0, wy0), (ph1, br1, wx1, wy1) = self.slots
         spectrum_grid = max(1, min(-(-self.extended.size // self.block), 8 * self.grid))
 
+        update_grid, per = _admm_shape(rows, cols)
+
         def one_round() -> None:
             for it in range(options.iterations_per_round):
                 (lx, ly), (lx_new, ly_new) = self.lam[it % 2], self.lam[1 - it % 2]
-                self._launch(
-                    "admm_update",
-                    (self.extended if it else self.phi, np.int32(it > 0),
-                     self.target_x, self.target_y, self.edge_x, self.edge_y,
-                     lx, ly, lx_new, ly_new, self.fft_input, *dims,
-                     self.round_params, self.rho),
-                    grid=_ADMM_GRID(self.size),
+                args = (
+                    self.extended if it else self.phi, np.int32(it > 0),
+                    self.target_x, self.target_y, self.edge_x, self.edge_y,
+                    lx, ly, lx_new, ly_new, self.fft_input, *dims,
+                    self.round_params, self.rho,
                 )
+                if per > 1:
+                    self._launch(
+                        "admm_update", (*args, np.int32(per)), grid=update_grid,
+                    )
+                else:
+                    self._launch(
+                        "admm_update_pixels", args, grid=-(-self.size // self.block),
+                    )
                 self.plan_forward.fft(
                     self.fft_input, self.spectrum, cufft.CUFFT_FORWARD,
                 )
@@ -1264,21 +1298,11 @@ class CupyWeightedProblem:
                  self.round_state, self.round_hist, self.round_params),
             )
 
-        def chunk(*, first: bool) -> None:
+        def chunk(*, first: bool, unit: bool = False) -> None:
             if first:  # a new solve: its state, rho = scale * median(C) / pi, duals 0
                 self._memcpy(self.round_params, self._host_params)
                 self._memcpy(self.round_state, self._host_round_state)
-                edges = self.edges.size
-                if edges:
-                    self._select(
-                        self.edges, ((edges - 1) // 2, edges // 2), mode=1, t=0.5,
-                    )
-                    self._launch(
-                        "scale_into",
-                        (self.select_out, self.rho,
-                         np.float64(options.rho_scale / math.pi)),
-                        grid=1, block=1,
-                    )
+                self._enqueue_rho(options.rho_scale, unit=unit)
                 for lam in self.lam:
                     for x in lam:
                         cp.cuda.runtime.memsetAsync(
@@ -1295,11 +1319,29 @@ class CupyWeightedProblem:
             self._memcpy(self._host_round_state, self.round_state)
             self._memcpy(self._host_round_hist, self.round_hist)
 
+        # By (first chunk, all edge weights 1); the latter is captured when needed:
         self._admm_graphs = {
-            first: self._capture(lambda first=first: chunk(first=first))
+            (first, False): self._capture(lambda first=first: chunk(first=first))
             for first in (True, False)
         }
+        self._admm_chunk = chunk
         self._admm_key = key
+
+    def _enqueue_rho(self, scale: float, *, unit: bool) -> None:
+        """Enqueue rho = scale * median(C) / pi, as `admm._rho`.
+
+        With `unit`, all edge weights are 1, and so is their median.
+        """
+        edges = self.edges.size
+        if unit or not edges:
+            median = self._one
+        else:
+            self._select(self.edges, ((edges - 1) // 2, edges // 2), mode=1, t=0.5)
+            median = self.select_out
+        self._launch(
+            "scale_into", (median, self.rho, np.float64(scale / math.pi)),
+            grid=1, block=1,
+        )
 
     def _slot_of(self, candidate: _Candidate) -> int | None:
         for index, slot in enumerate(self.slots):
