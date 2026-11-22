@@ -1,24 +1,24 @@
 # Dev container
 
-Ubuntu 26.04 with uv, Python 3.10–3.14, neovim, Claude Code and the Nsight profilers. The editable dev
-install (`.venv`, with `cupy-cuda13x` and the pip `cuda-toolkit`) is set up on first
-start by `post-create.sh`. The GPU is passed through if the host has the NVIDIA
-container toolkit, and is optional otherwise. Works on amd64 and arm64 hosts.
+Ubuntu 26.04 with uv, Python 3.10–3.14, neovim, Claude Code and the Nsight
+profilers, on amd64 and arm64 hosts. When the container is created, `post-create.sh`
+sets up the editable dev install in `.venv`, with `cupy-cuda13x` and the CUDA toolkit
+from pip. The GPU is passed through if the host has the NVIDIA container toolkit;
+otherwise the container starts without a GPU.
 
-`.venv`, `.tox`, `~/.claude`, `~/.cache` and the neovim plugin dir live in docker
-volumes. They are kept separate from the host checkout and survive container rebuilds.
+`.venv`, `.tox`, `~/.claude`, `~/.cache` and the neovim plugin directory are Docker
+volumes: they stay out of the host checkout and survive container rebuilds.
 
 ## VS Code
 
 Install the "Dev Containers" extension, open the repo and run
-"Dev Containers: Reopen in Container". For a remote GPU box, connect with Remote-SSH
+"Dev Containers: Reopen in Container". For a remote GPU machine, connect with Remote-SSH
 first.
 
 ## neovim / terminal
 
-Use the [devcontainer CLI](https://github.com/devcontainers/cli) (needs node; if you
-don't have it, `uvx --from nodejs-wheel npx -y @devcontainers/cli ...` works without
-installing anything):
+Use the [devcontainer CLI](https://github.com/devcontainers/cli). It needs Node.js;
+without it, run the CLI as `uvx --from nodejs-wheel npx -y @devcontainers/cli ...`:
 
 ```sh
 devcontainer up --workspace-folder .
@@ -59,11 +59,12 @@ Host settings that limit profiling inside the container:
 - `ncu` needs access to the GPU performance counters. If it fails with
   `ERR_NVGPUCTRPERM`, the host driver restricts them to admin users
   (`RmProfilingAdminOnly: 1` in `/proc/driver/nvidia/params`). Either allow it on the
-  host (`options nvidia NVreg_RestrictProfilingToAdminUsers=0`) or add
+  host (`options nvidia NVreg_RestrictProfilingToAdminUsers=0` in `/etc/modprobe.d/`) or add
   `"--cap-add=SYS_ADMIN"` to `runArgs` in `devcontainer.json`.
 
 ## Test data
 
 To run the data tests, add a bind mount and set `TESTDATA_BASE_PATH`, e.g. with
 `--mount "type=bind,source=/path/to/data,target=/data"` on `devcontainer up`, then
-`TESTDATA_BASE_PATH=/data tox -e py314-data` (see `CLAUDE.md`).
+`TESTDATA_BASE_PATH=/data uvx --with tox-uv --python=3.14 tox -e py314-data` (see
+`CLAUDE.md`).

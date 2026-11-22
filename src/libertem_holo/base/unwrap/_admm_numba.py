@@ -1,9 +1,11 @@
 """Fused, row-parallel CPU kernels for the ADMM phase unwrapping.
 
-The same arithmetic, in the same order, as the numba CUDA kernels of the same
-names in `_irls_numba_cuda` (products are not fused into multiply-adds on either
-side), so the CPU and the GPU solver differ only by the rounding of their cosine
-transforms and the summation order of the offset's sums.
+The same arithmetic, in the same order, as the numba CUDA kernels in
+`_irls_numba_cuda`: `_edge` as `admm_edge`, `admm_update` and `admm_update_rows`
+as `admm_update`, `circular_sums` as `circular_offset`, `weights_from_phase` as
+`admm_weights` (products are not fused into multiply-adds on either side). So
+the CPU and the GPU solver differ only by the rounding of their cosine transforms
+and the summation order of the offset's sums.
 
 All arrays are 2D and C-contiguous. Horizontal edges have shape
 :code:`(rows, cols - 1)`, vertical edges :code:`(rows - 1, cols)`.
@@ -60,6 +62,7 @@ def admm_update(
     The z- and dual updates on the 4 edges of each pixel (each pixel writes the
     duals of its right and lower edge, into the other buffer: rows run in
     parallel), and the right-hand side G^T v of the next u-solve into `rhs`.
+    `delta` is epsilon, the Huber scale.
     """
     rows, cols = u.shape
     t = u.dtype.type
@@ -99,7 +102,10 @@ def circular_sums(
     row_sin: np.ndarray,
     row_cos: np.ndarray,
 ) -> None:
-    """Rows of the sums of sin and cos of wrap(phi - wrapped), in float64."""
+    """Sum sin and cos of wrap(phi - wrapped) per row, in float64.
+
+    Into `row_sin` and `row_cos`.
+    """
     rows, cols = phi.shape
     tau_t = phi.dtype.type(tau)
     for i in numba.prange(rows):
@@ -168,9 +174,9 @@ def admm_update_rows(
 ) -> None:
     """:func:`admm_update`, with each edge evaluated once (identical results).
 
-    Threads take `blocks` blocks of rows, and keep the values v of the lower
-    edges of the row before in a buffer: a block evaluates the edges above its
-    first row again, all others once.
+    The rows are split into `blocks` blocks, which run in parallel. Each keeps the
+    values v of the previous row's lower edges in a buffer, so only the edges
+    above a block's first row are evaluated twice.
     """
     rows, cols = u.shape
     t = u.dtype.type

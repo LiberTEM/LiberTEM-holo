@@ -1,6 +1,6 @@
 """Phase unwrapping by ADMM: weighted L1 (Huber) minimization with cosine transforms.
 
-EXPERIMENT. An alternative to :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`
+An alternative to :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`
 with the same inputs, results and stop rule: see :func:`unwrap_phase_admm`.
 """
 from __future__ import annotations
@@ -27,6 +27,8 @@ from .irls import (
 )
 
 if TYPE_CHECKING:
+    from libertem_holo.base.workspace import Workspace
+
     from .irls import IRLSOptions
 
 
@@ -37,11 +39,11 @@ class ADMMOptions:
     Parameters
     ----------
     rounds
-        Maximum number of rounds. The smoothing scale reaches
-        :code:`epsilon_min` in the last of them.
+        Maximum number of rounds. Epsilon decays geometrically from
+        :code:`epsilon_start` to :code:`epsilon_min` over them.
     iterations_per_round
-        ADMM iterations per round (even). After each round, the iterate is
-        rounded onto the branches and scored.
+        Number of ADMM iterations per round, an even number. After each round,
+        the iterate is rounded onto the branches and scored.
     epsilon_start
         The Huber scale (in radians) of the first round: gradient residuals well
         below it are smoothed quadratically, larger ones count linearly.
@@ -142,12 +144,15 @@ class _AdmmProblem(_WeightedProblem):
         workers: int | None,
         edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
         options: ADMMOptions | None = None,
+        *,
+        invalid: np.ndarray | None = None,
     ) -> None:
         # The u-step must solve its least-squares problem exactly: on a padded
         # grid, the padding's edges would pull on the result.
-        super().__init__(wrapped, workers, edge_weights, pad=False)
+        super().__init__(wrapped, workers, edge_weights, pad=False, invalid=invalid)
         options = options or ADMMOptions()
-        self.rho = _rho(None if edge_weights is None else self.edges, options.rho_scale)
+        all_ones = edge_weights is None and invalid is None
+        self.rho = _rho(None if all_ones else self.edges, options.rho_scale)
         rows, cols = wrapped.shape
         self.duals = tuple(
             (np.zeros((rows, cols - 1), dtype=wrapped.dtype),
@@ -187,12 +192,16 @@ class _AdmmProblem(_WeightedProblem):
         options: IRLSOptions | ADMMOptions,
         index: int,
     ) -> tuple[L1Round, _Candidate]:
-        """Run one round of ADMM iterations on `phi` (in place); its candidate."""
+        """Run one round of ADMM iterations on `phi` (in place).
+
+        Returns the round's report and its candidate result.
+        """
         if index == 0:  # a new solve: the duals start at zero
             for lam in self.duals:
                 for x in lam:
                     x[...] = 0
-        # As the GPU, which gets epsilon squared (in `round_params`):
+        # From epsilon squared, as on the GPU (which gets it in `round_params`),
+        # so that both use the same delta:
         delta = phi.dtype.type(math.sqrt(epsilon * epsilon))
         u = phi
         workers = self.precondition.workers
@@ -231,8 +240,8 @@ class _AdmmProblem(_WeightedProblem):
     def release(self, candidate: _Candidate) -> _Candidate:
         """Return the result: a round's candidate gets its weights here.
 
-        The Charbonnier weights of its phase at its epsilon, as the GPU computes
-        them for the selected candidate.
+        The edge weights times the Charbonnier weights of its phase at its
+        epsilon, as the GPU computes them for the selected candidate.
         """
         if candidate.weights_x is None:
             candidate.weights_x = np.empty_like(self.weights_x)
@@ -252,10 +261,11 @@ def unwrap_phase_admm(
     options: ADMMOptions | None = None,
     workers: int | None = None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
+    workspace: Workspace | None = None,
 ) -> L1Result:
     r"""Unwrap a 2D phase by ADMM on a weighted, smoothed L1 objective.
 
-    EXPERIMENT. The same inputs and result as
+    The same inputs and result as
     :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`, which describes them,
     and the same objective: the weighted sum :math:`\sum C |r|` of the gradient
     residuals :math:`r` of the result, smoothed by a Huber function of scale
@@ -265,17 +275,16 @@ def unwrap_phase_admm(
     into edge variables :math:`z = \nabla u - g`. An iteration is an unweighted
     least-squares fit of :math:`u` to the edge targets (one Neumann Poisson solve,
     a pair of cosine transforms), the proximal step of the Huber function for
-    :math:`z` (elementwise; the weights only enter here), and a dual update. This
-    follows B. Rouet-Leduc and C. Hulbert, "Phase Unwrapping in Seconds: A
+    :math:`z` (elementwise; the edge weights only enter here), and a dual update.
+    This follows B. Rouet-Leduc and C. Hulbert, "Phase Unwrapping in Seconds: A
     Spectral ADMM Algorithm for Large-Scale InSAR", Remote Sensing 18, 1801
-    (2026), https://doi.org/10.3390/rs18111801, with the Huber smoothing, the
-    zero start, and the rounds and stop rule of
+    (2026), https://doi.org/10.3390/rs18111801. Added here are the Huber
+    smoothing, and the zero start, rounds and stop rule of
     :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`. Results are close to
     those of IRLS, at a fraction of its iterations.
 
-    The rounds' reports carry the number of iterations; there are no CG
-    residuals. The status is :code:`"converged"` unless the solve ran all
-    :code:`rounds`.
+    The rounds' reports carry the number of iterations, but no CG residuals.
+    The status is :code:`"converged"` unless the solve ran all :code:`rounds`.
 
     Examples
     --------
@@ -291,6 +300,7 @@ def unwrap_phase_admm(
     """
     return _run(
         wrapped, prior, _check_options(options, ADMMOptions), workers, edge_weights,
+        workspace=workspace,
     )
 
 

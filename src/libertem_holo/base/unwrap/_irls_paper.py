@@ -137,7 +137,7 @@ class PaperResult:
         :attr:`unwrapped` rounded onto the branches of the input, like the
         result of :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`.
     cut_turns, cut_cost
-        Cut count and edge-weighted cut cost of :attr:`phase`, as in
+        Cut turns and cut cost of :attr:`phase`, as in
         :class:`~libertem_holo.base.unwrap.L1Result`.
     slack_x, slack_y
         The slack variables :math:`V^h` and :math:`V^v`.
@@ -295,7 +295,7 @@ def _cuts(
     wrapped: np.ndarray,
     edge_weights: tuple[np.ndarray, np.ndarray],
 ) -> tuple[int, float]:
-    """Cut count and edge-weighted cut cost of `wrapped + 2π branches`."""
+    """Return the cut turns and the cut cost of `wrapped + 2π branches`."""
     turns = 0
     cost = 0.0
     for axis, weights in ((1, edge_weights[0]), (0, edge_weights[1])):
@@ -371,7 +371,7 @@ def unwrap_phase_irls_paper(
         )
         x[0][...] -= x[0].mean()
         # Section 4.3: the relative improvement of the objective by the weight
-        # update decides about the next CG budget, and about stopping.
+        # update decides the next CG budget, and whether to stop.
         before = system.objective(x, weights)
         weights = system.irls_weights(x)
         after = system.objective(x, weights)

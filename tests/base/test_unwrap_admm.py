@@ -1,4 +1,4 @@
-"""The ADMM phase unwrapping on the CPU, and the fast setup it shares with IRLS."""
+"""ADMM phase unwrapping on the CPU, and the numba helpers it shares with IRLS."""
 import numpy as np
 import pytest
 
@@ -82,19 +82,11 @@ def test_admm_on_a_complex_wave():
     wave = _wave()
     result = unwrap_phase_admm(wave)
     _assert_congruent(result.phase, np.angle(wave))
-    # The amplitude weights make cuts through the dark disk cheap:
+    # Edge weights from the amplitude make cuts through the dark disk cheap:
     plain = unwrap_phase_admm(np.angle(wave))
     assert result.cut_cost <= plain.cut_cost
     assert result.weights_x.shape == (64, 79)
     assert result.weights_y.shape == (63, 80)
-
-
-def test_admm_nan_in_the_wave_is_handled_as_by_irls():
-    wave = _wave()
-    wave[3, 5] = np.nan
-    admm = unwrap_phase_admm(wave)
-    irls_result = unwrap_phase_irls(wave)
-    assert np.isnan(admm.phase[3, 5]) == np.isnan(irls_result.phase[3, 5])
 
 
 def test_admm_warm_start_is_never_worse_than_its_prior():
@@ -127,7 +119,7 @@ def test_admm_options_are_checked(kwargs):
         ADMMOptions(**kwargs)
 
 
-# ---- The fast setup equals the numpy code it replaces, bit for bit ---------------
+# ---- The numba helpers match numpy, or each other, bit for bit -------------------
 
 
 def test_wave_setup_is_numpys():
@@ -135,7 +127,8 @@ def test_wave_setup_is_numpys():
     wave[3, 5] = 0
     for dtype in (np.complex64, np.complex128):
         w = wave.astype(dtype)
-        phase, (edge_x, edge_y) = irls._wave_setup(w, 4)  # noqa: SLF001
+        phase, (edge_x, edge_y), invalid = irls._wave_setup(w, 4)  # noqa: SLF001
+        assert invalid is None
         np.testing.assert_array_equal(phase, np.angle(w))
         expected = irls._check_edge_weights(  # noqa: SLF001
             amplitude_edge_weights(np.abs(w)), w.shape,

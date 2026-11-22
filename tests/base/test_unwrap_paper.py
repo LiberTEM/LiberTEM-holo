@@ -26,7 +26,7 @@ def _difference_matrix(n: int) -> np.ndarray:
 
 
 def test_cosine_transforms_solve_the_papers_sylvester_equation():
-    """The U block of the preconditioner (eq. 26-31) by eigendecompositions."""
+    """The cosine transforms give the paper's U block of the preconditioner (26-31)."""
     rows, cols = 7, 5
     rng = np.random.default_rng(0)
     r = rng.normal(size=(rows, cols))

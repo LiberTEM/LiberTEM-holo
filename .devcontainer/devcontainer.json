@@ -10,7 +10,7 @@
         "gpu": "optional"
     },
     "runArgs": [
-        // LiberTEM / dask use shared memory, docker's default of 64 MB is too small
+        // LiberTEM and dask use shared memory; Docker's default of 64 MB is too small
         "--shm-size=4g"
     ],
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/LiberTEM-holo,type=bind",
