@@ -863,3 +863,28 @@ def test_gpu_workspace_must_be_a_workspace():
     import cupy as cp  # noqa: PLC0415
     with pytest.raises(TypeError, match="workspace must be a Workspace"):
         unwrap_phase_admm(cp.zeros((4, 5)), workspace={})
+
+
+@pytest.mark.parametrize("solve", [unwrap_phase_irls, unwrap_phase_admm])
+@pytest.mark.parametrize("input_", ["wave", "phase"])
+def test_gpu_invalid_pixels_of_one_input_do_not_stay_for_the_next(solve, input_):
+    """Solves in one workspace with other invalid pixels, or none, in turn."""
+    import cupy as cp  # noqa: PLC0415
+    sequence = ["hole", "pixel", None, "border", None, "hole"]
+    inputs = []
+    for kind in sequence:
+        wave = _wave() if kind is None else _with_invalid(_wave(), kind)
+        if input_ == "phase":
+            wave = np.where(np.isfinite(wave), np.angle(wave), np.nan)
+        inputs.append(cp.asarray(wave))
+    with Workspace() as shared:
+        in_turn = [solve(data, workspace=shared) for data in inputs]
+    for data, result in zip(inputs, in_turn, strict=True):
+        with Workspace() as fresh:
+            expected = solve(data, workspace=fresh)
+        for name in ("phase", "branches", "weights_x", "weights_y"):
+            np.testing.assert_array_equal(
+                getattr(result, name).get(), getattr(expected, name).get(),
+                err_msg=name,
+            )
+        assert result.cut_cost == expected.cut_cost
