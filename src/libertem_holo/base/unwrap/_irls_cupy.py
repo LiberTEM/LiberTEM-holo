@@ -86,7 +86,7 @@ _ADMM_CHUNK = (lambda n: 2 if n <= 512 * 512 else 1)  # noqa: E731
 
 # Indices into the double scalars `s` on the device:
 (_S_NORM, _S_RZ, _S_ALPHA, _S_BETA, _S_MEAN, _S_TURNS, _S_COST, _S_LARGEST, _S_INVALID,
- _S_INVALID_PIXELS) = range(10)
+ _S_INVALID_PIXELS, _S_MASK_SET) = range(11)
 # Indices into the int flags `f` on the device:
 _F_DONE, _F_ITER, _F_ITERATED, _F_ZERO, _F_PENDING = range(5)
 
@@ -466,7 +466,10 @@ class CupyWeightedProblem:
     ) -> None:
         """Copy the wrapped phase (and the edge weights, if given) into the problem."""
         with self._on_stream():
-            self._memcpy(self.wrapped, cp.ascontiguousarray(wrapped, dtype=self.dtype))
+            # Into `difference`: `prepare_targets` reads it, and writes `wrapped`.
+            self._memcpy(
+                self.difference, cp.ascontiguousarray(wrapped, dtype=self.dtype),
+            )
             if edge_weights is not None:
                 self.edge_x[...] = edge_weights[0]
                 self.edge_y[...] = edge_weights[1]
@@ -585,7 +588,10 @@ class CupyWeightedProblem:
             if staged[1]:
                 self._memcpy(self.weights_x, self.edge_x)
                 self._memcpy(self.weights_y, self.edge_y)
-            self._prepare_targets(self.wrapped, unit_edges=not staged[1], detect=True)
+            # Staged in `difference`, which is free until the first `congruent`:
+            self._prepare_targets(
+                self.difference, unit_edges=not staged[1], detect=True,
+            )
         phase, branches, weights_x, weights_y = self.slots[0]
 
         def candidate(phi: cp.ndarray) -> None:
@@ -644,6 +650,10 @@ class CupyWeightedProblem:
         self, wrapped: cp.ndarray, *, unit_edges: bool, detect: bool,
     ) -> None:
         """Enqueue the targets; with `detect`, find the invalid pixels of `wrapped`."""
+        if detect and wrapped.data.ptr == self.wrapped.data.ptr:
+            # `prepare_targets` must not find them in the array it zeroes them in:
+            self._memcpy(self.difference, wrapped)
+            wrapped = self.difference
         rows, cols = self.shape
         self._launch(
             "prepare_targets",
@@ -653,11 +663,6 @@ class CupyWeightedProblem:
              np.int32(detect), np.float64(_INVALID_EDGE_WEIGHT), self.partials,
              self.counter, self.s),
         )
-        if detect:
-            self._launch(
-                "zero_invalid",
-                (self.wrapped, self.invalid, self.s, np.int64(self.size)),
-            )
 
     # -- launches ------------------------------------------------------------
 
@@ -700,7 +705,7 @@ class CupyWeightedProblem:
 
     def _allocate_scalars(self) -> None:
         """Allocate the device scalars, flags, and partial sums of reductions."""
-        self.s = cp.zeros(10, dtype=cp.float64)
+        self.s = cp.zeros(11, dtype=cp.float64)
         self.f = cp.zeros(5, dtype=cp.int32)
         # Flags that are never set, for unconditional launches:
         self.f_free = cp.zeros(5, dtype=cp.int32)

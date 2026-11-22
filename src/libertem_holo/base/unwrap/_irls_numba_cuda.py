@@ -80,9 +80,10 @@ FULL_MASK = 0xFFFFFFFF
 # `crop` has yet to count that iteration.
 F_DONE, F_ITER, F_ITERATED, F_ZERO, F_PENDING = range(5)
 # S_INVALID: the number of edges whose weight is not finite and positive;
-# S_INVALID_PIXELS: the number of invalid pixels (input not finite).
+# S_INVALID_PIXELS: the number of invalid pixels (input not finite); S_MASK_SET: 1
+# if the mask of invalid pixels has any set (see `prepare_targets`).
 (S_NORM, S_RZ, S_ALPHA, S_BETA, S_MEAN, S_TURNS, S_COST, S_LARGEST, S_INVALID,
- S_INVALID_PIXELS) = range(10)
+ S_INVALID_PIXELS, S_MASK_SET) = range(11)
 
 u32 = numba.uint32
 u64 = numba.uint64
@@ -958,29 +959,17 @@ def _kernels(dtype: np.dtype) -> dict:
         if rs[4] != 0.0:
             return
         br = br1 if rs[16] != 0.0 else br0
-        turns = 0.0
-        cost = 0.0
         cols_u = u32(cols)
         cm1 = u32(cols_u - U1)
         rm1 = u32(u32(rows) - U1)
         n = u32(u32(rows) * cols_u)
         k = start()
         step = stride()
-        masked = s[S_INVALID_PIXELS] > 0.0
-        while k < n:
-            i = u32(k // cols_u)
-            j = u32(k - i * cols_u)
-            here = masked and invalid[k] != 0
-            if j < cm1 and not (here or (masked and invalid[u32(k + U1)] != 0)):
-                e = u32(i * cm1 + j)
-                t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
-                turns += t
-                cost += _dmul(numba.float64(t), numba.float64(cx[e]))
-            if i < rm1 and not (here or (masked and invalid[u32(k + cols_u)] != 0)):
-                t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
-                turns += t
-                cost += _dmul(numba.float64(t), numba.float64(cy[k]))
-            k = u32(k + step)
+        if s[S_INVALID_PIXELS] > 0.0:
+            turns, cost = cut_sums_masked(br, jx, jy, cx, cy, invalid, cols_u, cm1,
+                                          rm1, n, k, step)
+        else:
+            turns, cost = cut_sums(br, jx, jy, cx, cy, cols_u, cm1, rm1, n, k, step)
         last, turns, cost = _last_block2(turns, cost, partials, counter)
         if not (last and cuda.threadIdx.x == 0):
             return
@@ -1163,6 +1152,47 @@ def _kernels(dtype: np.dtype) -> dict:
             phase[k] = numba.float64(wrapped[k]) + turns
             k = u32(k + step)
 
+    @cuda.jit(device=True, inline=True)
+    def cut_sums(br, jx, jy, cx, cy, cols_u, cm1, rm1, n, k, step):
+        """Return this thread's sums of the cut turns and their cost, over all edges."""
+        turns = 0.0
+        cost = 0.0
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            if j < cm1:
+                e = u32(i * cm1 + j)
+                t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cx[e]))
+            if i < rm1:
+                t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cy[k]))
+            k = u32(k + step)
+        return turns, cost
+
+    @cuda.jit(device=True, inline=True)
+    def cut_sums_masked(br, jx, jy, cx, cy, invalid, cols_u, cm1, rm1, n, k, step):
+        """`cut_sums` without the edges that touch an invalid pixel."""
+        turns = 0.0
+        cost = 0.0
+        while k < n:
+            i = u32(k // cols_u)
+            j = u32(k - i * cols_u)
+            here = invalid[k] != 0
+            if j < cm1 and not (here or invalid[u32(k + U1)] != 0):
+                e = u32(i * cm1 + j)
+                t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cx[e]))
+            if i < rm1 and not (here or invalid[u32(k + cols_u)] != 0):
+                t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
+                turns += t
+                cost += _dmul(numba.float64(t), numba.float64(cy[k]))
+            k = u32(k + step)
+        return turns, cost
+
     @kernel(I32A, I32A, I32A, A, A, U8A, i32, i32, F64A, U32A, F64A)
     def cuts(br, jx, jy, cx, cy, invalid, rows, cols, partials, counter, s):
         """Sum the cut turns |jumps + diff(branches)| and their cut cost.
@@ -1171,29 +1201,17 @@ def _kernels(dtype: np.dtype) -> dict:
         s[S_TURNS] and s[S_COST] over all edges except those that touch an invalid
         pixel (if s[S_INVALID_PIXELS] > 0).
         """
-        turns = 0.0
-        cost = 0.0
         cols_u = u32(cols)
         cm1 = u32(cols_u - U1)
         rm1 = u32(u32(rows) - U1)
         n = u32(u32(rows) * cols_u)
         k = start()
         step = stride()
-        masked = s[S_INVALID_PIXELS] > 0.0
-        while k < n:
-            i = u32(k // cols_u)
-            j = u32(k - i * cols_u)
-            here = masked and invalid[k] != 0
-            if j < cm1 and not (here or (masked and invalid[u32(k + U1)] != 0)):
-                e = u32(i * cm1 + j)
-                t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
-                turns += t
-                cost += _dmul(numba.float64(t), numba.float64(cx[e]))
-            if i < rm1 and not (here or (masked and invalid[u32(k + cols_u)] != 0)):
-                t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
-                turns += t
-                cost += _dmul(numba.float64(t), numba.float64(cy[k]))
-            k = u32(k + step)
+        if s[S_INVALID_PIXELS] > 0.0:
+            turns, cost = cut_sums_masked(br, jx, jy, cx, cy, invalid, cols_u, cm1,
+                                          rm1, n, k, step)
+        else:
+            turns, cost = cut_sums(br, jx, jy, cx, cy, cols_u, cm1, rm1, n, k, step)
         last, t0, t1 = _last_block2(turns, cost, partials, counter)
         if last and cuda.threadIdx.x == 0:
             s[S_TURNS] = t0
@@ -1324,14 +1342,15 @@ def _kernels(dtype: np.dtype) -> dict:
                         s):
         """Copy the wrapped phase, and compute the targets and their jumps.
 
-        `in_` may be `wrapped`. As `_WeightedProblem`: the wrapped target gradients
-        g = d - rint(d / tau) tau and their whole-turn jumps rint((d - g) / tau),
-        in T. With `unit_edges`, also C = w = 1 on every edge. With `detect`, the
-        pixels of `in_` that are not finite are invalid: 1 in `invalid` (0
-        elsewhere), their number in s[S_INVALID_PIXELS], C = w = invalid_weight on
-        the edges that touch them, and 0 as their value in the targets. They are
-        left as they are in `wrapped` (other threads may read them from there,
-        if `in_` is `wrapped`): `zero_invalid` sets them to 0 next.
+        `in_` may be `wrapped` without `detect`. As `_WeightedProblem`: the
+        wrapped target gradients g = d - rint(d / tau) tau and their whole-turn
+        jumps rint((d - g) / tau), in T. With `unit_edges`, also C = w = 1 on
+        every edge. With `detect`, the pixels of `in_` that are not finite are
+        invalid: 1 in `invalid` (0 elsewhere), their number in
+        s[S_INVALID_PIXELS], C = w = invalid_weight on the edges that touch
+        them, and 0 in `wrapped` and the targets. The mask is only cleared where
+        an earlier input set it (s[S_MASK_SET]): without invalid pixels, it is
+        not written.
         """
         tau = T(6.283185307179586)
         cols_u = u32(cols)
@@ -1339,6 +1358,7 @@ def _kernels(dtype: np.dtype) -> dict:
         rm1 = u32(u32(rows) - U1)
         n = u32(u32(rows) * cols_u)
         count = 0.0
+        mask_set = detect and s[S_MASK_SET] > 0.0
         k = start()
         step = stride()
         while k < n:
@@ -1351,9 +1371,10 @@ def _kernels(dtype: np.dtype) -> dict:
                 if bad:
                     c = T(0)
                     count += 1.0
-                invalid[k] = numba.uint8(1) if bad else numba.uint8(0)
-            if not bad:
-                wrapped[k] = c
+                    invalid[k] = numba.uint8(1)
+                elif mask_set:
+                    invalid[k] = numba.uint8(0)
+            wrapped[k] = c
             if j < cm1:
                 e = u32(i * cm1 + j)
                 other = in_[u32(k + U1)]
@@ -1390,19 +1411,7 @@ def _kernels(dtype: np.dtype) -> dict:
             last, total = _last_block(count, partials, counter)
             if last and cuda.threadIdx.x == 0:
                 s[S_INVALID_PIXELS] = total
-
-    @kernel(A, U8A, F64A, i64)
-    def zero_invalid(wrapped, invalid, s, n):
-        """Set the invalid pixels of `wrapped` to 0, after `prepare_targets`."""
-        if s[S_INVALID_PIXELS] == 0.0:
-            return
-        n_u = u32(n)
-        k = start()
-        step = stride()
-        while k < n_u:
-            if invalid[k] != 0:
-                wrapped[k] = T(0)
-            k = u32(k + step)
+                s[S_MASK_SET] = 1.0 if total > 0.0 else 0.0
 
     @kernel(U8A, F64A, I32A, i64)
     def restore_invalid(invalid, phase, branches, n):
@@ -1445,11 +1454,13 @@ def _kernels(dtype: np.dtype) -> dict:
         """Compute phase and amplitude of a complex wave, as cupy's angle and abs.
 
         Pixels whose amplitude is not finite are invalid: phase 0, amplitude +inf
-        (above all valid ones), 1 in `invalid` (0 elsewhere), and their number
-        into s[S_INVALID_PIXELS]. The last block also sets the ranks of the q-th
-        percentile of the valid amplitudes (`percentile_ranks`).
+        (above all valid ones), 1 in `invalid` (0 elsewhere, written as in
+        `prepare_targets`), and their number into s[S_INVALID_PIXELS]. The last
+        block also sets the ranks of the q-th percentile of the valid amplitudes
+        (`percentile_ranks`).
         """
         count = 0.0
+        mask_set = s[S_MASK_SET] > 0.0
         n_u = u32(n)
         k = start()
         step = stride()
@@ -1459,7 +1470,8 @@ def _kernels(dtype: np.dtype) -> dict:
             if math.isfinite(a):
                 phase[k] = math.atan2(z.imag, z.real)
                 amplitude[k] = a
-                invalid[k] = numba.uint8(0)
+                if mask_set:
+                    invalid[k] = numba.uint8(0)
             else:
                 phase[k] = T(0)
                 amplitude[k] = T(math.inf)
@@ -1469,6 +1481,7 @@ def _kernels(dtype: np.dtype) -> dict:
         last, total = _last_block(count, partials, counter)
         if last and cuda.threadIdx.x == 0:
             s[S_INVALID_PIXELS] = total
+            s[S_MASK_SET] = 1.0 if total > 0.0 else 0.0
             percentile_ranks(total, numba.int64(n), q, st, out_d)
 
     @kernel(A, U8A, F64A, f64, f64, i32, i32, i32, F64A, U32A, F64A, A, A, A, A)
