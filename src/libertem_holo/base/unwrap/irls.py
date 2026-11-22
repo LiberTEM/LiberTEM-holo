@@ -1459,15 +1459,14 @@ def _unwrap(
         # The input is only staged; the start (setup, starting point, first
         # candidate) then runs as one CUDA graph:
         problem = problem_for_wave(
-            wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE, deferred=True,
+            wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE,
             method=options.method, workspace=workspace,
         )
         wrapped = problem.wrapped
     else:
         from ._irls_cupy import problem_for  # noqa: PLC0415
         problem = problem_for(
-            wrapped, edge_weights, deferred=True, method=options.method,
-            workspace=workspace,
+            wrapped, edge_weights, method=options.method, workspace=workspace,
         )
         wrapped = problem.wrapped
 

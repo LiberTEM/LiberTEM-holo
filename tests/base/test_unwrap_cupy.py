@@ -276,37 +276,33 @@ def _late_copy(src: cp.ndarray) -> cp.ndarray:
     return dst
 
 
-def test_irls_gpu_orders_its_stream_with_the_callers():
+@pytest.mark.parametrize("solve", [unwrap_phase_irls, unwrap_phase_admm])
+def test_gpu_solves_order_their_stream_with_the_callers(solve):
     """Inputs the caller frees at once, and results it reads on its own stream.
 
-    The problem works on a stream of its own and returns without synchronizing.
-    Memory the caller frees goes back to the pool of the caller's stream and must
-    not be reused there before the problem's stream has read it; results must be
-    complete before the caller's stream reads them.
+    A solve works on a stream of its own. Memory the caller frees goes back to
+    the pool of the caller's stream and must not be reused there before the
+    solve's stream has read it; results must be complete before the caller's
+    stream reads them.
     """
     import cupy as cp  # noqa: PLC0415
-
-    from libertem_holo.base.unwrap import irls  # noqa: PLC0415
-    from libertem_holo.base.unwrap._irls_cupy import problem_for  # noqa: PLC0415
-    rng = np.random.default_rng(7)
-    shape = (300, 280)
-    wrapped = _wrap(rng.normal(scale=2, size=shape))
-    cpu = irls._WeightedProblem(wrapped, workers=1)  # noqa: SLF001
-    gpu = problem_for(cp.asarray(wrapped), None)
-    for epsilon, late in ((0.3, False), (0.1, True), (0.03, False), (0.01, True)):
-        phi = rng.normal(size=shape)
-        cpu.reweight(phi, epsilon)
-        # An input that is freed at once, and maybe still being computed on the
-        # caller's stream:
-        pending = cp.asarray(phi)
-        if late:
-            pending = _late_copy(pending)
-        gpu.reweight(pending, epsilon)
-        del pending
-        junk = [cp.full(shape, np.nan) for _ in range(8)]
-        weights = gpu.weights_x + 0  # on the caller's stream
-        del junk
-        np.testing.assert_array_equal(weights.get(), cpu.weights_x)
+    fields = [_noisy(shape=(300, 280), seed=seed) for seed in range(4)]
+    expected = [solve(field).branches for field in fields]
+    with cp.cuda.Stream(non_blocking=True):
+        for field, branches, late in zip(
+            fields, expected, (False, True, False, True), strict=True,
+        ):
+            # An input that is freed at once, and maybe still being computed on
+            # the caller's stream:
+            pending = cp.asarray(field)
+            if late:
+                pending = _late_copy(pending)
+            result = solve(pending)
+            del pending
+            junk = [cp.full(field.shape, np.nan) for _ in range(8)]
+            on_callers_stream = result.branches + 0
+            del junk
+            np.testing.assert_array_equal(on_callers_stream.get(), branches)
 
 
 def test_irls_gpu_rejects_invalid_edge_weights():
@@ -379,121 +375,200 @@ def test_gpu_selection_is_numpys_median_and_percentile(dtype):
     ],
 )
 @pytest.mark.parametrize("shape", [(61, 47), (1, 9), (9, 1), (1, 1)])
-def test_gpu_wave_setup_is_the_generic_one(dtype, amplitude, shape):
-    """`fill_from_wave` equals `angle`, `amplitude_edge_weights` and `fill`.
+def test_gpu_wave_start_is_the_start_of_its_phase(dtype, amplitude, shape):
+    """The start from a wave equals the start from its angle and amplitude weights.
 
-    Also with invalid pixels (NaN in the wave, and so in its angle).
+    Both staged (one CUDA graph each). Also with invalid pixels (NaN in the
+    wave, and so in its angle).
     """
     import cupy as cp  # noqa: PLC0415
     rng = np.random.default_rng(5)
     wave = amplitude(shape, rng) * np.exp(1j * rng.uniform(-4, 4, size=shape))
     wave = cp.asarray(wave.astype(dtype))
     real = np.float32 if dtype == np.complex64 else np.float64
-    fused = _irls_cupy.CupyWeightedProblem(shape, real)
-    fused.fill_from_wave(wave, irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE)  # noqa: SLF001
-    generic = _irls_cupy.CupyWeightedProblem(shape, real)
+    from_wave = _irls_cupy.CupyWeightedProblem(shape, real)
+    from_wave.stage_wave(wave, irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE)  # noqa: SLF001
+    from_phase = _irls_cupy.CupyWeightedProblem(shape, real)
     weights = irls._check_edge_weights(  # noqa: SLF001
         amplitude_edge_weights(cp.abs(wave)), shape,
     )
-    generic.fill(cp.angle(wave), weights)
-    for name in ("wrapped", "invalid", "target_x", "target_y", "jumps_x", "jumps_y",
-                 "edge_x", "edge_y", "weights_x", "weights_y"):
-        np.testing.assert_array_equal(
-            getattr(fused, name).get(), getattr(generic, name).get(), err_msg=name,
-        )
+    from_phase.stage_phase(
+        cp.where(cp.isfinite(wave), cp.angle(wave), cp.nan), weights,
+    )
+    expected = _start_on(from_phase, "cold", IRLSOptions(), None)
+    actual = _start_on(from_wave, "cold", IRLSOptions(), None)
+    for name, value in expected.items():
+        np.testing.assert_array_equal(actual[name], value, err_msg=name)
 
 
 def _start_on(
-    problem: _irls_cupy.CupyWeightedProblem,
+    problem: _irls_cupy.CupyWeightedProblem | irls._WeightedProblem,
     start: str,
     options: IRLSOptions,
     prior: L1PhasePrior | L1BranchesPrior | None,
+    wrapped: np.ndarray | None = None,
 ) -> dict:
-    """Run a cold or warm start on `problem`; return its results, on the host."""
+    """Run a cold or warm start on `problem`; return its results, on the host.
+
+    The setup (targets, jumps, edge weights, invalid pixels), the starting point,
+    its weights, and the first candidate. A CPU problem needs the `wrapped`
+    phase it was made for.
+    """
+    import cupy as cp  # noqa: PLC0415
+    if wrapped is None:
+        wrapped = problem.wrapped
     if start == "cold":
-        phi, best, epsilon = problem.cold_start(problem.wrapped, options)
+        phi, best, epsilon = problem.cold_start(wrapped, options)
     else:
-        phi, best, epsilon = problem.warm_start(problem.wrapped, prior, options)
+        phi, best, epsilon = problem.warm_start(wrapped, prior, options)
+    rows, cols = problem.weights_y.shape[0] + 1, problem.weights_x.shape[1] + 1
+    invalid = cp.asnumpy(problem.invalid).astype(bool).ravel()
     return {
-        "phi": phi.get(), "epsilon": epsilon,
-        "weights_x": problem.weights_x.get(), "weights_y": problem.weights_y.get(),
+        "wrapped": cp.asnumpy(wrapped).ravel(),
+        "invalid": invalid if invalid.size else np.zeros(rows * cols, dtype=bool),
+        **{name: cp.asnumpy(getattr(problem, name)) for name in (
+            "target_x", "target_y", "jumps_x", "jumps_y", "edge_x", "edge_y",
+            "weights_x", "weights_y")},
+        "phi": cp.asnumpy(phi), "epsilon": epsilon,
         **{f"best.{name}": getattr(best, name) for name in (
             "cut_turns", "cut_cost", "weights_epsilon", "converged", "round_index")},
-        **{f"best.{name}": getattr(best, name).get() for name in (
+        **{f"best.{name}": cp.asnumpy(getattr(best, name)) for name in (
             "phase", "branches", "weights_x", "weights_y")},
     }
 
 
-@pytest.mark.parametrize("source", ["wave", "phase", "phase with edge weights"])
+# Start results that the CPU and the GPU compute with different transforms or
+# summation orders (the least-squares solution, the weights from it):
+_ROUNDED = {"phi", "weights_x", "weights_y", "best.weights_x", "best.weights_y",
+            "best.cut_cost"}
+
+
+def _assert_starts_equal(actual: dict, expected: dict) -> None:
+    assert actual.keys() == expected.keys()
+    for name, value in expected.items():
+        if name in _ROUNDED:
+            np.testing.assert_allclose(actual[name], value, rtol=1e-5, atol=1e-5,
+                                       err_msg=name)
+        else:
+            np.testing.assert_array_equal(actual[name], value, err_msg=name)
+
+
+@pytest.mark.parametrize(
+    "source", ["wave", "phase", "phase with edge weights", "phase with invalid pixels"],
+)
 @pytest.mark.parametrize(
     "start", ["zero", "least_squares", "phase prior", "branches prior"],
 )
-def test_gpu_start_graphs_are_the_generic_starts(source, start):
-    """A staged start (one CUDA graph) equals filling and starting step by step."""
+def test_gpu_start_graphs_are_the_cpus_starts(source, start):
+    """A start on the GPU (one CUDA graph) equals the start on the CPU.
+
+    For a phase: the setup, the starting point and the first candidate of the
+    CPU problem (with the CPU's padding; see `_cpu_padding`). For a wave, whose
+    angle cupy and numpy may compute differently in the last bit: the start
+    from its angle and amplitude weights, on the GPU.
+    """
     import cupy as cp  # noqa: PLC0415
     rng = np.random.default_rng(7)
     shape = (37, 29)
     wave = rng.uniform(0.05, 2, size=shape) * np.exp(1j * (
         _vortex(shape) + 0.3 * rng.standard_normal(shape)))
-    wave = cp.asarray(wave.astype(np.complex64))
-    wrapped = cp.angle(wave)
+    wave = wave.astype(np.complex64)
+    if source == "phase with invalid pixels":
+        wave[10:14, 5:9] = np.nan
+    gpu_wave = cp.asarray(wave)
+    wrapped = cp.where(cp.isfinite(gpu_wave), cp.angle(gpu_wave), cp.nan)
     edges = None
     if source == "phase with edge weights":
-        edges = irls._check_edge_weights(  # noqa: SLF001
-            (cp.asarray(rng.uniform(0.2, 1, (shape[0], shape[1] - 1))),
-             cp.asarray(rng.uniform(0.2, 1, (shape[0] - 1, shape[1])))), shape,
-        )
+        edges = (rng.uniform(0.2, 1, (shape[0], shape[1] - 1)),
+                 rng.uniform(0.2, 1, (shape[0] - 1, shape[1])))
+
     options = IRLSOptions(
         cold_start="least_squares" if start == "least_squares" else "zero",
     )
-    reference = unwrap_phase_irls(np.asarray(wrapped.get(), dtype=np.float64))
+    reference = unwrap_phase_irls(wrapped.get().astype(np.float64))
     prior = {
         "phase prior": L1PhasePrior(phase=reference.phase + 0.4, epsilon=0.05),
         "branches prior": L1BranchesPrior(branches=reference.branches, epsilon=0.3),
     }.get(start)
     kind = "cold" if prior is None else "warm"
-    floor, percentile = irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE  # noqa: SLF001
+    if source == "wave":  # cupy's abs, as the GPU's setup from the wave
+        gpu_edges = irls._check_edge_weights(  # noqa: SLF001
+            amplitude_edge_weights(cp.abs(gpu_wave)), shape,
+        )
+    else:
+        gpu_edges = None if edges is None else irls._check_edge_weights(  # noqa: SLF001
+            tuple(cp.asarray(e) for e in edges), shape,
+        )
+    staged = _irls_cupy.CupyWeightedProblem(
+        shape, np.float32, padded_length=irls._padded_length,  # noqa: SLF001
+    )
 
-    generic = _irls_cupy.CupyWeightedProblem(shape, np.float32)
-    staged = _irls_cupy.CupyWeightedProblem(shape, np.float32)
+    def stage() -> None:
+        if source == "wave":
+            staged.stage_wave(
+                gpu_wave, irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE,  # noqa: SLF001
+            )
+        else:
+            staged.stage_phase(wrapped, gpu_edges)
+
     if source == "wave":
-        generic.fill_from_wave(wave, floor, percentile)
-        staged.stage_wave(wave, floor, percentile)
+        from_phase = _irls_cupy.CupyWeightedProblem(
+            shape, np.float32, padded_length=irls._padded_length,  # noqa: SLF001
+        )
+        from_phase.stage_phase(wrapped, gpu_edges)
+        expected = _start_on(from_phase, kind, options, prior)
+        compare = lambda a, e: [  # noqa: E731
+            np.testing.assert_array_equal(a[n], v, err_msg=n) for n, v in e.items()]
     else:
-        generic.fill(wrapped, edges)
-        staged.stage_phase(wrapped, edges)
-    expected = _start_on(generic, kind, options, prior)
-    actual = _start_on(staged, kind, options, prior)
-    assert actual.keys() == expected.keys()
-    for name, value in expected.items():
-        np.testing.assert_array_equal(actual[name], value, err_msg=name)
-    # The graph is cached per kind of start; a second start reuses it:
-    if source == "wave":
-        staged.stage_wave(wave, floor, percentile)
-    else:
-        staged.stage_phase(wrapped, edges)
-    again = _start_on(staged, kind, options, prior)
-    for name, value in expected.items():
-        np.testing.assert_array_equal(again[name], value, err_msg=name)
+        cpu_wrapped, cpu_edges, invalid = irls._check_input(  # noqa: SLF001
+            wrapped.get(), prior, edges,
+        )
+        cpu = irls._WeightedProblem(cpu_wrapped, 1, cpu_edges, invalid=invalid)  # noqa: SLF001
+        expected = _start_on(cpu, kind, options, prior, wrapped=cpu_wrapped)
+
+        def compare(actual: dict, expected: dict) -> None:
+            if kind == "cold":
+                # The first candidate is the rounded least-squares solution, which
+                # the CPU and the GPU compute with different transforms: values
+                # at a rounding threshold may round differently. So the solution
+                # is compared with a tolerance, and its rounding exactly.
+                l2 = staged.l2.get()
+                np.testing.assert_allclose(l2, cpu.l2_solution(), rtol=1e-5, atol=1e-5)
+                phase, branches = cpu.congruent(l2, cpu_wrapped)
+                turns, cost = cpu.cuts(branches)
+                expected = {**expected, "best.phase": phase, "best.branches": branches,
+                            "best.cut_turns": turns, "best.cut_cost": cost}
+            _assert_starts_equal(actual, expected)
+    stage()
+    compare(_start_on(staged, kind, options, prior), expected)
+    # The graph is kept per kind of start; a second start reuses it:
+    stage()
+    compare(_start_on(staged, kind, options, prior), expected)
     assert len(staged._start_graphs) == 1  # noqa: SLF001
 
 
 def test_gpu_start_graphs_follow_the_options():
-    """A cached start graph is not reused for another epsilon_start."""
+    """A kept start graph is not reused for another epsilon_start."""
     import cupy as cp  # noqa: PLC0415
-    wrapped = cp.asarray(_vortex((33, 47)).astype(np.float32))
-    staged = _irls_cupy.CupyWeightedProblem(wrapped.shape, np.float32)
+    wrapped = _vortex((33, 47)).astype(np.float32)
+    staged = _irls_cupy.CupyWeightedProblem(
+        wrapped.shape, np.float32, padded_length=irls._padded_length,  # noqa: SLF001
+    )
     for epsilon_start in (1.0, 2.5, 1.0):
         options = IRLSOptions(epsilon_start=epsilon_start)
-        generic = _irls_cupy.CupyWeightedProblem(wrapped.shape, np.float32)
-        generic.fill(wrapped, None)
-        expected = _start_on(generic, "cold", options, None)
-        staged.stage_phase(wrapped, None)
+        cpu = irls._WeightedProblem(wrapped, 1)  # noqa: SLF001
+        expected = _start_on(cpu, "cold", options, None, wrapped=wrapped)
+        staged.stage_phase(cp.asarray(wrapped), None)
         actual = _start_on(staged, "cold", options, None)
         assert expected["best.cut_turns"] > 0  # so the start reweights at epsilon_start
         assert actual["epsilon"] == epsilon_start
-        for name, value in expected.items():
-            np.testing.assert_array_equal(actual[name], value, err_msg=name)
+        _assert_starts_equal(actual, expected)
+
+
+def test_gpu_start_without_an_input_is_an_error():
+    problem = _irls_cupy.CupyWeightedProblem((8, 9), np.float32)
+    with pytest.raises(RuntimeError, match="need an input"):
+        problem.cold_start(problem.wrapped, IRLSOptions())
 
 
 @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
@@ -767,9 +842,10 @@ def test_gpu_amplitude_weights_on_many_blocks_are_the_cpus():
     wave = (amplitude * np.exp(1j * _noisy(shape))).astype(np.complex64)
     _, (edge_x, edge_y), _ = irls._wave_setup(wave, 4)  # noqa: SLF001
     gpu = _irls_cupy.CupyWeightedProblem(shape, np.float32)
-    gpu.fill_from_wave(
+    gpu.stage_wave(
         cp.asarray(wave), irls._AMPLITUDE_FLOOR, irls._AMPLITUDE_PERCENTILE,  # noqa: SLF001
     )
+    gpu.cold_start(gpu.wrapped, IRLSOptions())
     # (abs may differ in the last bit between numpy and cupy)
     np.testing.assert_allclose(gpu.edge_x.get(), edge_x, rtol=1e-6)
     np.testing.assert_allclose(gpu.edge_y.get(), edge_y, rtol=1e-6)
