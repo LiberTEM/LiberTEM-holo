@@ -115,6 +115,11 @@ PADDED_LENGTH: Callable[[int], int] | None = None
 # threads should not interleave.
 _SETUP_LOCK = threading.RLock()
 
+_NOT_STAGED = (
+    "cold_start and warm_start need an input: get the problem from problem_for "
+    "or problem_for_wave, or call stage_phase or stage_wave first"
+)
+
 # The slot of the GPU problems in a `Workspace`:
 _SLOT = "unwrap"
 # The most numba array wrappers a problem caches (see `_numba_args`); a problem
@@ -126,7 +131,6 @@ def problem_for(
     wrapped: cp.ndarray,
     edge_weights: tuple[cp.ndarray, cp.ndarray] | None,
     *,
-    deferred: bool = False,
     method: str = "irls",
     workspace: Workspace | None = None,
 ) -> CupyWeightedProblem:
@@ -136,36 +140,31 @@ def problem_for(
     dtype, the device and the `method` ("irls" or "admm"), so a series of
     same-sized inputs reuses them. The workspace keeps one problem; one for other
     inputs replaces it. The caller must hold the workspace's lock while it uses
-    the problem. With `deferred`, the input is only copied into the problem; the
-    next call must be :meth:`CupyWeightedProblem.cold_start` or
+    the problem. The input is copied into the problem
+    (:meth:`~CupyWeightedProblem.stage_phase`); the next call must be
+    :meth:`~CupyWeightedProblem.cold_start` or
     :meth:`~CupyWeightedProblem.warm_start`, which sets the problem up.
     """
     problem = _workspace(wrapped.shape, wrapped.dtype, method, workspace)
-    if deferred:
-        problem.stage_phase(wrapped, edge_weights)
-    else:
-        problem.fill(wrapped, edge_weights)
+    problem.stage_phase(wrapped, edge_weights)
     return problem
 
 
 def problem_for_wave(
-    wave: cp.ndarray, floor: float, percentile: float, *, deferred: bool = False,
-    method: str = "irls", workspace: Workspace | None = None,
+    wave: cp.ndarray, floor: float, percentile: float, *, method: str = "irls",
+    workspace: Workspace | None = None,
 ) -> CupyWeightedProblem:
     """Return a problem for the phase of `wave`, with edge weights from its amplitude.
 
-    See :func:`problem_for` and :meth:`CupyWeightedProblem.fill_from_wave`. With
-    `deferred`, the wave is only copied into the problem; the next call must be
-    :meth:`CupyWeightedProblem.cold_start` or
-    :meth:`~CupyWeightedProblem.warm_start`, which sets the problem up.
+    As :func:`problem_for`, with the wave copied into the problem
+    (:meth:`~CupyWeightedProblem.stage_wave`). The start graph computes the
+    phase and the edge weights of :func:`irls.amplitude_edge_weights`, in a few
+    fused kernels.
     """
     dtype = np.float32 if wave.dtype == np.complex64 else np.float64
     wave = cp.ascontiguousarray(wave, dtype=np.result_type(dtype, np.complex64))
     problem = _workspace(wave.shape, np.dtype(dtype), method, workspace)
-    if deferred:
-        problem.stage_wave(wave, floor, percentile)
-    else:
-        problem.fill_from_wave(wave, floor, percentile)
+    problem.stage_wave(wave, floor, percentile)
     return problem
 
 
@@ -248,10 +247,13 @@ def _multiprocessor_count() -> int:
 class CupyWeightedProblem:
     """The weighted problem of IRLS or ADMM rounds, on the GPU.
 
-    Same interface as :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`.
     All arrays are cupy arrays. A problem holds the buffers, FFT plans and
     captured CUDA graphs for one shape, dtype, method and device, and is reused
-    by later solves. Use :func:`problem_for` to get one.
+    by later solves. Use :func:`problem_for` or :func:`problem_for_wave` to get
+    one with an input staged. A solve then calls :meth:`cold_start` or
+    :meth:`warm_start` (one CUDA graph each), the rounds (:meth:`run_round` with
+    :meth:`keep` for IRLS, in `irls._irls_rounds`; :meth:`run_rounds` for ADMM),
+    and :meth:`release` for the result.
 
     Everything runs on a private non-blocking stream (stream capture needs one),
     ordered with the caller's stream on entry and exit (:meth:`_on_stream`).
@@ -363,9 +365,6 @@ class CupyWeightedProblem:
         self._graph_key = None
         self._start_graphs: dict[tuple, tuple[tuple, cp.cuda.graph.Graph]] = {}
         self._host_start_params = _pinned(2, np.float64)
-        self._check_weights = False
-        # whether _host_s holds the number of invalid pixels:
-        self._invalid_on_host = False
         self._unit_edges = False  # whether the input came without edge weights
         self._staged = None
         self._iterations = 0
@@ -404,45 +403,6 @@ class CupyWeightedProblem:
         self.extended = cp.zeros((p1, p2), dtype=self.dtype)
         self.spectrum = cp.zeros((p1, p2 // 2 + 1), dtype=cdtype)
         self.plan_forward, self.plan_inverse = _fft_plans(self.extended, self.spectrum)
-
-    def fill(
-        self,
-        wrapped: cp.ndarray,
-        edge_weights: tuple[cp.ndarray, cp.ndarray] | None,
-    ) -> None:
-        """Set up the problem for `wrapped`."""
-        with self._on_stream():
-            if edge_weights is not None:
-                self.edge_x[...] = edge_weights[0]
-                self.edge_y[...] = edge_weights[1]
-                self._memcpy(self.weights_x, self.edge_x)
-                self._memcpy(self.weights_y, self.edge_y)
-            self._prepare_targets(
-                cp.ascontiguousarray(wrapped, dtype=self.dtype),
-                unit_edges=edge_weights is None, detect=True,
-            )
-        self._invalid_on_host = False
-        self._unit_edges = edge_weights is None
-        self._iterations = 0
-        self._kept = None
-        self._staged = None
-
-    def fill_from_wave(self, wave: cp.ndarray, floor: float, percentile: float) -> None:
-        """Set up the problem for the phase of `wave`, with amplitude edge weights.
-
-        The same as `fill(angle(wave), amplitude_edge_weights(abs(wave), floor,
-        percentile))`, in a few kernels instead of a few dozen cupy calls. Whether
-        the weights are valid is checked at the next :meth:`cuts`, which
-        synchronizes anyway.
-        """
-        with self._on_stream():
-            self._enqueue_fill_from_wave(wave, floor, percentile)
-        self._invalid_on_host = False
-        self._unit_edges = False
-        self._check_weights = True
-        self._iterations = 0
-        self._kept = None
-        self._staged = None
 
     def _enqueue_fill_from_wave(
         self, wave: cp.ndarray, floor: float, percentile: float,
@@ -496,23 +456,20 @@ class CupyWeightedProblem:
     def _stage(self, staged: tuple) -> None:
         self._staged = staged
         self._unit_edges = staged == ("phase", False)
-        self._check_weights = False
         self._iterations = 0
         self._kept = None
 
     def cold_start(
-        self, wrapped: cp.ndarray, options: IRLSOptions,
+        self,
+        wrapped: cp.ndarray,  # noqa: ARG002 (staged; the CPU problem's call)
+        options: IRLSOptions,
     ) -> tuple[cp.ndarray, _Candidate, float]:
-        """Start a solve without a prior; see `irls._cold_start`.
+        """Start a solve without a prior; as `irls._cold_start` on the CPU.
 
-        If the input was staged (`deferred`), one CUDA graph and one
-        synchronization: the setup, the rounded L2 solution as the first
-        candidate (into slot 0), and the starting point.
+        One CUDA graph and one synchronization: the setup of the staged input,
+        the rounded L2 solution as the first candidate (into slot 0), and the
+        starting point.
         """
-        from .irls import _cold_start  # noqa: PLC0415
-
-        if self._staged is None:
-            return _cold_start(self, wrapped, options)
         best = self._run_start(options.cold_start, options, weights_epsilon=math.inf)
         if options.cold_start == "zero" and best.cut_turns > 0:
             return self.phi, best, options.epsilon_start
@@ -520,21 +477,21 @@ class CupyWeightedProblem:
 
     def warm_start(
         self,
-        wrapped: cp.ndarray,
+        wrapped: cp.ndarray,  # noqa: ARG002 (staged; the CPU problem's call)
         prior: L1PhasePrior | L1BranchesPrior,
         options: IRLSOptions,
     ) -> tuple[cp.ndarray, _Candidate, float]:
-        """Start a solve from a prior; see `irls._warm_start`.
+        """Start a solve from a prior; as `irls._warm_start` on the CPU.
 
-        If the input was staged (`deferred`), one CUDA graph: the setup, the
-        starting phase from the prior, its weights, and the rounded starting phase
-        as the first candidate. The epsilon of the weights comes from pinned
-        memory, so one graph serves every prior of the same type.
+        One CUDA graph: the setup of the staged input, the starting phase from the
+        prior, its weights, and the rounded starting phase as the first
+        candidate. The epsilon of the weights comes from pinned memory, so one
+        graph serves every prior of the same type.
         """
-        from .irls import L1PhasePrior, _warm_start  # noqa: PLC0415
+        from .irls import L1PhasePrior  # noqa: PLC0415
 
         if self._staged is None:
-            return _warm_start(self, wrapped, prior, options)
+            raise RuntimeError(_NOT_STAGED)
         epsilon = min(max(prior.epsilon, options.epsilon_min), options.epsilon_start)
         phase_prior = isinstance(prior, L1PhasePrior)
         with self._on_stream():
@@ -561,8 +518,9 @@ class CupyWeightedProblem:
         """Run the start graph of `kind` on the staged input; return its candidate."""
         from .irls import _Candidate  # noqa: PLC0415
 
+        if self._staged is None:
+            raise RuntimeError(_NOT_STAGED)
         staged, self._staged = self._staged, None
-        self._invalid_on_host = True
         # One graph per kind of staged input and of start, captured again when
         # the staged parameters or the options change:
         slot = (staged[0], kind)
@@ -669,10 +627,6 @@ class CupyWeightedProblem:
         self, wrapped: cp.ndarray, *, unit_edges: bool, detect: bool,
     ) -> None:
         """Enqueue the targets; with `detect`, find the invalid pixels of `wrapped`."""
-        if detect and wrapped.data.ptr == self.wrapped.data.ptr:
-            # `prepare_targets` must not find them in the array it zeroes them in:
-            self._memcpy(self.difference, wrapped)
-            wrapped = self.difference
         rows, cols = self.shape
         self._launch(
             "prepare_targets",
@@ -1379,76 +1333,8 @@ class CupyWeightedProblem:
             return dataclasses.replace(candidate, **arrays)
 
     def _invalid_pixels(self) -> int:
-        """Return the number of invalid pixels of the current problem."""
-        if not self._invalid_on_host:  # set up without a start graph
-            self._memcpy(self._host_s, self.s)
-            self.stream.synchronize()
-            self._invalid_on_host = True
+        """Return the number of invalid pixels of the input, after its start graph."""
         return int(self._host_s[_S_INVALID_PIXELS])
-
-    def cuts(self, branches: cp.ndarray) -> tuple[int, float]:
-        """Count the cut turns of `branches`, and their cost. Synchronizes."""
-        rows, cols = self.shape
-        with self._on_stream():
-            self._launch(
-                "cuts",
-                (branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-                 self.invalid, np.int32(rows), np.int32(cols), self.partials,
-                 self.counter, self.s),
-            )
-            s = self.s.get(stream=self.stream)
-        if self._check_weights:
-            self._check_weights = False
-            if s[_S_INVALID] > 0:
-                msg = "edge_weights must be finite and greater than zero"
-                raise ValueError(msg)
-        return int(s[_S_TURNS]), float(s[_S_COST])
-
-    def reweight(
-        self, phi: cp.ndarray, epsilon: float, *, unless_settled: bool = False,
-    ) -> None:
-        """Set the weights from the iterate `phi` at `epsilon`.
-
-        With `unless_settled`, only if the last CG ran an iteration; decided on the
-        device.
-        """
-        rows, cols = self.shape
-        with self._on_stream():
-            self._launch(
-                "set_params",
-                (self.direct_params, np.float64(epsilon * epsilon),
-                 np.float64(unless_settled)),
-                grid=1, block=1,
-            )
-            self._launch(
-                "charbonnier_weights",
-                (phi, self.target_x, self.target_y, self.edge_x, self.edge_y,
-                 self.direct_params, self.weights_x, self.weights_y,
-                 np.int32(rows), np.int32(cols), self.f),
-            )
-
-    def l2_solution(self) -> cp.ndarray:
-        """Solve the unweighted problem, approximately; see `_WeightedProblem`."""
-        rows, cols = self.shape
-        with self._on_stream():
-            out = cp.empty(self.shape, dtype=self.dtype)
-            self._launch(
-                "right_hand_side",
-                (self.unit_x, self.target_x, self.unit_y, self.target_y, self.b,
-                 np.int32(rows), np.int32(cols), self.partials, self.counter, self.s),
-            )
-            self._precondition(self.b, out, self.f_free, mode=2)
-        return out
-
-    def congruent(
-        self, phi: cp.ndarray, wrapped: cp.ndarray,
-    ) -> tuple[cp.ndarray, cp.ndarray]:
-        """Snap `phi` onto the branches of `wrapped`, see `irls._congruent`."""
-        with self._on_stream():
-            branches = cp.empty(self.shape, dtype=cp.int32)
-            phase = cp.empty(self.shape, dtype=cp.float64)
-            self._congruent_into(phi, wrapped, phase, branches)
-        return phase, branches
 
     def _congruent_into(
         self,
