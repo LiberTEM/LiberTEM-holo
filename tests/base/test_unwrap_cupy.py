@@ -955,7 +955,11 @@ def test_gpu_default_workspace_holds_one_problem():
     assert pool.used_bytes() - baseline <= one_large
     clear_default_workspace()
     assert pool.used_bytes() - baseline == inputs
-    assert pool.total_bytes() - pool.used_bytes() == 0  # the pool was freed
+    # The pool was freed: as far as it can be, since memory that shares an
+    # allocation with an array still in use stays in the pool.
+    unused = pool.free_bytes()
+    pool.free_all_blocks()
+    assert pool.free_bytes() == unused
 
 
 def test_gpu_solves_keep_no_arrays_alive():
