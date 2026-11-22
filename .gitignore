@@ -36,5 +36,5 @@ junit.xml
 *.ncu-rep
 *.qdstrm
 
-# local scratch
+# local scratch files
 /tmp/

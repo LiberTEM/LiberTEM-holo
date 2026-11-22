@@ -1,4 +1,7 @@
-"""The numba kernels of the IRLS unwrapping, bit for bit against numpy."""
+"""The numba kernels of the IRLS unwrapping, against numpy.
+
+Bit for bit, except for the sums in float64.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -142,7 +145,9 @@ def test_rounding_onto_branches(dtype):
 
 @pytest.mark.with_numba
 @pytest.mark.parametrize("shape", SHAPES)
-def test_cuts_per_row(shape):
+@pytest.mark.parametrize("masked", [False, True])
+def test_cuts_per_row(shape, masked):
+    """Cut turns and cut cost per row, with and without invalid pixels."""
     rng = np.random.default_rng(4)
     branches = rng.integers(-2, 3, size=shape).astype(np.int32)
     jumps_x = rng.integers(-1, 2, size=(shape[0], shape[1] - 1)).astype(np.int32)
@@ -150,10 +155,16 @@ def test_cuts_per_row(shape):
     edge_x, edge_y = _edges(rng, shape, np.float32)
     turns = np.empty(shape[0], dtype=np.int64)
     cost = np.empty(shape[0], dtype=np.float64)
+    invalid = rng.random(shape) < 0.2 if masked else np.zeros((0, 0), dtype=np.bool_)
 
-    kernels.cuts_per_row(branches, jumps_x, jumps_y, edge_x, edge_y, turns, cost)
+    kernels.cuts_per_row(
+        branches, jumps_x, jumps_y, edge_x, edge_y, invalid, turns, cost,
+    )
     cuts_x = np.abs(jumps_x + np.diff(branches, axis=1))
     cuts_y = np.abs(jumps_y + np.diff(branches, axis=0))
+    if masked:
+        cuts_x[invalid[:, 1:] | invalid[:, :-1]] = 0
+        cuts_y[invalid[1:, :] | invalid[:-1, :]] = 0
     assert turns.sum() == cuts_x.sum() + cuts_y.sum()
     expected_cost = (cuts_x * edge_x.astype(np.float64)).sum()
     expected_cost += (cuts_y * edge_y.astype(np.float64)).sum()

@@ -2,7 +2,7 @@
 
 Each kernel replaces a sequence of numpy passes over whole images, and their
 temporaries, with one pass. Elementwise, they do the same floating-point operations
-in the same order as those numpy passes, so those results are identical.
+in the same order as those numpy passes, so their results are identical.
 
 Dot products are summed per row, sequentially and in float64, into `row_sums`; the
 caller adds up the rows with :code:`row_sums.sum()`. The result is the same on any
@@ -185,29 +185,49 @@ def cuts_per_row(
     jumps_y: np.ndarray,
     edge_x: np.ndarray,
     edge_y: np.ndarray,
+    invalid: np.ndarray,
     turns: np.ndarray,
     cost: np.ndarray,
 ) -> None:
     """Per row, sum the cut turns :code:`|jumps + diff(branches)|` and their cost.
 
     The cost weights each edge's turns by its edge weight. A row owns its
-    horizontal edges and the vertical edges below it.
+    horizontal edges and the vertical edges below it. Edges that touch an invalid
+    pixel (`invalid`, boolean, or of shape (0, 0) if there are none) do not count.
     """
     rows, cols = branches.shape
+    masked = invalid.shape[0] > 0
     for i in numba.prange(rows):
         row_turns = 0
         row_cost = 0.0
         for j in range(cols - 1):
+            if masked and (invalid[i, j] or invalid[i, j + 1]):
+                continue
             k = abs(jumps_x[i, j] + (branches[i, j + 1] - branches[i, j]))
             row_turns += k
             row_cost += k * np.float64(edge_x[i, j])
         if i < rows - 1:
             for j in range(cols):
+                if masked and (invalid[i, j] or invalid[i + 1, j]):
+                    continue
                 k = abs(jumps_y[i, j] + (branches[i + 1, j] - branches[i, j]))
                 row_turns += k
                 row_cost += k * np.float64(edge_y[i, j])
         turns[i] = row_turns
         cost[i] = row_cost
+
+
+@numba.njit(cache=True, parallel=True)
+def count_nonfinite(x: np.ndarray, row_counts: np.ndarray) -> int:
+    """Return the number of values of the 2D array `x` that are NaN or infinite."""
+    rows, cols = x.shape
+    for i in numba.prange(rows):
+        count = 0
+        for j in range(cols):
+            if not np.isfinite(x[i, j]):
+                count += 1
+        row_counts[i] = count
+    return row_counts.sum()
 
 
 # ---- Setup: targets, order statistics, amplitude edge weights --------------------
@@ -224,7 +244,7 @@ def targets_and_jumps(
     """Compute the wrapped target gradients and their whole-turn jumps, in one pass.
 
     As :code:`_wrap(np.diff(wrapped))` and :code:`np.rint((np.diff(wrapped) -
-    target) / TAU)`: the same operations, in the dtype of `wrapped`.
+    target) / TAU)` of `irls`: the same operations, in the dtype of `wrapped`.
     """
     rows, cols = wrapped.shape
     tau = wrapped.dtype.type(2 * np.pi)
@@ -243,7 +263,7 @@ def targets_and_jumps(
 
 
 _SELECT_BINS = 4096
-_SELECT_SMALL = 1 << 15  # sort what is left at this size
+_SELECT_SMALL = 1 << 15  # np.partition what is left at this size or below
 
 
 @numba.njit(cache=True, parallel=True)
@@ -342,11 +362,12 @@ def amplitude_edges(
     row_max: np.ndarray,
     row_ok: np.ndarray,
 ) -> None:
-    """Edge weights from the amplitude, as `irls.amplitude_edge_weights`, in float64.
+    """Compute edge weights from the amplitude, as `irls.amplitude_edge_weights`.
 
-    :code:`np.minimum` of :code:`np.clip(amplitude / reference, floor, 1)` of the
-    edge's pixels (NaN propagates through both); per row also the largest weight,
-    and whether all are finite and greater than zero (as `_check_edge_weights`).
+    In float64: :code:`np.minimum` of :code:`np.clip(amplitude / reference, floor,
+    1)` of the edge's pixels (NaN propagates through both). Per row, also the
+    largest weight into `row_max`, and into `row_ok` whether all are finite and
+    greater than zero (as `irls._check_edge_weights` checks).
     """
     rows, cols = amplitude.shape
     for i in numba.prange(rows):

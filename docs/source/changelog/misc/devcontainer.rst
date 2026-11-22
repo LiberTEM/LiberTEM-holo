@@ -1,6 +1,7 @@
 [Misc] Dev container with GPU support
 =====================================
 
- * Add a dev container configuration in :code:`.devcontainer/` for VS Code and the
-   devcontainer CLI, with CUDA/cupy, the Nsight Systems and Nsight Compute profilers,
-   neovim and Claude Code
+ * New dev container configuration in :code:`.devcontainer/`, for VS Code and
+   the devcontainer CLI: an editable install with cupy, the Nsight Systems and
+   Nsight Compute profilers, neovim and Claude Code. See
+   :code:`.devcontainer/README.md`.

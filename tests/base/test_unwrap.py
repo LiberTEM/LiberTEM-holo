@@ -67,8 +67,8 @@ def test_unwrap_laplacian_with_backends(backend):
     _ = unwrap_phase_laplacian(wrapped_phase=phase, xp=xp)
 
 
-# IRLS unwrapping, checked by properties of a correct unwrap rather than against a
-# frozen reference.
+# IRLS unwrapping, checked by properties of a correct unwrap rather than against
+# stored results.
 
 def _wrap(value):
     return np.angle(np.exp(1j * value))
@@ -95,7 +95,7 @@ def _vortex(shape, center=None):
 
 
 def _dipole():
-    """Two residues of opposite charge, so the solve has a seam to place."""
+    """Two residues of opposite charge, so the solve has a cut to place between them."""
     return _wrap(_vortex((40, 48)) - _vortex((40, 48), center=(12, 30)))
 
 
@@ -152,8 +152,8 @@ def test_irls_odd_and_rectangular_shapes(shape):
 
 
 def test_irls_iteration_limit_is_reported():
-    # A residue: an exactly integrable field needs no rounds at all, so it could
-    # not hit the iteration limit.
+    # A residue: a field without residues needs no rounds at all, so it could not
+    # hit the iteration limit.
     wrapped = _vortex((40, 40))
     result = unwrap_phase_irls(
         wrapped,
@@ -162,7 +162,7 @@ def test_irls_iteration_limit_is_reported():
     assert result.status == "iteration_limit"
     assert any(not r.converged for r in result.rounds)
     assert np.isfinite(result.final_relative_residual)
-    # The last iterate is still snapped onto the input's branches:
+    # The result is still congruent with the input:
     _assert_congruent(result.phase, wrapped)
 
 
@@ -181,8 +181,9 @@ def test_irls_warm_start_from_own_answer(settles):
         y, x = np.mgrid[:32, :40]
         wrapped = _wrap(0.5 * y + 0.3 * x + 3 * np.sin(0.2 * x))
     else:
-        # A noise-free residue field does not settle: the seam keeps sharpening
-        # round after round, so only the answer itself can be compared.
+        # A noise-free field with residues does not settle: the iterate keeps
+        # sharpening around the cut, round after round, so only the branches are
+        # compared.
         wrapped = _dipole()
     cold = unwrap_phase_irls(wrapped)
     priors = [
@@ -200,8 +201,8 @@ def test_irls_warm_start_from_own_answer(settles):
 
 
 def test_irls_phase_prior_survives_the_input_crossing_pi():
-    # The same field shifted by a constant: many pixels change branch relative
-    # to their own wrapped value, none change physically.
+    # The same field shifted by a constant: the wrapped values of many pixels
+    # cross ±π, so their branches change, but the unwrapped field only shifts.
     y, x = np.mgrid[:32, :40]
     truth = 0.5 * y + 0.3 * x
     before = _wrap(truth)
@@ -337,7 +338,8 @@ def test_irls_cut_turns_are_reported():
     result = unwrap_phase_irls(wrapped)
     assert result.cut_turns == _cut_turns(result.phase, wrapped)
     assert all(r.cut_turns is not None for r in result.rounds)
-    # The selected round is the latest one with the lowest cut cost:
+    # The selected round is the latest one with the lowest cut cost (here equal
+    # to the cut turns):
     cuts = [r.cut_turns for r in result.rounds]
     assert result.cut_turns <= min(cuts)
     if result.selected_round >= 0:
@@ -367,7 +369,7 @@ def test_irls_without_cuts_runs_no_rounds():
 
 
 def test_irls_stops_once_the_cut_count_settles():
-    # The rounded L2 solution of the dipole already has the final cut count, so no
+    # The rounded L2 solution of the dipole already has the final cut turns, so no
     # round improves on it.
     wrapped = _dipole()
     early = unwrap_phase_irls(wrapped)
@@ -435,8 +437,8 @@ def test_amplitude_edge_weights_floor_is_validated(floor):
 def _blocked_wave(seed=1, size=128, blobs=40):
     """A noisy wave on a smooth field, with small blobs where the beam is blocked.
 
-    Inside the blobs, the amplitude is low and the phase random. Each blob is
-    surrounded by valid phase, so its residues balance inside it.
+    Inside the blobs, the amplitude is low and the phase random. A blob away from
+    the border is surrounded by low-noise phase, so its residues balance inside it.
     """
     rng = np.random.default_rng(seed)
     y, x = np.mgrid[:size, :size] / size

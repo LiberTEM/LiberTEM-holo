@@ -1,27 +1,24 @@
-"""The kernels of the GPU IRLS solver, in numba CUDA.
+"""The kernels of the GPU solvers (IRLS and ADMM), in numba CUDA.
 
 Launched by `CupyWeightedProblem` in `_irls_cupy.py`; an absent (optional) array
-argument is an empty array. They give the CPU solver's results bit for bit.
+argument is an empty array. The IRLS kernels give the CPU solver's results bit for
+bit; for ADMM, see `_admm_numba`.
 
-They replaced CUDA C++ kernels (cupy `RawModule`, in commit 6034846), which gave
-the same results; whole solves ran as fast with these (on a GH200, from -3 % at
-2048^2 to +1 % for float64 at ~500^2, cold and warm starts). What that took, found
-by comparing Nsight Compute profiles and SASS with the CUDA C++ kernels:
+What keeps numba's code fast, found with Nsight Compute profiles and the SASS:
 
 * **32-bit index arithmetic, truncated after every operation.** numba computes
   integer arithmetic at the machine width: `uint32 + uint32` is a 64-bit addition,
-  and a `//` of 64-bit values takes a slow path. Every integer result that meets
+  and a `//` of 64-bit values takes a slow path. Every integer result that feeds
   an index is therefore wrapped in `u32(...)`: truncated, so that LLVM narrows the
   arithmetic back to 32 bits. Unsigned, because with signed integers numba also
   gives every array access Python's handling of negative indices, and `//` and `%`
   Python's rounding. Plain Python integer constants are int64 and would widen the
   arithmetic again: hence the typed constants `U0`, `U1`, `U2`, `UBLOCK`. Without
-  this, the streaming kernels executed 2.4-2.6x the instructions and ran up to 2x
-  as long; with it, `apply_operator` and `cg_update` execute fewer instructions
-  than the CUDA C++ ones. Narrowing cannot repair a comparison, `//` or `%` of a
-  widened value, so loop bounds such as `u32(u32(rows) * cols)` are truncated too
-  (a 64-bit loop test and a 64-bit `%` per element cost ~10 % in `apply_operator`
-  and `makhoul_spectrum`).
+  this, the per-pixel kernels executed 2.4-2.6x the instructions and ran up to 2x
+  as long. Narrowing cannot repair a comparison, `//` or `%` of a widened value,
+  so loop bounds such as `u32(u32(rows) * cols)` are truncated too (a 64-bit loop
+  test and a 64-bit `%` per element cost ~10 % in `apply_operator` and
+  `makhoul_spectrum`).
 * **Vector loads and stores of complex values** (`_cload`, `_cstore`): numba
   aligns a complex element as its components and moves the real and imaginary
   parts separately, which made `makhoul_spectrum` touch ~40 % more L2 sectors.
@@ -29,26 +26,26 @@ by comparing Nsight Compute profiles and SASS with the CUDA C++ kernels:
   numba-cuda has no switch for that. Products that are added or subtracted are
   computed with round-to-nearest intrinsics (`mul`, `_dmul`: libdevice's
   `fmul_rn`, `dmul_rn`), which are never fused: so the results match the CPU
-  solver's and the CUDA C++ kernels' bit for bit. Allowing FMAs gained at most ~1 %.
+  solver's bit for bit. Allowing FMAs gained at most ~1 %.
 * **One loop per mode.** numba does not hoist a loop-invariant test out of a loop;
   `apply_operator` has a loop for each of its modes.
 * **`ld.global.cg` for the last block's sum of partial sums** (`cuda.ldcg`): L1 is
-  not coherent between blocks, L2 is. The CUDA C++ kernels use `volatile` loads,
-  which numba lacks; atomic reads, the other way, cost ~1 us per reduction.
-* **Short reductions without loops.** The deferred sums of partial sums have at
-  most two per thread, added in straight-line code (`_sum_partials`): LLVM's
-  unrolled loop cost branches, and with a redundant barrier in `_ticket_last`,
+  not coherent between blocks, L2 is. numba has no `volatile` loads, and atomic
+  reads cost ~1 us per reduction.
+* **Short reductions without loops.** A deferred sum (partial sums that a later
+  kernel adds up, see `_irls_cupy`) has at most two partial sums per thread, added
+  in straight-line code (`_sum_partials`): LLVM's unrolled loop cost branches,
+  and together with a barrier after `_ticket_last`'s flag, which is not needed,
   ~0.3 us per kernel, a few percent at ~500^2.
-* **No launch bounds.** Before the 32-bit arithmetic, a few more registers than
-  the CUDA C++ kernels cost a wave on large images, and launch bounds helped
-  `apply_operator`; now they only cost (`makhoul_spectrum` spills under them).
+* **No launch bounds.** They do not help any kernel, and `makhoul_spectrum` spills
+  registers under them.
 
 Launching a numba kernel from Python costs ~40 us of host time (cupy: ~3 us), in
 numba's argument handling, even for a compiled kernel launched directly. So these
 kernels run only inside captured CUDA graphs, including the setup of a solve
-(`CupyWeightedProblem.cold_start`, `warm_start`): host launches made warm starts
-~70 % slower than with the CUDA C++ kernels. Capturing still pays it, once per
-workspace: ~25 ms for the first solve of a shape (CUDA C++: ~8 ms).
+(`CupyWeightedProblem.cold_start`, `warm_start`): launched from the host, they
+made warm starts ~70 % slower. Capturing still pays the launch cost, once per
+problem: ~25 ms for the first solve of a shape.
 
 Compiling all kernels for one dtype takes ~7 s, so they are cached on disk
 (`cache=True`); a fresh process then loads them in ~0.2 s, mostly numba's own
@@ -79,10 +76,13 @@ BUCKETS = 2048  # of the radix selection
 DIGIT_BITS = 11
 FULL_MASK = 0xFFFFFFFF
 # Indices into the int flags `f` and the double scalars `s` on the device, as in
-# `_irls_cupy`. F_PENDING: an iteration's residual was checked; `crop` counts it.
+# `_irls_cupy`. F_PENDING: `makhoul_spectrum` checked an iteration's residual, and
+# `crop` has yet to count that iteration.
 F_DONE, F_ITER, F_ITERATED, F_ZERO, F_PENDING = range(5)
+# S_INVALID: the number of edges whose weight is not finite and positive;
+# S_INVALID_PIXELS: the number of invalid pixels (input not finite).
 (S_NORM, S_RZ, S_ALPHA, S_BETA, S_MEAN, S_TURNS, S_COST, S_LARGEST, S_INVALID,
- S_NAN) = range(10)
+ S_INVALID_PIXELS) = range(10)
 
 u32 = numba.uint32
 u64 = numba.uint64
@@ -192,8 +192,9 @@ def _block_partial(v, partials):
 def _sum_partials(partials, count):
     """Return the sum of `count` partial sums, in the order of `_last_block`.
 
-    The first two per thread unrolled by hand (deferred sums have at most two
-    blocks' worth): LLVM's own unrolling of the loop costs a few branches.
+    The first two per thread are added without a loop, since a deferred sum has
+    at most 2 * BLOCK partial sums: LLVM's own unrolling of the loop costs a few
+    branches.
     """
     a = 0.0
     k = u32(cuda.threadIdx.x)
@@ -212,7 +213,10 @@ def _sum_partials(partials, count):
 
 @cuda.jit(device=True, inline=True)
 def _ticket_last(counter):
-    """Take a ticket: whether this block is the last one to finish (all threads)."""
+    """Take a ticket: return whether this block is the last one to finish.
+
+    Thread 0 takes the ticket from `counter`; all threads get the answer.
+    """
     flag = cuda.shared.array(1, numba.int32)
     if cuda.threadIdx.x == 0:
         cuda.threadfence()
@@ -224,7 +228,7 @@ def _ticket_last(counter):
 
 @cuda.jit(device=True, inline=True)
 def _coherent_sum(partials, offset):
-    """In the last block: the sum of all blocks' partial sums.
+    """In the last block: the sum of all blocks' partial sums, from partials[offset:].
 
     Read with `ld.global.cg`, which caches in L2 only: L1 is not coherent between
     blocks, and L2 holds what the other blocks wrote before their ticket.
@@ -240,7 +244,11 @@ def _coherent_sum(partials, offset):
 
 @cuda.jit(device=True, inline=True)
 def _last_block(v, partials, counter):
-    """As `last_block` in the CUDA source, for one value: (last block, total)."""
+    """Sum v over the grid: return (whether this is the last block, the total).
+
+    Each block writes its partial sum into `partials`; the last block to finish
+    adds them up (the total is 0.0 in the other blocks) and resets `counter`.
+    """
     b = _block_sum(v)
     if cuda.threadIdx.x == 0:
         partials[u32(cuda.blockIdx.x)] = b
@@ -273,7 +281,7 @@ def _last_block2(v0, v1, partials, counter):
 
 @cuda.jit(device=True, inline=True)
 def _reordered(n, length):
-    """Where the Makhoul reordering puts index n of a length-N axis (unsigned)."""
+    """Where the Makhoul reordering puts index n of an axis of `length` (unsigned)."""
     return u32(n // U2) if u32(n % U2) == U0 else u32(length - u32(u32(n + U1) // U2))
 
 
@@ -333,6 +341,7 @@ def _value64(key):
 def _find_bucket(hist, offset, k, found, found_rank, which, sh):
     """In the last block: the bucket of rank k in hist[offset:offset + BUCKETS].
 
+    Writes the bucket to found[which], and k's rank within it to found_rank[which].
     Plain loads suffice here: the blocks wrote the histogram only with atomics,
     which act in L2, and this block has not read it before.
     """
@@ -397,6 +406,7 @@ def _kernels(dtype: np.dtype) -> dict:
     # and of other dtypes; scalars.
     A, CA = T[::1], (numba.complex64 if single else numba.complex128)[::1]
     F64A, I32A, U32A, U64A = (t[::1] for t in (numba.float64, numba.int32, u32, u64))
+    U8A = numba.uint8[::1]
     i32, i64, f64 = numba.int32, numba.int64, numba.float64
 
     def kernel(*arg_types: types.Type):
@@ -453,7 +463,7 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @cuda.jit(device=True, inline=True)
     def stencil_update(p, z, beta, p_new, wx, wy, out, rows, cols):
-        """Run `stencil_plain` for the next direction p' = beta p + z (to p_new)."""
+        """`stencil_plain` for the next direction p' = beta p + z, also into p_new."""
         acc = 0.0
         cols_u = u32(cols)
         cm1 = u32(cols_u - U1)
@@ -507,17 +517,18 @@ def _kernels(dtype: np.dtype) -> dict:
     )
     def apply_operator(p, z, p_new, wx, wy, out, rows, cols, partials, counter, s, f,
                        mode, tiny, rz_new, rz_old, rz_count, pap_out):
-        """Compute -div(w grad p) into `out`, as `_WeightedProblem`'s operator.
+        """Compute out = -div(w grad p), the operator of `irls._WeightedProblem`.
 
-        mode 0: only that; mode 1: also p . out, and alpha = rz / (p . out) from
-        it; mode 2: as 1, for the next CG direction p' = beta p + z, computed on
-        the fly at each point of the stencil (as `next_direction`, so with the same
-        result), and written to `p_new` (another buffer: neighbours still read the
-        old p). With `rz_count` > 0, r . z is not in s[S_RZ] but the sum of the
-        partial sums in `rz_new` (the last `crop`), and the one before in
-        `rz_old`; every block adds them up itself (see `_sum_partials`). With
-        `pap_out`, the blocks only write their partial sums of p . Ap there, and
-        `cg_update` adds them up for alpha.
+        mode 0: only that. mode 1: also alpha = rz / (p . out) into s[S_ALPHA];
+        p . out <= `tiny` stops CG. mode 2: as 1, for the next CG direction
+        p' = beta p + z instead of p, computed at each point of the stencil (with
+        `next_direction`, so with the same result) and written to `p_new` (a
+        separate buffer: neighbours still read the old p). With `rz_count` > 0,
+        rz is not s[S_RZ] but the sum of the `rz_count` partial sums in `rz_new`
+        (from the last `crop`), and beta = rz / (the sum of those in `rz_old`);
+        every block adds them up itself (see `_sum_partials`). With `pap_out`, the
+        blocks only write their partial sums of p . out there, and `cg_update`
+        computes alpha.
         """
         if f[F_DONE]:
             return
@@ -583,7 +594,7 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @kernel(A, i64, F64A, U32A, F64A, I32A, F64A)
     def center_and_norm(b, n, partials, counter, s, f, history):
-        """Center b and take its norm. A zero norm stops the solve: nothing to do."""
+        """Center b, and its norm into s[S_NORM]. A zero norm stops the solve."""
         mean = T(s[S_MEAN])
         acc = 0.0
         n_u = u32(n)
@@ -635,13 +646,13 @@ def _kernels(dtype: np.dtype) -> dict:
         """Update phi += alpha d, r -= alpha q; then the relative residual of r.
 
         Stops with F_DONE = 1 (converged) at the tolerance, with F_DONE = 2 at
-        the limit. Also writes the new r to its place in the Makhoul-reordered
-        (P1, P2) array v, the input of the preconditioner's FFT (whose padding
-        stays zero). With `pap`, alpha = rz / (p . Ap) comes from the partial sums
-        of p . Ap (and of r . z in `rz_cur`, else s[S_RZ]), which every block adds
-        up itself; zero curvature stops CG in every block alike. With `rr_out`,
-        the blocks only write their partial sums of r . r there, and
-        `makhoul_spectrum` checks convergence.
+        `limit` iterations. Also writes the new r to its place in the
+        Makhoul-reordered (P1, P2) array v, the input of the preconditioner's FFT
+        (whose padding stays zero). With `pap`, alpha = rz / (p . Ap) comes from
+        the partial sums of p . Ap (and of r . z in `rz_cur`, else s[S_RZ]), which
+        every block adds up itself; p . Ap <= `tiny` stops CG in every block
+        alike. With `rr_out`, the blocks only write their partial sums of r . r
+        there, and `makhoul_spectrum` checks convergence.
         """
         if f[F_DONE]:
             return
@@ -789,8 +800,8 @@ def _kernels(dtype: np.dtype) -> dict:
         (r . z) / rz, rz = r . z. mode 2: only z. mode 3: only the blocks' partial
         sums of r . z, into `partials`, for the next kernels to add up (see
         `apply_operator`). mode 4: as 3, and d = z. With `count_iteration`, block
-        0 first counts an iteration that `makhoul_spectrum` checked, also the
-        last one, after which CG stops.
+        0 first counts the iteration that `makhoul_spectrum` checked (F_PENDING),
+        also if CG stopped after it.
         """
         if (count_iteration and cuda.blockIdx.x == 0 and cuda.threadIdx.x == 0
                 and f[F_PENDING]):
@@ -825,7 +836,7 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @cuda.jit(device=True, inline=True)
     def admm_u(src, from_fft, k, i, j, p1_u, p2_u):
-        """Return u at pixel k: from `phi`, or the inverse FFT's (reordered) output."""
+        """Return u at pixel k, from `phi` or (`from_fft`) the reordered FFT output."""
         if from_fft:
             return src[u32(_reordered(i, p1_u) * p2_u + _reordered(j, p2_u))]
         return src[k]
@@ -859,7 +870,8 @@ def _kernels(dtype: np.dtype) -> dict:
         z- and dual updates on the 4 edges of each pixel (each thread writes the
         duals of its right and lower edge, into the other buffer), and the
         right-hand side G^T v of the next u-solve, Makhoul-reordered into
-        `v` (the FFT's input). params[0]: delta^2; rho_[0]: rho.
+        `v` (the FFT's input). params[0]: epsilon^2 (delta = epsilon, the Huber
+        scale); rho_[0]: rho.
         """
         cols_u, p1_u, p2_u = u32(cols), u32(p1), u32(p2)
         cm1 = u32(cols_u - U1)
@@ -905,7 +917,10 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @kernel(A, A, A, T, I32A, F64A, I32A, F64A, F64A, i64)
     def branches_and_phase_slot(phi, wrapped, offset, tau, br0, ph0, br1, ph1, rs, n):
-        """`branches_and_phase` into the candidate slot rs[16] (0 or 1)."""
+        """`branches_and_phase` into the candidate slot rs[16] (0 or 1).
+
+        Does nothing once the rounds have stopped (rs[4]; see `cuts_decide`).
+        """
         if rs[4] != 0.0:
             return
         current = rs[16] != 0.0
@@ -923,20 +938,22 @@ def _kernels(dtype: np.dtype) -> dict:
             k = u32(k + step)
 
     @kernel(
-        I32A, I32A, I32A, I32A, A, A, i32, i32, F64A, U32A, F64A, F64A, F64A, F64A,
+        I32A, I32A, I32A, I32A, A, A, U8A, i32, i32, F64A, U32A, F64A, F64A, F64A,
+        F64A,
     )
-    def cuts_decide(br0, br1, jx, jy, cx, cy, rows, cols, partials, counter, s, rs,
-                    hist, params):
+    def cuts_decide(br0, br1, jx, jy, cx, cy, invalid, rows, cols, partials, counter,
+                    s, rs, hist, params):
         """ADMM: `cuts` of the candidate in slot rs[16], then the stop rule.
 
         In the last block, the stop rule of `irls._irls_rounds` on the device,
         with the candidate slots chosen on the device: a candidate that is kept
         becomes the best (rs[17]), and the next round writes into the other slot.
-        rs: 0 best cost, 1 best turns, 2 best round, 3 stale rounds, 4 done,
-        5 epsilon, 6 epsilon of the best, 7 round index, 8 rounds, 9 patience,
-        10 stop tolerance, 11 epsilon_min, 12 decay, 13 minimal improvement,
-        16 candidate slot, 17 best's slot. Records the round's turns and cost into
-        hist, and the next epsilon^2 into params[0].
+        rs: 0 best cost, 1 best turns, 2 best round (-1: the start), 3 rounds
+        without improvement, 4 done, 5 epsilon, 6 epsilon of the best, 7 round
+        index, 8 maximum rounds, 9 stop patience, 10 stop tolerance,
+        11 epsilon_min, 12 decay, 13 minimum improvement, 16 candidate slot,
+        17 best's slot. Records the round's turns and cost into hist[2 index] and
+        hist[2 index + 1], and the next epsilon^2 into params[0].
         """
         if rs[4] != 0.0:
             return
@@ -949,15 +966,17 @@ def _kernels(dtype: np.dtype) -> dict:
         n = u32(u32(rows) * cols_u)
         k = start()
         step = stride()
+        masked = s[S_INVALID_PIXELS] > 0.0
         while k < n:
             i = u32(k // cols_u)
             j = u32(k - i * cols_u)
-            if j < cm1:
+            here = masked and invalid[k] != 0
+            if j < cm1 and not (here or (masked and invalid[u32(k + U1)] != 0)):
                 e = u32(i * cm1 + j)
                 t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
                 turns += t
                 cost += _dmul(numba.float64(t), numba.float64(cx[e]))
-            if i < rm1:
+            if i < rm1 and not (here or (masked and invalid[u32(k + cols_u)] != 0)):
                 t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
                 turns += t
                 cost += _dmul(numba.float64(t), numba.float64(cy[k]))
@@ -990,10 +1009,12 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @kernel(F64A, F64A, F64A, A, A, A, A, A, A, A, A, i32, i32)
     def admm_weights(rs, ph0, ph1, tx, ty, cx, cy, wx0, wy0, wx1, wy1, rows, cols):
-        """Once the rounds stopped, the result's Charbonnier weights.
+        """Once the rounds have stopped (rs[4]), the result's Charbonnier weights.
 
-        From the best candidate's phase (slot rs[17]) at its epsilon (rs[6]). At
-        the end of each chunk of rounds, so after the stop exactly once.
+        From the best candidate's phase (slot rs[17]) at its epsilon (rs[6]), into
+        that slot's weights, as `_admm_numba.weights_from_phase`. Launched at the
+        end of every chunk of rounds; the host launches no chunk after the stop,
+        so this runs once.
         """
         if rs[4] == 0.0:
             return
@@ -1024,8 +1045,9 @@ def _kernels(dtype: np.dtype) -> dict:
     def circular_offset(phi, wrapped, tau, out, n, partials, counter, offset):
         """ADMM: out = wrap(phi - wrapped); offset[0] = its circular mean.
 
-        angle(sum exp(i out)): the offset removed before rounding, in one pass
-        (the exact median's selection takes three for float32).
+        angle(sum exp(i out)): the offset removed before rounding onto the
+        branches, in one pass (the median, which IRLS removes, takes three
+        selection passes for float32).
         """
         s_acc = 0.0
         c_acc = 0.0
@@ -1069,7 +1091,7 @@ def _kernels(dtype: np.dtype) -> dict:
     def subtract_mean_if_iterated(x, n, s, f):
         """Subtract the mean from x, once CG has stopped, if it iterated.
 
-        As the CPU code's `if iterated: phi -= phi.mean()`.
+        As `if iterated: phi -= phi.mean()` in `irls._WeightedProblem.solve`.
         """
         if not f[F_DONE] or not f[F_ITERATED]:
             return
@@ -1085,10 +1107,11 @@ def _kernels(dtype: np.dtype) -> dict:
     def charbonnier_weights(phi, tx, ty, cx, cy, params, wx, wy, rows, cols, f):
         """Compute w = C eps^2 / sqrt((grad phi - g)^2 + eps^2), eps^2 = params[0].
 
-        As `charbonnier_weights`. With params[1] != 0 ("unless settled"), nothing
-        happens if the last CG ran no iteration: the IRLS loop's fixed point,
-        decided on the device. The parameters are in device memory, so that a
-        captured graph can take new ones each round.
+        As `_irls_numba.charbonnier_weights`. With params[1] != 0 (as
+        `unless_settled` of `irls._WeightedProblem.reweight`), nothing happens if
+        the last CG solve ran no iteration (the IRLS fixed point), decided on the
+        device. The parameters are in device memory, so that a captured graph can
+        take new ones each round.
         """
         if params[1] != 0.0 and f[F_ITER] == 0:
             return
@@ -1124,7 +1147,7 @@ def _kernels(dtype: np.dtype) -> dict:
 
     @kernel(A, A, A, T, I32A, F64A, i64)
     def branches_and_phase(phi, wrapped, offset, tau, branches, phase, n):
-        """Round phi - offset onto branches of wrapped; the congruent phase.
+        """Round phi - offset[0] onto the branches of `wrapped`, and their phase.
 
         branches = rint((phi - offset - wrapped) / tau) (int32), and phase =
         wrapped + 2 pi branches in float64.
@@ -1140,11 +1163,13 @@ def _kernels(dtype: np.dtype) -> dict:
             phase[k] = numba.float64(wrapped[k]) + turns
             k = u32(k + step)
 
-    @kernel(I32A, I32A, I32A, A, A, i32, i32, F64A, U32A, F64A)
-    def cuts(br, jx, jy, cx, cy, rows, cols, partials, counter, s):
-        """Cut turns |jumps + diff(branches)| and their cost, weighted by C.
+    @kernel(I32A, I32A, I32A, A, A, U8A, i32, i32, F64A, U32A, F64A)
+    def cuts(br, jx, jy, cx, cy, invalid, rows, cols, partials, counter, s):
+        """Sum the cut turns |jumps + diff(branches)| and their cut cost.
 
-        Summed over all edges into s[S_TURNS] and s[S_COST].
+        The cost weights each edge's turns by its edge weight C. Summed into
+        s[S_TURNS] and s[S_COST] over all edges except those that touch an invalid
+        pixel (if s[S_INVALID_PIXELS] > 0).
         """
         turns = 0.0
         cost = 0.0
@@ -1154,15 +1179,17 @@ def _kernels(dtype: np.dtype) -> dict:
         n = u32(u32(rows) * cols_u)
         k = start()
         step = stride()
+        masked = s[S_INVALID_PIXELS] > 0.0
         while k < n:
             i = u32(k // cols_u)
             j = u32(k - i * cols_u)
-            if j < cm1:
+            here = masked and invalid[k] != 0
+            if j < cm1 and not (here or (masked and invalid[u32(k + U1)] != 0)):
                 e = u32(i * cm1 + j)
                 t = abs(jx[e] + (br[u32(k + U1)] - br[k]))
                 turns += t
                 cost += _dmul(numba.float64(t), numba.float64(cx[e]))
-            if i < rm1:
+            if i < rm1 and not (here or (masked and invalid[u32(k + cols_u)] != 0)):
                 t = abs(jy[k] + (br[u32(k + cols_u)] - br[k]))
                 turns += t
                 cost += _dmul(numba.float64(t), numba.float64(cy[k]))
@@ -1172,8 +1199,9 @@ def _kernels(dtype: np.dtype) -> dict:
             s[S_TURNS] = t0
             s[S_COST] = t1
 
-    @kernel(A, i32, i32, u64, u64, U64A, U32A, U32A, i32, f64, A, F64A)
-    def select_pass(x, n, pass_, k0, k1, st, hist, counter, mode, t, out_t, out_d):
+    @kernel(A, i32, i32, u64, u64, U64A, U32A, U32A, i32, f64, A, F64A, i32)
+    def select_pass(x, n, pass_, k0, k1, st, hist, counter, mode, t, out_t, out_d,
+                    device_ranks):
         """One pass of the selection of two order statistics (see `_find_bucket`).
 
         The k-th smallest value, by its bit pattern: keys that sort like the
@@ -1183,12 +1211,14 @@ def _kernels(dtype: np.dtype) -> dict:
         the bucket that holds rank k, and narrows the prefix and the rank to it.
         Two ranks at once, k0 <= k1: the two middle values of a median, or the two
         neighbours of a percentile. No host synchronization. `st` holds prefix0,
-        prefix1, rank0, rank1 (set from k0, k1 in pass 0). `hist` is
-        2 * BUCKETS zeros, and left so. After the last pass, mode 0 writes the
-        median (v0 + v1) / 2 in T to out_t[0] (v0 == v1 for odd n, so that is
-        v0), mode 1 the percentile by linear interpolation with weight t, as
-        numpy's `_lerp`, in double to out_d[0]; both modes write v0 and v1 to
-        out_d[1:3].
+        prefix1, rank0, rank1 (set from k0, k1 in pass 0). `hist` (2 * BUCKETS)
+        must be zero, and is zero again after each pass. After the last pass,
+        mode 0 writes the median (v0 + v1) / 2 in T to out_t[0] (v0 == v1 for odd
+        n, so that is v0), mode 1 the percentile by linear interpolation with
+        weight t, as numpy's `_lerp`, in float64 to out_d[0]; both modes write v0
+        and v1 to
+        out_d[1:3]. With `device_ranks`, k0, k1 and t come from st[2], st[3] and
+        out_d[3] instead (see `percentile_ranks`).
         """
         h0 = cuda.shared.array(BUCKETS, numba.uint32)
         h1 = cuda.shared.array(BUCKETS, numba.uint32)
@@ -1235,8 +1265,8 @@ def _kernels(dtype: np.dtype) -> dict:
         if not _ticket_last(counter):
             return
         cuda.threadfence()
-        r0 = k0 if pass_ == 0 else st[2]
-        r1 = k1 if pass_ == 0 else st[3]
+        r0 = k0 if pass_ == 0 and not device_ranks else st[2]
+        r1 = k1 if pass_ == 0 and not device_ranks else st[3]
         _find_bucket(hist, 0, r0, found, found_rank, 0, sh)
         _find_bucket(hist, BUCKETS, r1, found, found_rank, 1, sh)
         b = tid
@@ -1259,49 +1289,131 @@ def _kernels(dtype: np.dtype) -> dict:
                 if mode == 0:
                     out_t[0] = (v0 + v1) / T(2)
                 else:
+                    w = out_d[3] if device_ranks else t
                     a = numba.float64(v0)
                     diff = numba.float64(v1) - a
-                    out_d[0] = (numba.float64(v1) - _dmul(diff, 1.0 - t) if t >= 0.5
-                                else a + _dmul(diff, t))
+                    out_d[0] = (numba.float64(v1) - _dmul(diff, 1.0 - w) if w >= 0.5
+                                else a + _dmul(diff, w))
 
-    @kernel(A, A, A, A, I32A, I32A, A, A, A, A, i32, i32, i32)
-    def prepare_targets(in_, wrapped, tx, ty, jx, jy, cx, cy, wx, wy, rows, cols,
-                        unit_edges):
+    @cuda.jit(device=True, inline=True)
+    def percentile_ranks(invalid_count, n, q, st, out_d):
+        """Set the ranks of the q-th percentile of the valid values.
+
+        For `select_pass` with `device_ranks`. Of n values, `invalid_count` are
+        invalid, and sort above all valid ones. As numpy's "linear" method on the
+        valid values: the ranks of the two neighbours into st[2] and st[3], the
+        interpolation weight into out_d[3]. Without valid values, as if there
+        were one.
+        """
+        valid = n - numba.int64(invalid_count)
+        if valid < 1:
+            valid = numba.int64(1)
+        virtual = numba.float64(valid - 1) * (q / 100.0)
+        low = math.floor(virtual)
+        rank = numba.int64(low)
+        st[2] = u64(rank)
+        st[3] = u64(rank + 1 if rank + 1 < valid else valid - 1)
+        out_d[3] = virtual - low
+
+    @kernel(
+        A, A, U8A, A, A, I32A, I32A, A, A, A, A, i32, i32, i32, i32, f64, F64A, U32A,
+        F64A,
+    )
+    def prepare_targets(in_, wrapped, invalid, tx, ty, jx, jy, cx, cy, wx, wy, rows,
+                        cols, unit_edges, detect, invalid_weight, partials, counter,
+                        s):
         """Copy the wrapped phase, and compute the targets and their jumps.
 
         `in_` may be `wrapped`. As `_WeightedProblem`: the wrapped target gradients
         g = d - rint(d / tau) tau and their whole-turn jumps rint((d - g) / tau),
-        in T. With `unit_edges`, also C = w = 1 on every edge.
+        in T. With `unit_edges`, also C = w = 1 on every edge. With `detect`, the
+        pixels of `in_` that are not finite are invalid: 1 in `invalid` (0
+        elsewhere), their number in s[S_INVALID_PIXELS], C = w = invalid_weight on
+        the edges that touch them, and 0 as their value in the targets. They are
+        left as they are in `wrapped` (other threads may read them from there,
+        if `in_` is `wrapped`): `zero_invalid` sets them to 0 next.
         """
         tau = T(6.283185307179586)
         cols_u = u32(cols)
         cm1 = u32(cols_u - U1)
         rm1 = u32(u32(rows) - U1)
         n = u32(u32(rows) * cols_u)
+        count = 0.0
         k = start()
         step = stride()
         while k < n:
             i = u32(k // cols_u)
             j = u32(k - i * cols_u)
             c = in_[k]
-            wrapped[k] = c
+            bad = False
+            if detect:
+                bad = not math.isfinite(c)
+                if bad:
+                    c = T(0)
+                    count += 1.0
+                invalid[k] = numba.uint8(1) if bad else numba.uint8(0)
+            if not bad:
+                wrapped[k] = c
             if j < cm1:
                 e = u32(i * cm1 + j)
-                d = in_[u32(k + U1)] - c
+                other = in_[u32(k + U1)]
+                bad_other = detect and not math.isfinite(other)
+                if bad_other:
+                    other = T(0)
+                d = other - c
                 g = d - mul(rint(d / tau), tau)
                 tx[e] = g
                 jx[e] = numba.int32(rint((d - g) / tau))
                 if unit_edges:
                     cx[e] = T(1)
                     wx[e] = T(1)
+                if bad or bad_other:
+                    cx[e] = T(invalid_weight)
+                    wx[e] = T(invalid_weight)
             if i < rm1:
-                d = in_[u32(k + cols_u)] - c
+                other = in_[u32(k + cols_u)]
+                bad_other = detect and not math.isfinite(other)
+                if bad_other:
+                    other = T(0)
+                d = other - c
                 g = d - mul(rint(d / tau), tau)
                 ty[k] = g
                 jy[k] = numba.int32(rint((d - g) / tau))
                 if unit_edges:
                     cy[k] = T(1)
                     wy[k] = T(1)
+                if bad or bad_other:
+                    cy[k] = T(invalid_weight)
+                    wy[k] = T(invalid_weight)
+            k = u32(k + step)
+        if detect:
+            last, total = _last_block(count, partials, counter)
+            if last and cuda.threadIdx.x == 0:
+                s[S_INVALID_PIXELS] = total
+
+    @kernel(A, U8A, F64A, i64)
+    def zero_invalid(wrapped, invalid, s, n):
+        """Set the invalid pixels of `wrapped` to 0, after `prepare_targets`."""
+        if s[S_INVALID_PIXELS] == 0.0:
+            return
+        n_u = u32(n)
+        k = start()
+        step = stride()
+        while k < n_u:
+            if invalid[k] != 0:
+                wrapped[k] = T(0)
+            k = u32(k + step)
+
+    @kernel(U8A, F64A, I32A, i64)
+    def restore_invalid(invalid, phase, branches, n):
+        """Set the result at the invalid pixels: phase NaN, branch 0."""
+        n_u = u32(n)
+        k = start()
+        step = stride()
+        while k < n_u:
+            if invalid[k] != 0:
+                phase[k] = math.nan
+                branches[k] = numba.int32(0)
             k = u32(k + step)
 
     @kernel(A, F64A, I32A, i32, A, i64)
@@ -1309,7 +1421,8 @@ def _kernels(dtype: np.dtype) -> dict:
         """Compute the starting phase from a prior, as `irls._starting_phase`.
 
         mode 0 (a phase prior): the branch of the wrapped value nearest to the
-        prior, in double; mode 1 (a branch prior): wrapped + 2 pi branches, in T.
+        prior, in float64, and the wrapped value where the prior is not finite;
+        mode 1 (a branch prior): wrapped + 2 pi branches, in T.
         """
         tau = 6.283185307179586
         n_u = u32(n)
@@ -1319,48 +1432,61 @@ def _kernels(dtype: np.dtype) -> dict:
             if mode == 0:
                 raw = numba.float64(wrapped[k])
                 b = libdevice.rint((prior_phase[k] - raw) / tau)
+                if not math.isfinite(b):
+                    b = 0.0
                 phi[k] = T(raw + _dmul(tau, b))
             else:
                 phi[k] = wrapped[k] + mul(T(tau), T(prior_branches[k]))
             k = u32(k + step)
 
-    @kernel(CA, A, A, i32, F64A, U32A, F64A)
-    def wave_phase_amplitude(wave, phase, amplitude, n, partials, counter, s):
+    @kernel(CA, A, A, U8A, i32, F64A, U32A, F64A, f64, U64A, F64A)
+    def wave_phase_amplitude(wave, phase, amplitude, invalid, n, partials, counter, s,
+                             q, st, out_d):
         """Compute phase and amplitude of a complex wave, as cupy's angle and abs.
 
-        And the number of NaN amplitudes into s[S_NAN]: numpy's percentile is NaN
-        then.
+        Pixels whose amplitude is not finite are invalid: phase 0, amplitude +inf
+        (above all valid ones), 1 in `invalid` (0 elsewhere), and their number
+        into s[S_INVALID_PIXELS]. The last block also sets the ranks of the q-th
+        percentile of the valid amplitudes (`percentile_ranks`).
         """
-        nans = 0.0
+        count = 0.0
         n_u = u32(n)
         k = start()
         step = stride()
         while k < n_u:
             z = _cload(wave, k)
-            phase[k] = math.atan2(z.imag, z.real)
             a = math.hypot(z.real, z.imag)
-            amplitude[k] = a
-            if math.isnan(a):
-                nans += 1.0
+            if math.isfinite(a):
+                phase[k] = math.atan2(z.imag, z.real)
+                amplitude[k] = a
+                invalid[k] = numba.uint8(0)
+            else:
+                phase[k] = T(0)
+                amplitude[k] = T(math.inf)
+                invalid[k] = numba.uint8(1)
+                count += 1.0
             k = u32(k + step)
-        last, total = _last_block(nans, partials, counter)
+        last, total = _last_block(count, partials, counter)
         if last and cuda.threadIdx.x == 0:
-            s[S_NAN] = total
+            s[S_INVALID_PIXELS] = total
+            percentile_ranks(total, numba.int64(n), q, st, out_d)
 
-    @kernel(A, F64A, f64, i32, i32, i32, F64A, U32A, F64A, A, A, A, A)
-    def amplitude_edges(amp, params, floor, rows, cols, mode, partials, counter, s,
-                        cx, cy, wx, wy):
+    @kernel(A, U8A, F64A, f64, f64, i32, i32, i32, F64A, U32A, F64A, A, A, A, A)
+    def amplitude_edges(amp, invalid, params, floor, invalid_weight, rows, cols, mode,
+                        partials, counter, s, cx, cy, wx, wy):
         """Compute edge weights from the amplitude, ref = params[0] (the percentile).
 
-        mode 0: their maximum into s[S_LARGEST] (1 without edges), and the number
-        of edges whose weight is not finite and greater than zero into
-        s[S_INVALID]. mode 1: C = w = (T)(weight / s[S_LARGEST]), as
-        `_check_edge_weights`.
+        Invalid pixels count as amplitude 0. mode 0: the largest edge weight into
+        s[S_LARGEST] (1 without edges), and the number of edges whose weight is
+        not finite and positive into s[S_INVALID]. mode 1: C = w =
+        T(weight / s[S_LARGEST]), as `irls._check_edge_weights` normalizes, and
+        invalid_weight on the edges that touch an invalid pixel.
         """
-        ref = math.nan if s[S_NAN] > 0 else params[0]
+        ref = params[0]
+        masked = s[S_INVALID_PIXELS] > 0.0
         largest = s[S_LARGEST] if mode == 1 else 0.0
         top = -math.inf
-        invalid = 0.0
+        bad = 0.0
         cols_u = u32(cols)
         cm1 = u32(cols_u - U1)
         rm1 = u32(u32(rows) - U1)
@@ -1370,33 +1496,37 @@ def _kernels(dtype: np.dtype) -> dict:
         while k < n:
             i = u32(k // cols_u)
             j = u32(k - i * cols_u)
-            a = _relative_amplitude(numba.float64(amp[k]), ref, floor)
+            here = masked and invalid[k] != 0
+            a = _relative_amplitude(
+                0.0 if here else numba.float64(amp[k]), ref, floor)
             if j < cm1:
-                w = _nan_minimum(
-                    _relative_amplitude(numba.float64(amp[u32(k + U1)]), ref, floor), a)
+                right = masked and invalid[u32(k + U1)] != 0
+                w = _nan_minimum(_relative_amplitude(
+                    0.0 if right else numba.float64(amp[u32(k + U1)]), ref, floor), a)
                 if mode == 0:
                     top = libdevice.fmax(top, w)
                     if not (math.isfinite(w) and w > 0):
-                        invalid += 1.0
+                        bad += 1.0
                 else:
                     e = u32(i * cm1 + j)
-                    cx[e] = T(w / largest)
+                    cx[e] = T(invalid_weight) if here or right else T(w / largest)
                     wx[e] = cx[e]
             if i < rm1:
-                below = numba.float64(amp[u32(k + cols_u)])
+                down = masked and invalid[u32(k + cols_u)] != 0
+                below = 0.0 if down else numba.float64(amp[u32(k + cols_u)])
                 w = _nan_minimum(_relative_amplitude(below, ref, floor), a)
                 if mode == 0:
                     top = libdevice.fmax(top, w)
                     if not (math.isfinite(w) and w > 0):
-                        invalid += 1.0
+                        bad += 1.0
                 else:
-                    cy[k] = T(w / largest)
+                    cy[k] = T(invalid_weight) if here or down else T(w / largest)
                     wy[k] = cy[k]
             k = u32(k + step)
         if mode == 1:
             return
         bmax = _block_max(top)
-        bsum = _block_sum(invalid)
+        bsum = _block_sum(bad)
         if cuda.threadIdx.x == 0:
             partials[u32(cuda.blockIdx.x)] = bmax
             partials[u32(u32(cuda.gridDim.x) + u32(cuda.blockIdx.x))] = bsum
@@ -1410,7 +1540,7 @@ def _kernels(dtype: np.dtype) -> dict:
         while kk < blocks:
             m = libdevice.fmax(m, cuda.ldcg(partials, kk))
             c += cuda.ldcg(partials, u32(blocks + kk))
-            kk = u32(k + UBLOCK)
+            kk = u32(kk + UBLOCK)
         m = _block_max(m)
         c = _block_sum(c)
         if cuda.threadIdx.x == 0:

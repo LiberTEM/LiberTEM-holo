@@ -109,10 +109,9 @@ def _irls_kernel_names() -> list[str]:
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("name", _irls_kernel_names())
 def test_compile_irls_kernel(name, dtype, monkeypatch):
-    """The GPU IRLS kernels, for the argument types they are launched with.
+    """The GPU kernels of the IRLS and ADMM unwrapping, for their declared types.
 
-    That these are the types of every launch is tested on a GPU, in
-    `test_unwrap_cupy.py`.
+    `test_unwrap_cupy.py` checks on a GPU that every launch uses these types.
     """
     from numba.cuda import dispatcher  # noqa: PLC0415
 

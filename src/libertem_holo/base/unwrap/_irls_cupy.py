@@ -1,27 +1,30 @@
 """GPU (cupy) implementation of the weighted problems of the IRLS and ADMM unwrapping.
 
 The counterpart of :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`
-for cupy input, with the same results: the same arithmetic in the same order per
-pixel, and dot products summed in float64. At the image sizes of holography (~500²
-to 2048²), the work per CG iteration is a few passes over one image, so kernel
-launches and host synchronizations cost more than the arithmetic. Hence:
+for cupy input: the same arithmetic in the same order per pixel, and dot products
+summed in float64, so the results match the CPU's when both pad to the same lengths
+(see `PADDED_LENGTH`). At the image sizes of holography (~500² to 2048²), the work
+per CG iteration is a few passes over one image, so kernel launches and host
+synchronizations cost more than the arithmetic. Hence:
 
 * The preconditioner (the unweighted Neumann Poisson solve) is a pair of DCTs, each
-  computed as a real FFT of the reordered image with twiddles (J. Makhoul, 1980), on
-  3-smooth padded lengths, with pre-built cuFFT plans.
+  computed as a real FFT of the reordered image with twiddles (J. Makhoul, 1980),
+  with pre-built cuFFT plans. IRLS pads to even 3-smooth lengths
+  (`_gpu_padded_length`); ADMM does not pad.
 * The CG scalars (alpha, beta, the residuals, the stop flag) stay on the device. Each
   kernel returns at once when the stop flag is set, so a fixed sequence of
-  iterations does what the CPU loop does. It is captured as a CUDA graph, once per
-  workspace, and replayed: one host synchronization per IRLS round. The setup of a
-  solve and its starting point are one more graph (see
-  :meth:`CupyWeightedProblem.cold_start`).
+  iterations does what the CPU loop does. It is captured as a CUDA graph once per
+  problem and set of options, and replayed: one host synchronization per IRLS round
+  of up to `_GRAPH_ITERATIONS` CG iterations. The setup of a solve and its starting
+  point are one more graph (see :meth:`CupyWeightedProblem.cold_start`).
 * Dot products are reduced in float64 and in a fixed order (per-block partial sums,
   then the last block to finish adds them up), so results do not vary from run to
   run. Some are deferred: the next kernel that needs them adds up the partial sums
   (see `_DEFER_RZ`).
 
 The kernels are numba CUDA kernels (`_irls_numba_cuda`). Launching one from Python
-costs ~40 us of host time, so they are only launched while capturing a graph.
+costs ~40 us of host time (measured on a GH200), so the rounds launch them only
+while capturing graphs, and then replay the graphs.
 """
 from __future__ import annotations
 
@@ -30,7 +33,6 @@ import dataclasses
 import math
 import threading
 import warnings
-from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -44,7 +46,9 @@ except ImportError:
     # gets here.
     cp = None
 
-from .irls import _is_smooth
+from libertem_holo.base.workspace import Workspace, default_workspace
+
+from .irls import _INVALID_EDGE_WEIGHT, _is_smooth
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -55,45 +59,45 @@ if TYPE_CHECKING:
 _BLOCK = 256
 # CG iterations per captured graph: the default `iterations_per_round` fits in one.
 _GRAPH_ITERATIONS = 16  # even: see `_cg_iterations`
-# Grid of the grid-stride kernels: at most 8 blocks of 256 threads per
-# multiprocessor, which is full occupancy (4 left the streaming kernels at 45 %
-# of DRAM bandwidth, measured with Nsight Compute; 8 made a CG round 12 % faster
-# at 2048^2, more made the reductions slower), and at least 2 elements per
-# thread, which keeps the reduction tails of small images short.
-_THREADS_PER_SM = 2048  # the most an SM holds at once
+# Grid of the grid-stride kernels: at most `_THREADS_PER_SM` threads per
+# multiprocessor (8 blocks of 256), and at least `_MIN_PER_THREAD` elements per
+# thread, which keeps the reduction tails of small images short. On a GH200,
+# 8 blocks per multiprocessor is full occupancy: 4 left the streaming kernels at
+# 45 % of DRAM bandwidth (Nsight Compute), 8 made a CG round 12 % faster at
+# 2048^2, and larger grids made the reductions slower.
+_THREADS_PER_SM = 2048  # the most a multiprocessor holds at once on a GH200
 _MIN_PER_THREAD = 2
-# Which CG dot products are added up from their partial sums
-# by the kernels that need them, instead of by the last block of the kernel that
-# computes them. That takes the last block's serial tail (~0.5 us) off the
-# critical path, which gains ~4 % at ~500^2 for all three, but every block of the
-# consuming kernels then adds up all partial sums, which costs ~4 % at 2048^2
-# (measured on the GH200). So only up to `_DEFER_MAX_GRID` blocks.
+# Which CG dot products are added up from their partial sums by the kernels that
+# need them, instead of by the last block of the kernel that computes them. That
+# takes the last block's serial tail (~0.5 us) off the critical path, which gains
+# ~4 % at ~500^2 for all three, but every block of the consuming kernels then adds
+# up all partial sums, which costs ~4 % at 2048^2 (measured on a GH200). So they
+# are deferred only on grids of up to `_DEFER_MAX_GRID` blocks.
 _DEFER_RZ = True  # r . z, in apply_operator (beta) and cg_update (alpha)
 _DEFER_ALPHA = True  # p . Ap, in cg_update
 _DEFER_RR = True  # r . r, in makhoul_spectrum (the convergence check)
 _DEFER_MAX_GRID = 512
 # ADMM (`admm.ADMMOptions`): the grid of `admm_update` (no reductions, so one
-# pixel per thread), and the rounds per graph launch: 2 on small images (a round
-# costs little more than a host round trip, ~25 us), else 1 (a round after the
-# stop would be wasted work).
+# pixel per thread), and the rounds per graph launch: 2 up to 512^2 pixels, where
+# a round costs little more than a host round trip (~25 us on a GH200), else 1,
+# since a round after the stop is wasted work.
 _ADMM_GRID = (lambda n: max(1, -(-n // _BLOCK)))  # noqa: E731
 _ADMM_CHUNK = (lambda n: 2 if n <= 512 * 512 else 1)  # noqa: E731
 
 # Indices into the double scalars `s` on the device:
 (_S_NORM, _S_RZ, _S_ALPHA, _S_BETA, _S_MEAN, _S_TURNS, _S_COST, _S_LARGEST, _S_INVALID,
- _S_NAN) = range(10)
+ _S_INVALID_PIXELS) = range(10)
 # Indices into the int flags `f` on the device:
 _F_DONE, _F_ITER, _F_ITERATED, _F_ZERO, _F_PENDING = range(5)
 
 
 def _fft_plans(extended: cp.ndarray, spectrum: cp.ndarray) -> tuple:
-    """Return new cuFFT plans for the real FFT pair on the extended grid.
+    """Return new cuFFT plans for the real FFT pair on the padded grid.
 
-    Each workspace has its own: a plan has a work area for its intermediate
-    results, which every execution of the plan uses, and its stream is set at each
-    call. Shared between workspaces, and so between threads, concurrent solves of
-    the same shape would overwrite each other's intermediate results. A plan pair
-    costs ~10 ms to create, once per workspace.
+    Each problem gets its own pair: every execution of a plan keeps its
+    intermediate results in the plan's work area, so concurrent solves (in
+    different threads) that shared plans would overwrite each other's. Creating a
+    pair takes ~10 ms (measured on a GH200), once per problem.
     """
     return (
         get_fft_plan(extended, value_type="R2C"),
@@ -101,12 +105,21 @@ def _fft_plans(extended: cp.ndarray, spectrum: cp.ndarray) -> tuple:
     )
 
 
-# The padded lengths of IRLS's Poisson preconditioner. None: `_gpu_padded_length`.
-# The tests set `irls._padded_length`, for the CPU's results bit for bit.
+# The padded lengths of the IRLS preconditioner; None means `_gpu_padded_length`.
+# Tests set `irls._padded_length` to get the CPU's results bit for bit.
 PADDED_LENGTH: Callable[[int], int] | None = None
 
-_local = threading.local()
-_CACHE_SIZE = 2
+# Held while kernels are launched from Python, which includes every graph capture
+# and setting up a problem: numba compiles and caches a kernel at its first
+# launch, which two threads must not do at once, and captures of different
+# threads should not interleave.
+_SETUP_LOCK = threading.RLock()
+
+# The slot of the GPU problems in a `Workspace`:
+_SLOT = "unwrap"
+# The most numba array wrappers a problem caches (see `_numba_args`); a problem
+# has about 60 arrays of its own:
+_WRAPPER_CACHE_SIZE = 256
 
 
 def problem_for(
@@ -115,18 +128,19 @@ def problem_for(
     *,
     deferred: bool = False,
     method: str = "irls",
+    workspace: Workspace | None = None,
 ) -> CupyWeightedProblem:
-    """Return a problem for `wrapped`, reusing a workspace of the same shape.
+    """Return a problem for `wrapped`, from `workspace` (None: the default one).
 
-    Buffers, FFT plans and the captured CUDA graph only depend on the shape and the
-    dtype, so a series of same-sized inputs reuses them. Workspaces are kept per
-    thread (two concurrent solves must not share one), for the last
-    :code:`_CACHE_SIZE` shapes. With `deferred`, the input is only copied into the
-    workspace, and :meth:`CupyWeightedProblem.cold_start` or
-    :meth:`~CupyWeightedProblem.warm_start` sets the problem up, which must come
-    next. Workspaces are kept per `method` ("irls" or "admm").
+    Buffers, FFT plans and the captured CUDA graphs only depend on the shape, the
+    dtype, the device and the `method` ("irls" or "admm"), so a series of
+    same-sized inputs reuses them. The workspace keeps one problem; one for other
+    inputs replaces it. The caller must hold the workspace's lock while it uses
+    the problem. With `deferred`, the input is only copied into the problem; the
+    next call must be :meth:`CupyWeightedProblem.cold_start` or
+    :meth:`~CupyWeightedProblem.warm_start`, which sets the problem up.
     """
-    problem = _workspace(wrapped.shape, wrapped.dtype, method)
+    problem = _workspace(wrapped.shape, wrapped.dtype, method, workspace)
     if deferred:
         problem.stage_phase(wrapped, edge_weights)
     else:
@@ -136,18 +150,18 @@ def problem_for(
 
 def problem_for_wave(
     wave: cp.ndarray, floor: float, percentile: float, *, deferred: bool = False,
-    method: str = "irls",
+    method: str = "irls", workspace: Workspace | None = None,
 ) -> CupyWeightedProblem:
     """Return a problem for the phase of `wave`, with edge weights from its amplitude.
 
     See :func:`problem_for` and :meth:`CupyWeightedProblem.fill_from_wave`. With
-    `deferred`, the wave is only copied into the workspace, and the problem is set
-    up by :meth:`CupyWeightedProblem.cold_start` or
-    :meth:`~CupyWeightedProblem.warm_start`, which must come next.
+    `deferred`, the wave is only copied into the problem; the next call must be
+    :meth:`CupyWeightedProblem.cold_start` or
+    :meth:`~CupyWeightedProblem.warm_start`, which sets the problem up.
     """
     dtype = np.float32 if wave.dtype == np.complex64 else np.float64
     wave = cp.ascontiguousarray(wave, dtype=np.result_type(dtype, np.complex64))
-    problem = _workspace(wave.shape, np.dtype(dtype), method)
+    problem = _workspace(wave.shape, np.dtype(dtype), method, workspace)
     if deferred:
         problem.stage_wave(wave, floor, percentile)
     else:
@@ -156,34 +170,39 @@ def problem_for_wave(
 
 
 def _workspace(
-    shape: tuple[int, int], dtype: np.dtype, method: str = "irls",
+    shape: tuple[int, int],
+    dtype: np.dtype,
+    method: str,
+    workspace: Workspace | None,
 ) -> CupyWeightedProblem:
-    """Return the cached workspace for `shape` and `dtype` (see :func:`problem_for`)."""
-    cache = getattr(_local, "cache", None)
-    if cache is None:
-        cache = _local.cache = OrderedDict()
+    """Return the problem of `workspace` for these inputs, on the current device.
+
+    See :func:`problem_for`.
+    """
+    if workspace is None:
+        workspace = default_workspace()
     key = (
         shape, np.dtype(dtype).str, cp.cuda.Device().id, method,
         PADDED_LENGTH, _BLOCK, _MIN_PER_THREAD,
         _DEFER_RZ, _DEFER_ALPHA, _DEFER_RR, _DEFER_MAX_GRID,
     )
-    problem = cache.pop(key, None)
-    if problem is None:
-        problem = CupyWeightedProblem(
-            shape, dtype, padded_length=PADDED_LENGTH, method=method,
-        )
-    cache[key] = problem
-    while len(cache) > _CACHE_SIZE:
-        cache.popitem(last=False)
-    return problem
+
+    def build() -> CupyWeightedProblem:
+        with _SETUP_LOCK:
+            return CupyWeightedProblem(
+                shape, dtype, padded_length=PADDED_LENGTH, method=method,
+            )
+
+    return workspace.entry(_SLOT, key, build)
 
 
 def _gpu_padded_length(length: int) -> int:
     """Return the smallest even 3-smooth number that is at least `length`.
 
-    cuFFT is fastest on these lengths. Lengths with factors of 5 or 7, which the
-    CPU version allows, are much slower with cuFFT for some sizes (500 against
-    512, 1008 against 1024), and measured slower overall, padding included.
+    Lengths with factors of 5, 7 or 11, which the CPU version
+    (`irls._padded_length`) allows, are much slower with cuFFT for some sizes
+    (500 against 512, 1008 against 1024), and were slower overall on a GH200,
+    padding included.
     """
     candidate = max(length, 2)
     while candidate % 2 != 0 or not _is_smooth(candidate, limit=3):
@@ -212,10 +231,12 @@ def _multiprocessor_count() -> int:
 
 
 class CupyWeightedProblem:
-    """The weighted problem of one IRLS round, on the GPU.
+    """The weighted problem of IRLS or ADMM rounds, on the GPU.
 
     Same interface as :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`.
-    All arrays are cupy arrays. Use :func:`problem_for` to get one.
+    All arrays are cupy arrays. A problem holds the buffers, FFT plans and
+    captured CUDA graphs for one shape, dtype, method and device, and is reused
+    by later solves. Use :func:`problem_for` to get one.
 
     Everything runs on a private non-blocking stream (stream capture needs one),
     ordered with the caller's stream on entry and exit (:meth:`_on_stream`).
@@ -265,7 +286,7 @@ class CupyWeightedProblem:
                 else padded_length or _gpu_padded_length,
             )
 
-            # CG work arrays; the graph runs on `phi`, see `solve`:
+            # CG work arrays; the graphs iterate on `phi` (see `run_round`):
             self.phi, self.b, self.q, self.r, self.z = (image() for _ in range(5))
             # The CG direction, in two buffers: an iteration computes the next one
             # from the current one (see `apply_operator`, mode 2).
@@ -274,17 +295,20 @@ class CupyWeightedProblem:
             self.difference = image()
             # Inputs at fixed addresses, for the captured graphs:
             self.wrapped = image()
+            # 1 for the invalid pixels, set up with the input:
+            self.invalid = cp.zeros(self.size, dtype=cp.uint8)
             self.wave = None  # a staged wave (see `stage_wave`)
             self.prior_phase = None  # a staged prior (see `warm_start`)
             self.prior_branches = None
-            self.start_params = cp.zeros(2, dtype=cp.float64)  # eps^2 of a prior
+            # The parameters of `charbonnier_weights` (eps^2, "unless settled"):
+            self.start_params = cp.zeros(2, dtype=cp.float64)  # for a warm start
             self.l2 = image()  # the L2 solution of the cold start
-            # eps^2, unless settled (and unused):
-            self.round_params = cp.zeros(3, dtype=cp.float64)
-            self.direct_params = cp.zeros(2, dtype=cp.float64)  # the same, ungraphed
-            # Two slots for a round's candidate result (phase, branches, weights):
-            # a round writes into the slot that does not hold the best result so
-            # far, so that keeping a candidate needs no copy (see `keep`).
+            self.round_params = cp.zeros(3, dtype=cp.float64)  # per round; [2] unused
+            # set on the device, for `reweight` and the cold start from zero:
+            self.direct_params = cp.zeros(2, dtype=cp.float64)
+            # Two slots for a round's candidate (phase, branches, weights): a round
+            # writes into the slot that does not hold the kept candidate, so that
+            # keeping a candidate needs no copy (see `keep`).
             self.slots = tuple(
                 (cp.empty(self.shape, dtype=cp.float64),
                  cp.empty(self.shape, dtype=cp.int32),
@@ -295,11 +319,11 @@ class CupyWeightedProblem:
             # Reused for the stream ordering of `_on_stream`:
             self._event_caller = cp.cuda.Event(disable_timing=True)
             self._event_own = cp.cuda.Event(disable_timing=True)
-            # The radix selection (see `select_pass`):
+            # State of the radix selection (see `_select`):
             self.select_state = cp.zeros(4, dtype=cp.uint64)
             self.select_hist = cp.zeros(2 * 2048, dtype=cp.uint32)
             self.select_counter = cp.zeros(1, dtype=cp.uint32)
-            self.select_out = cp.zeros(3, dtype=cp.float64)
+            self.select_out = cp.zeros(4, dtype=cp.float64)
             self.offset = cp.zeros(1, dtype=self.dtype)
         if self.extended.size >= 2**31:
             msg = f"image too large for the GPU solver: {shape}"
@@ -307,14 +331,14 @@ class CupyWeightedProblem:
         self._init_host_state()
 
     def _set_deferrals(self) -> None:
-        """Which dot products to defer, for this grid (see `_DEFER_RZ`)."""
+        """Decide which dot products to defer, for this grid (see `_DEFER_RZ`)."""
         small = self.grid <= _DEFER_MAX_GRID
         self.defer_rz = _DEFER_RZ and small
         self.defer_alpha = _DEFER_ALPHA and small
         self.defer_rr = _DEFER_RR and small
 
     def _init_host_state(self) -> None:
-        """Pinned host buffers, captured graphs, and the state of a solve."""
+        """Set up the pinned host buffers, the graph caches, and a solve's state."""
         self._host_s = _pinned(self.s.size, np.float64)
         self._host_params = _pinned(3, np.float64)
         self._admm_graphs: dict[bool, cp.cuda.graph.Graph] = {}
@@ -322,14 +346,18 @@ class CupyWeightedProblem:
         self._history_length = 0
         self._graph = None
         self._graph_key = None
-        self._start_graphs: dict[tuple, cp.cuda.graph.Graph] = {}
+        self._start_graphs: dict[tuple, tuple[tuple, cp.cuda.graph.Graph]] = {}
         self._host_start_params = _pinned(2, np.float64)
         self._check_weights = False
+        # whether _host_s holds the number of invalid pixels:
+        self._invalid_on_host = False
         self._staged = None
         self._iterations = 0
 
     def _setup_preconditioner(self, padded_length: Callable[[int], int]) -> None:
         """Set up the Neumann Poisson solve on the zero-padded grid (P1, P2).
+
+        For ADMM, `padded_length` is the identity: no padding.
 
         DCTs by FFTs of size (P1, P2) of the reordered image, with twiddles. The
         preconditioner is C3 D C2 for the orthonormal DCTs C2, C3 = C2^-1 and the
@@ -366,7 +394,7 @@ class CupyWeightedProblem:
         wrapped: cp.ndarray,
         edge_weights: tuple[cp.ndarray, cp.ndarray] | None,
     ) -> None:
-        """Set up the problem for `wrapped`, in this workspace."""
+        """Set up the problem for `wrapped`."""
         with self._on_stream():
             if edge_weights is not None:
                 self.edge_x[...] = edge_weights[0]
@@ -375,8 +403,9 @@ class CupyWeightedProblem:
                 self._memcpy(self.weights_y, self.edge_y)
             self._prepare_targets(
                 cp.ascontiguousarray(wrapped, dtype=self.dtype),
-                unit_edges=edge_weights is None,
+                unit_edges=edge_weights is None, detect=True,
             )
+        self._invalid_on_host = False
         self._iterations = 0
         self._kept = None
         self._staged = None
@@ -391,6 +420,7 @@ class CupyWeightedProblem:
         """
         with self._on_stream():
             self._enqueue_fill_from_wave(wave, floor, percentile)
+        self._invalid_on_host = False
         self._check_weights = True
         self._iterations = 0
         self._kept = None
@@ -402,25 +432,27 @@ class CupyWeightedProblem:
         rows, cols = self.shape
         n = self.size
         amplitude = self.difference  # free until the first `congruent`
-        virtual = (n - 1) * (percentile / 100)  # numpy's "linear" method
-        low = math.floor(virtual)
         self._launch(
             "wave_phase_amplitude",
-            (wave, self.wrapped, amplitude, np.int32(n), self.partials,
-             self.counter, self.s),
+            (wave, self.wrapped, amplitude, self.invalid, np.int32(n), self.partials,
+             self.counter, self.s, np.float64(percentile), self.select_state,
+             self.select_out),
         )
-        self._select(amplitude, (low, min(low + 1, n - 1)), mode=1, t=virtual - low)
+        # The percentile of the valid amplitudes (the invalid ones are +inf), at
+        # the ranks that `wave_phase_amplitude` set:
+        self._select(amplitude, (0, 0), mode=1, device_ranks=True)
         for mode in (0, 1):
             self._launch(
                 "amplitude_edges",
-                (amplitude, self.select_out, np.float64(floor), np.int32(rows),
-                 np.int32(cols), np.int32(mode), self.partials, self.counter,
-                 self.s, self.edge_x, self.edge_y, self.weights_x, self.weights_y),
+                (amplitude, self.invalid, self.select_out, np.float64(floor),
+                 np.float64(_INVALID_EDGE_WEIGHT), np.int32(rows), np.int32(cols),
+                 np.int32(mode), self.partials, self.counter, self.s, self.edge_x,
+                 self.edge_y, self.weights_x, self.weights_y),
             )
-        self._prepare_targets(self.wrapped, unit_edges=False)
+        self._prepare_targets(self.wrapped, unit_edges=False, detect=False)
 
     def stage_wave(self, wave: cp.ndarray, floor: float, percentile: float) -> None:
-        """Copy `wave` into the workspace; the start graph sets up from it."""
+        """Copy `wave` into the problem; the start graph sets the problem up from it."""
         with self._on_stream():
             if self.wave is None or self.wave.dtype != wave.dtype:
                 self.wave = cp.empty(self.shape, dtype=wave.dtype)
@@ -432,7 +464,7 @@ class CupyWeightedProblem:
         wrapped: cp.ndarray,
         edge_weights: tuple[cp.ndarray, cp.ndarray] | None,
     ) -> None:
-        """Copy the wrapped phase (and edge weights) into the workspace."""
+        """Copy the wrapped phase (and the edge weights, if given) into the problem."""
         with self._on_stream():
             self._memcpy(self.wrapped, cp.ascontiguousarray(wrapped, dtype=self.dtype))
             if edge_weights is not None:
@@ -451,9 +483,9 @@ class CupyWeightedProblem:
     ) -> tuple[cp.ndarray, _Candidate, float]:
         """Start a solve without a prior; see `irls._cold_start`.
 
-        After staging, as one CUDA graph: the setup, the rounded L2 solution as
-        the first candidate (into slot 0), and the starting point. One
-        synchronization.
+        If the input was staged (`deferred`), one CUDA graph and one
+        synchronization: the setup, the rounded L2 solution as the first
+        candidate (into slot 0), and the starting point.
         """
         from .irls import _cold_start  # noqa: PLC0415
 
@@ -472,9 +504,10 @@ class CupyWeightedProblem:
     ) -> tuple[cp.ndarray, _Candidate, float]:
         """Start a solve from a prior; see `irls._warm_start`.
 
-        After staging, as one CUDA graph: the setup, the starting phase from the
-        prior, its weights, and it rounded as the first candidate. The epsilon of
-        the weights comes from pinned memory, so one graph serves every prior.
+        If the input was staged (`deferred`), one CUDA graph: the setup, the
+        starting phase from the prior, its weights, and the rounded starting phase
+        as the first candidate. The epsilon of the weights comes from pinned
+        memory, so one graph serves every prior of the same type.
         """
         from .irls import L1PhasePrior, _warm_start  # noqa: PLC0415
 
@@ -503,15 +536,23 @@ class CupyWeightedProblem:
     def _run_start(
         self, kind: str, options: IRLSOptions, *, weights_epsilon: float,
     ) -> _Candidate:
-        """Launch the start graph of `kind` for the staged input; its candidate."""
+        """Run the start graph of `kind` on the staged input; return its candidate."""
         from .irls import _Candidate  # noqa: PLC0415
 
         staged, self._staged = self._staged, None
+        self._invalid_on_host = True
+        # One graph per kind of staged input and of start, captured again when
+        # the staged parameters or the options change:
+        slot = (staged[0], kind)
         key = (staged, kind, options.epsilon_start if kind == "zero" else None)
-        graph = self._start_graphs.get(key)
-        if graph is None:
-            graph = self._capture(lambda: self._enqueue_start(staged, kind, options))
-            self._start_graphs[key] = graph
+        entry = self._start_graphs.get(slot)
+        if entry is None or entry[0] != key:
+            self._start_graphs.pop(slot, None)
+            entry = (key, self._capture(
+                lambda: self._enqueue_start(staged, kind, options),
+            ))
+            self._start_graphs[slot] = entry
+        graph = entry[1]
         with self._on_stream():
             graph.launch(self.stream)
             self.stream.synchronize()
@@ -531,7 +572,8 @@ class CupyWeightedProblem:
     def _enqueue_start(self, staged: tuple, kind: str, options: IRLSOptions) -> None:
         """Enqueue a start: the setup, the starting point, and the first candidate.
 
-        `staged` is ("wave", floor, percentile) or ("phase", edge weights given);
+        `staged` is ("wave", floor, percentile) or ("phase", whether edge weights
+        were given);
         `kind` is "zero" or "least_squares" (a cold start), "phase_prior" or
         "branches_prior". Mirrors `irls._cold_start` and `irls._warm_start`.
         """
@@ -543,7 +585,7 @@ class CupyWeightedProblem:
             if staged[1]:
                 self._memcpy(self.weights_x, self.edge_x)
                 self._memcpy(self.weights_y, self.edge_y)
-            self._prepare_targets(self.wrapped, unit_edges=not staged[1])
+            self._prepare_targets(self.wrapped, unit_edges=not staged[1], detect=True)
         phase, branches, weights_x, weights_y = self.slots[0]
 
         def candidate(phi: cp.ndarray) -> None:
@@ -551,7 +593,7 @@ class CupyWeightedProblem:
             self._launch(
                 "cuts",
                 (branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-                 *dims, self.partials, self.counter, self.s),
+                 self.invalid, *dims, self.partials, self.counter, self.s),
             )
             self._memcpy(weights_x, self.weights_x)
             self._memcpy(weights_y, self.weights_y)
@@ -573,7 +615,8 @@ class CupyWeightedProblem:
             self._precondition(self.b, self.l2, self.f_free, mode=2)
             candidate(self.l2)
             if kind == "zero":
-                # From zero, with its weights (used only if there are cuts):
+                # Start from zero, with the weights there; `cold_start` uses
+                # this start only if the L2 candidate has cut turns:
                 cp.cuda.runtime.memsetAsync(
                     self.phi.data.ptr, 0, self.phi.nbytes, self.stream.ptr,
                 )
@@ -597,26 +640,37 @@ class CupyWeightedProblem:
             candidate(self.phi)
         self._memcpy(self._host_s, self.s)
 
-    def _prepare_targets(self, wrapped: cp.ndarray, *, unit_edges: bool) -> None:
+    def _prepare_targets(
+        self, wrapped: cp.ndarray, *, unit_edges: bool, detect: bool,
+    ) -> None:
+        """Enqueue the targets; with `detect`, find the invalid pixels of `wrapped`."""
         rows, cols = self.shape
         self._launch(
             "prepare_targets",
-            (wrapped, self.wrapped, self.target_x, self.target_y, self.jumps_x,
-             self.jumps_y, self.edge_x, self.edge_y, self.weights_x, self.weights_y,
-             np.int32(rows), np.int32(cols), np.int32(unit_edges)),
+            (wrapped, self.wrapped, self.invalid, self.target_x, self.target_y,
+             self.jumps_x, self.jumps_y, self.edge_x, self.edge_y, self.weights_x,
+             self.weights_y, np.int32(rows), np.int32(cols), np.int32(unit_edges),
+             np.int32(detect), np.float64(_INVALID_EDGE_WEIGHT), self.partials,
+             self.counter, self.s),
         )
+        if detect:
+            self._launch(
+                "zero_invalid",
+                (self.wrapped, self.invalid, self.s, np.int64(self.size)),
+            )
 
     # -- launches ------------------------------------------------------------
 
     @contextlib.contextmanager
     def _on_stream(self) -> Iterator[None]:
-        """Run on our stream, ordered after and before the caller's stream.
+        """Run on the problem's stream, ordered after and before the caller's stream.
 
-        Our stream first waits for the caller's, whose arrays we are about to use.
-        At the end, the caller's stream waits for ours: that makes our results
-        safe to use there, and it keeps the memory pool from handing memory that
-        the caller frees after the call to a new array while our stream is still
-        reading it. Neither costs a host synchronization.
+        The problem's stream first waits for the caller's, whose arrays it is
+        about to use. At the end, the caller's stream waits for the problem's:
+        that makes the results safe to use there, and it keeps the memory pool from
+        handing memory that the caller frees after the call to a new array while
+        the problem's stream is still reading it. Neither costs a host
+        synchronization.
         """
         caller = cp.cuda.get_current_stream()
         if caller == self.stream:
@@ -636,7 +690,7 @@ class CupyWeightedProblem:
     def _launch(
         self, name: str, args: tuple, grid: int | None = None, block: int | None = None,
     ) -> None:
-        with warnings.catch_warnings():
+        with _SETUP_LOCK, warnings.catch_warnings():
             # Small grids are deliberate (flags, small images); numba warns of
             # low occupancy:
             warnings.filterwarnings("ignore", message="Grid size", category=Warning)
@@ -667,7 +721,10 @@ class CupyWeightedProblem:
 
         from . import _irls_numba_cuda  # noqa: PLC0415
         if self.block != _irls_numba_cuda.BLOCK:
-            msg = "the numba kernels are compiled for their own block size"
+            msg = (
+                f"block size {self.block} does not match the block size the numba "
+                f"kernels are compiled for ({_irls_numba_cuda.BLOCK})"
+            )
             raise ValueError(msg)
         self.kernels = _irls_numba_cuda.kernels(self.dtype)
         self._numba_stream = numba_cuda.external_stream(self.stream.ptr)
@@ -679,18 +736,25 @@ class CupyWeightedProblem:
     def _numba_args(self, args: tuple) -> tuple:
         """Return the arguments for a numba kernel.
 
-        Arrays are wrapped once, without the stream synchronization of the array
-        interface, which graph capture forbids.
+        Arrays are wrapped without the stream synchronization of the array
+        interface, which graph capture forbids. A wrapper only describes the
+        memory (address, shape, dtype), and does not keep the array alive, so
+        it is cached by that description: for another array at the same address
+        it is the same. The cache is emptied when it grows large.
         """
         out = []
         for arg in args:
             if isinstance(arg, cp.ndarray):
                 key = (arg.data.ptr, arg.shape, arg.dtype.str)
-                if key not in self._numba_arrays:
-                    self._numba_arrays[key] = self._numba_cuda.as_cuda_array(
-                        arg.ravel(), sync=False,
+                wrapper = self._numba_arrays.get(key)
+                if wrapper is None:
+                    if len(self._numba_arrays) >= _WRAPPER_CACHE_SIZE:
+                        self._numba_arrays.clear()
+                    wrapper = self._numba_cuda.from_cuda_array_interface(
+                        arg.ravel().__cuda_array_interface__, owner=None, sync=False,
                     )
-                out.append(self._numba_arrays[key])
+                    self._numba_arrays[key] = wrapper
+                out.append(wrapper)
             else:
                 out.append(arg)
         return tuple(out)
@@ -751,12 +815,14 @@ class CupyWeightedProblem:
         mode: int,
         t: float = 0.0,
         out_t: cp.ndarray | None = None,
+        device_ranks: bool = False,
     ) -> None:
         """Enqueue the radix selection of the values of ranks `ranks` in `x`.
 
         mode 0: their mean in the dtype of `x` to `out_t` (the median, for the two
         middle ranks); mode 1: the linear interpolation with weight `t` between
-        them, in float64, to `self.select_out[0]`.
+        them, in float64, to `self.select_out[0]`. With `device_ranks`, the ranks
+        and `t` come from the device instead (see `percentile_ranks`).
         """
         n = x.size
         bits = 8 * x.dtype.itemsize
@@ -767,7 +833,8 @@ class CupyWeightedProblem:
                 (x, np.int32(n), np.int32(p), np.uint64(ranks[0]), np.uint64(ranks[1]),
                  self.select_state, self.select_hist, self.select_counter,
                  np.int32(mode), np.float64(t),
-                 out_t if out_t is not None else self.offset, self.select_out),
+                 out_t if out_t is not None else self.offset, self.select_out,
+                 np.int32(device_ranks)),
                 grid=grid,
             )
 
@@ -832,14 +899,15 @@ class CupyWeightedProblem:
     def _cg_iterations(
         self, count: int, options: IRLSOptions, *, first: bool,
     ) -> None:
-        """Enqueue `count` CG iterations, then the mean removal once CG stopped.
+        """Enqueue `count` CG iterations, then remove the mean if CG has iterated.
 
         Iterations after CG has stopped (converged, or at the limit) do nothing,
-        except for the FFTs, which cannot be skipped from the device. Each
-        iteration but the `first` after the preamble computes its direction from
-        the last one, in the other direction buffer, and the deferred r . z
-        alternates between its two buffers likewise: `count` must be even for a
-        graph that is replayed after itself.
+        except for the FFTs, which cannot be skipped from the device; the mean is
+        removed only once CG has stopped. Except for
+        the first iteration after the preamble (`first`), each iteration computes
+        its direction from the previous one into the other direction buffer, and
+        the deferred r . z alternates between its two buffers likewise. So `count`
+        must be even for a graph that is replayed after itself.
         """
         _, cols = self.shape
         p1, p2 = self.padded_shape
@@ -882,14 +950,15 @@ class CupyWeightedProblem:
         self._launch("subtract_mean_if_iterated", (phi, n, self.s, self.f))
 
     def _capture(self, enqueue: Callable[[], None]) -> cp.cuda.graph.Graph:
-        """Capture what `enqueue` enqueues on the workspace's stream as a graph.
+        """Capture what `enqueue` enqueues on the problem's stream as a graph.
 
         A device-wide synchronization (`cudaDeviceSynchronize`) in any thread
-        while this captures invalidates the capture. That happens only while a
-        workspace is set up (the first solve of a shape in a thread); workers
-        should synchronize their own streams instead.
+        while this captures invalidates the capture. Captures happen at the first
+        solve of a problem and when the options change, one at a time
+        (`_SETUP_LOCK`); other threads should synchronize their own streams
+        instead.
         """
-        with self.stream:
+        with _SETUP_LOCK, self.stream:
             self.stream.begin_capture()
             try:
                 enqueue()
@@ -929,7 +998,8 @@ class CupyWeightedProblem:
         self._launch(
             "cuts",
             (branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-             np.int32(rows), np.int32(cols), self.partials, self.counter, self.s),
+             self.invalid, np.int32(rows), np.int32(cols), self.partials,
+             self.counter, self.s),
         )
         self._memcpy(weights_x, self.weights_x)
         self._memcpy(weights_y, self.weights_y)
@@ -943,8 +1013,8 @@ class CupyWeightedProblem:
         With up to `_GRAPH_ITERATIONS` CG iterations, one graph: the round's
         parameters from pinned memory, the CG, and the round's tail. With more, the
         first graph stops after that many iterations, `_graph_more` runs as many
-        more, and the tail graph the tail. The graphs with the tail exist once per
-        candidate slot.
+        more, and `_graph_tails` runs the tail. The graphs with the tail exist once
+        per candidate slot.
         """
         key = (options.iterations_per_round, options.cg_relative_tolerance)
         if self._graph_key == key:
@@ -967,8 +1037,8 @@ class CupyWeightedProblem:
             if single:
                 self._round_tail(slot)
 
-        # Both first graphs end with the direction in the same buffer, where the
-        # more graph starts.
+        # Both first graphs end with the direction in the same buffer, where
+        # `_graph_more` starts.
         self._graphs = tuple(self._capture(lambda s=s: first(s)) for s in (0, 1))
         self._graph_more = (
             None if single
@@ -995,14 +1065,16 @@ class CupyWeightedProblem:
     ) -> tuple[L1Round, _Candidate]:
         """Run one IRLS round on `phi` (in place); see `_WeightedProblem.run_round`.
 
-        One graph launch and one synchronization. The candidate's arrays are a
-        workspace slot, valid until the next round unless it is kept (:meth:`keep`),
-        and until the end of the solve (:meth:`release`) if it is.
+        One graph launch and one synchronization (with up to `_GRAPH_ITERATIONS`
+        CG iterations). The candidate's arrays are a candidate slot of the
+        problem, valid until the next round unless the candidate is kept
+        (:meth:`keep`), and until the end of the solve (:meth:`release`) if it is.
         """
         from .irls import L1Round, _Candidate  # noqa: PLC0415
 
         self._prepare_graph(options)
-        # Read by the graph when it runs; the last round has synchronized.
+        # Read by the graph when it runs; safe to write, since the previous round
+        # has synchronized.
         self._host_params[0] = epsilon * epsilon
         self._host_params[1] = float(at_end)
         slot = 1 if self._kept == 0 else 0
@@ -1111,9 +1183,10 @@ class CupyWeightedProblem:
         )
 
     def _prepare_admm(self, options: ADMMOptions) -> None:
-        """Buffers and the graphs of ADMM's rounds: a solve's first chunk, and later.
+        """Set up ADMM's buffers, and capture the graphs of its rounds.
 
-        The round state `round_state` is documented at `cuts_decide`.
+        One graph for the first chunk of rounds of a solve, one for later chunks.
+        The layout of `round_state` is documented at `cuts_decide`.
         """
         key = (options.rounds, options.iterations_per_round, options.rho_scale)
         if self._admm_key == key:
@@ -1166,8 +1239,7 @@ class CupyWeightedProblem:
             self._launch(
                 "crop",
                 (self.extended, self.r, self.phi, self.phi, *dims, self.partials,
-                 self.counter, self.s, self.f_free, np.int32(2), np.int32(0),
-                 self.weights_x, self.weights_y, self.round_params, np.int32(0)),
+                 self.counter, self.s, self.f_free, np.int32(2), np.int32(0)),
             )
             self._launch(
                 "circular_offset",
@@ -1182,7 +1254,8 @@ class CupyWeightedProblem:
             self._launch(
                 "cuts_decide",
                 (br0, br1, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-                 np.int32(rows), np.int32(cols), self.partials, self.counter, self.s,
+                 self.invalid, np.int32(rows), np.int32(cols), self.partials,
+                 self.counter, self.s,
                  self.round_state, self.round_hist, self.round_params),
             )
 
@@ -1207,7 +1280,7 @@ class CupyWeightedProblem:
                             x.data.ptr, 0, x.nbytes, self.stream.ptr)
             for _ in range(_ADMM_CHUNK(self.size)):
                 one_round()
-            # once the rounds have stopped, the result's weights:
+            # once the rounds have stopped, the weights of the best candidate:
             self._launch(
                 "admm_weights",
                 (self.round_state, ph0, ph1, self.target_x, self.target_y,
@@ -1230,14 +1303,17 @@ class CupyWeightedProblem:
         return None
 
     def keep(self, candidate: _Candidate) -> _Candidate:
-        """Keep a candidate past the next round: protect its slot from it."""
+        """Keep `candidate` past the next round, which writes into the other slot."""
         slot = self._slot_of(candidate)
         if slot is not None:
             self._kept = slot
         return candidate
 
     def release(self, candidate: _Candidate) -> _Candidate:
-        """Copy the result out of the workspace, which later solves reuse."""
+        """Copy `candidate` out of the problem, whose slots later solves overwrite.
+
+        The copy has NaN as the phase and 0 as the branch of the invalid pixels.
+        """
         if self._slot_of(candidate) is None:
             return candidate
         self._kept = None
@@ -1247,7 +1323,21 @@ class CupyWeightedProblem:
                 source = getattr(candidate, name)
                 arrays[name] = cp.empty_like(source)
                 self._memcpy(arrays[name], source)
+            if self._invalid_pixels():
+                self._launch(
+                    "restore_invalid",
+                    (self.invalid, arrays["phase"], arrays["branches"],
+                     np.int64(self.size)),
+                )
             return dataclasses.replace(candidate, **arrays)
+
+    def _invalid_pixels(self) -> int:
+        """Return the number of invalid pixels of the current problem."""
+        if not self._invalid_on_host:  # set up without a start graph
+            self._memcpy(self._host_s, self.s)
+            self.stream.synchronize()
+            self._invalid_on_host = True
+        return int(self._host_s[_S_INVALID_PIXELS])
 
     def cuts(self, branches: cp.ndarray) -> tuple[int, float]:
         """Count the cut turns of `branches`, and their cost. Synchronizes."""
@@ -1256,7 +1346,8 @@ class CupyWeightedProblem:
             self._launch(
                 "cuts",
                 (branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-                 np.int32(rows), np.int32(cols), self.partials, self.counter, self.s),
+                 self.invalid, np.int32(rows), np.int32(cols), self.partials,
+                 self.counter, self.s),
             )
             s = self.s.get(stream=self.stream)
         if self._check_weights:
@@ -1269,10 +1360,10 @@ class CupyWeightedProblem:
     def reweight(
         self, phi: cp.ndarray, epsilon: float, *, unless_settled: bool = False,
     ) -> None:
-        """Set the weights from `phi` at `epsilon`.
+        """Set the weights from the iterate `phi` at `epsilon`.
 
-        With `unless_settled`, only if the last :meth:`solve` ran an iteration;
-        decided on the device.
+        With `unless_settled`, only if the last CG ran an iteration; decided on the
+        device.
         """
         rows, cols = self.shape
         with self._on_stream():
@@ -1322,7 +1413,7 @@ class CupyWeightedProblem:
         tau = self.dtype.type(2 * np.pi)
         n = np.int64(self.size)
         if self.method == "admm":
-            # the circular mean instead of the median, in one pass
+            # ADMM: around the circular mean instead of the median, in one pass
             self._launch(
                 "circular_offset",
                 (phi, wrapped, tau, self.difference, n, self.partials, self.counter,

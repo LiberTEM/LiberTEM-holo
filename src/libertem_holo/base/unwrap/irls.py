@@ -8,6 +8,7 @@ import dataclasses
 import functools
 import math
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal
@@ -18,6 +19,7 @@ import scipy.fft
 from libertem.common.threading import set_num_threads, set_numba_threads
 
 from libertem_holo.base.align import _array_module
+from libertem_holo.base.workspace import Workspace, default_workspace
 
 from . import _irls_numba
 
@@ -28,8 +30,8 @@ TAU = 2 * np.pi
 
 # On a 72-core GH200, 16 threads made IRLS 8-22 % and ADMM 22-39 % faster than
 # 8, from ~500^2 to 2048^2 images; 32 were slower again at ~500^2 (the
-# per-iteration work is too small to spread wider). On a 24-core machine, more
-# than 8 used to make IRLS slower.
+# per-iteration work is too small to spread wider). An earlier measurement on a
+# 24-core machine found IRLS slower with more than 8.
 _DEFAULT_MAX_THREADS = 16
 
 L1Status = Literal["converged", "iteration_limit"]
@@ -45,8 +47,8 @@ class IRLSOptions:
     Parameters
     ----------
     rounds
-        Maximum number of reweighting rounds. Epsilon reaches
-        :code:`epsilon_min` in the last of them.
+        Maximum number of reweighting rounds. Epsilon decays geometrically from
+        :code:`epsilon_start` to :code:`epsilon_min` over them.
     iterations_per_round
         Maximum number of conjugate gradient (CG) iterations per round.
     epsilon_start
@@ -134,21 +136,21 @@ class IRLSOptions:
 
 @dataclass
 class L1Round:
-    """How one IRLS round ended.
+    """How one round of a solve ended.
 
     Attributes
     ----------
     iterations
-        Number of CG iterations run.
+        Number of iterations run: CG iterations for IRLS, ADMM iterations for ADMM.
     residuals
-        The relative residual before the first iteration and after each one, so
+        The relative CG residual before the first iteration and after each one, so
         :code:`iterations + 1` entries; a single :code:`0.0` if the right-hand side
-        was zero.
+        was zero. Empty for ADMM.
     converged
         Whether CG reached :code:`cg_relative_tolerance` within
-        :code:`iterations_per_round`.
+        :code:`iterations_per_round`. Always :code:`True` for ADMM.
     cut_turns, cut_cost
-        The cut count and cut cost of the round's iterate, rounded onto the
+        The cut turns and cut cost of the round's iterate, rounded onto the
         branches of the input (see :func:`unwrap_phase_irls`).
 
     """
@@ -162,7 +164,7 @@ class L1Round:
 
 @dataclass(frozen=True)
 class L1PhasePrior:
-    r"""Start an IRLS solve from an unwrapped phase of a similar input.
+    r"""Start a solve from the unwrapped phase of a similar input.
 
     For example, the result phase of the previous frame of a series, or of the
     same field before more frames were averaged into it. Each pixel is moved to the
@@ -186,7 +188,7 @@ class L1PhasePrior:
 
 @dataclass(frozen=True)
 class L1BranchesPrior:
-    r"""Start an IRLS solve from the branch field of an earlier solve of the same input.
+    r"""Start a solve from the branches of an earlier solve of the same input.
 
     For example, to solve the same wrapped phase again with other options. Against a
     different wrapped input, the branches are off by one wherever a value crossed
@@ -196,7 +198,7 @@ class L1BranchesPrior:
     Parameters
     ----------
     branches
-        Integer branch field, :attr:`L1Result.branches` of the earlier solve.
+        The integer branch field, :attr:`L1Result.branches` of the earlier solve.
     epsilon
         :attr:`L1Result.resume_epsilon` of the earlier solve.
 
@@ -208,37 +210,43 @@ class L1BranchesPrior:
 
 @dataclass
 class L1Result:
-    r"""The result of :func:`unwrap_phase_irls`.
+    r"""The result of :func:`unwrap_phase_irls` and :func:`unwrap_phase_admm`.
 
     Attributes
     ----------
     phase
         The unwrapped phase as float64. It equals
-        :code:`wrapped + 2 * np.pi * branches` exactly.
+        :code:`wrapped + 2 * np.pi * branches` exactly, and is NaN at invalid
+        pixels.
     branches
-        The number of :math:`2\pi` turns added to each pixel of the input, as int32.
+        The number of :math:`2\pi` turns added to each pixel of the input, as int32;
+        0 at invalid pixels.
     weights_x, weights_y
-        Edge weights derived from the selected iterate, with shapes
-        :code:`(rows, cols - 1)` and :code:`(rows - 1, cols)`. Low weights mark
-        where the solve placed a discontinuity. If the starting point is selected
-        without a prior, these are the edge weights.
+        The weights of the selected iterate: the edge weights times the
+        Charbonnier weights at its epsilon, with shapes :code:`(rows, cols - 1)`
+        and :code:`(rows - 1, cols)`. Low weights mark where the solve placed a
+        discontinuity. If the starting point is selected without a prior, these
+        are the edge weights.
     rounds
-        One :class:`L1Round` per IRLS round that ran. Empty if the starting point
+        One :class:`L1Round` per round that ran. Empty if the starting point
         already had no cuts.
     selected_round
         Index into :attr:`rounds` of the round whose iterate is returned: the
         latest one with the lowest cut cost. -1 for the starting point: the rounded
         L2 solution, or the prior.
     cut_turns
-        The cut count of the result (see :func:`unwrap_phase_irls`).
+        The number of whole turns by which the gradient of :attr:`phase` differs
+        from the wrapped gradient, summed over all edges (see
+        :func:`unwrap_phase_irls`).
     cut_cost
-        The cut count with each edge weighted by its edge weight; equal to
-        :attr:`cut_turns` without edge weights.
+        The cut turns with each edge weighted by its edge weight; equal to
+        :attr:`cut_turns` if all edge weights are equal.
     status
-        :code:`"converged"` if every round's CG reached the tolerance,
+        For IRLS, :code:`"converged"` if every round's CG reached the tolerance,
         :code:`"iteration_limit"` if at least one round stopped at
-        :code:`iterations_per_round`. Either way, :attr:`phase` is the selected
-        iterate, snapped onto the branches of the input.
+        :code:`iterations_per_round` (for ADMM, see :func:`unwrap_phase_admm`).
+        Either way, :attr:`phase` is the selected iterate, snapped onto the
+        branches of the input.
     resume_epsilon
         Where a solve started from this result resumes the epsilon schedule (see
         :class:`L1PhasePrior`): the epsilon the returned weights were derived at, or
@@ -259,7 +267,7 @@ class L1Result:
 
     @property
     def final_relative_residual(self) -> float:
-        """The relative CG residual at the end of the last round."""
+        """The relative CG residual at the end of the last round, or NaN."""
         if not self.rounds or not self.rounds[-1].residuals:
             return math.nan
         return self.rounds[-1].residuals[-1]
@@ -285,7 +293,8 @@ def _padded_length(length: int) -> int:
     """Return the smallest even 11-smooth number that is at least `length`.
 
     Even 5-smooth lengths make single-threaded transforms a few percent faster,
-    but measured no faster end to end, with more padding on 7- or 11-smooth sizes.
+    but the solve measured no faster end to end, since 7- or 11-smooth sizes then
+    need more padding.
     """
     candidate = max(length, 2)
     while candidate % 2 != 0 or not _is_smooth(candidate):
@@ -376,7 +385,7 @@ class _WeightedProblem:
     Find :math:`\phi` with :math:`A \phi = b`, where
     :math:`A \phi = -\nabla \cdot (w \nabla \phi)` and
     :math:`b = -\nabla \cdot (w g)` for the wrapped gradients :math:`g` and the
-    edge weights :math:`w`. :math:`A` is positive semi-definite: for an interior
+    weights :math:`w`. :math:`A` is positive semi-definite: for an interior
     pixel with unit weights, it is :code:`4 p - p[left] - p[right] - p[up] -
     p[down]`, the same sign convention as the preconditioner.
 
@@ -391,14 +400,15 @@ class _WeightedProblem:
         edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
         *,
         pad: bool = True,
+        invalid: np.ndarray | None = None,
     ) -> None:
         rows, cols = wrapped.shape
-        # Wrapping the target gradients is what makes this an unwrapping problem:
-        # a difference of two wrapped values is only known modulo 2π, and this
-        # picks the smallest representative: `_wrap(np.diff(wrapped))`. And the
-        # whole turns the wrapping removed from each gradient: a congruent phase
-        # `wrapped + 2π branches` disagrees with the target gradient on an edge
-        # by `jumps + diff(branches)` turns. Both in one pass:
+        # The target gradients are the wrapped differences `_wrap(np.diff(wrapped))`:
+        # a difference of two wrapped values is only known modulo 2π, and the
+        # target is its smallest representative. The jumps are the whole turns
+        # that wrapping removed from each difference: a congruent phase
+        # `wrapped + 2π branches` differs from the target gradient on an edge by
+        # `jumps + diff(branches)` turns. Both in one pass:
         self.target_x = np.empty((rows, cols - 1), dtype=wrapped.dtype)
         self.target_y = np.empty((rows - 1, cols), dtype=wrapped.dtype)
         self.jumps_x = np.empty((rows, cols - 1), dtype=np.int32)
@@ -417,6 +427,16 @@ class _WeightedProblem:
             for source, target in zip(edge_weights, (self.edge_x, self.edge_y),
                                       strict=True):
                 _irls_numba.scale_into(np.asarray(source), 1.0, target)
+        # The invalid pixels (`invalid`, None if there are none) are 0 in
+        # `wrapped`. The edges that touch them get a small weight, so
+        # that the cuts this placeholder forces cost almost nothing, and they do
+        # not count in the cuts (see `cuts`).
+        if invalid is None:
+            self.invalid = np.zeros((0, 0), dtype=np.bool_)
+        else:
+            self.invalid = invalid
+            self.edge_x[invalid[:, 1:] | invalid[:, :-1]] = _INVALID_EDGE_WEIGHT
+            self.edge_y[invalid[1:, :] | invalid[:-1, :]] = _INVALID_EDGE_WEIGHT
         self.weights_x = self.edge_x.copy()
         self.weights_y = self.edge_y.copy()
         self._row_sums = np.empty(rows, dtype=np.float64)
@@ -427,19 +447,20 @@ class _WeightedProblem:
         )
 
     def cuts(self, branches: np.ndarray) -> tuple[int, float]:
-        """Count the turns by which a congruent phase cuts the wrapped gradients.
+        """Return the cut turns and the cut cost of `wrapped + 2π branches`.
 
-        Returns the sum over all edges of :code:`|k|`, where :code:`k` is the
+        The cut turns are the sum over all edges of :code:`|k|`, where :code:`k` is the
         number of whole turns between the gradient of :code:`wrapped + 2π
         branches` and the wrapped gradient, and the same sum with each edge
-        weighted by its edge weight.
+        weighted by its edge weight. Edges that touch an invalid pixel do not
+        count.
         """
         rows = branches.shape[0]
         turns = np.empty(rows, dtype=np.int64)
         cost = np.empty(rows, dtype=np.float64)
         _irls_numba.cuts_per_row(
             branches, self.jumps_x, self.jumps_y, self.edge_x, self.edge_y,
-            turns, cost,
+            self.invalid, turns, cost,
         )
         return int(turns.sum()), float(cost.sum())
 
@@ -479,11 +500,10 @@ class _WeightedProblem:
         return out
 
     def l2_solution(self) -> np.ndarray:
-        """Solve the unweighted problem, approximately.
+        """Return the unweighted least-squares (L2) solution, ignoring the edge weights.
 
-        Exact up to the padding of the preconditioner, which with unit weights is
-        the inverse of the operator. With edge weights, this is only the starting
-        point of the weighted solve.
+        Exact up to the padding: the preconditioner is the inverse of the operator
+        with unit weights.
         """
         b = np.empty(self.precondition.shape, dtype=self.target_x.dtype)
         _irls_numba.negative_divergence(self.target_x, self.target_y, b)
@@ -508,7 +528,7 @@ class _WeightedProblem:
     ) -> Callable[[], L1Round]:
         """Run one round's CG on `phi` (in place), and remove its mean if it changed.
 
-        Returns a function that returns the round's report. (On a GPU, the
+        Returns a function that returns the round's report. (On the GPU, the
         report is only read back at the next synchronization.)
         """
         report, iterated = _conjugate_gradients(
@@ -585,6 +605,9 @@ def _starting_phase(
     if isinstance(prior, L1PhasePrior):
         raw = wrapped.astype(np.float64)
         branches = xp.rint((xp.asarray(prior.phase, dtype=np.float64) - raw) / TAU)
+        # Where the prior is not finite (an invalid pixel of an earlier result),
+        # the starting phase is the wrapped value:
+        branches = xp.where(xp.isfinite(branches), branches, 0.0)
         return (raw + TAU * branches).astype(wrapped.dtype)
     branches = xp.asarray(prior.branches).astype(wrapped.dtype)
     return wrapped + wrapped.dtype.type(TAU) * branches
@@ -723,13 +746,12 @@ def _irls_rounds(
     *,
     best: _Candidate,
 ) -> tuple[list[L1Round], _Candidate]:
-    """Run the IRLS rounds on `phi` (updated in place).
+    """Run the rounds (IRLS, or ADMM on the CPU) on `phi` (updated in place).
 
     `weights_epsilon` is the epsilon the current weights were derived at (infinity
     if they were not derived from an iterate), and `best` the candidate result to
-    beat. Returns the report
-    of each round, and the best rounded iterate: the latest one with the lowest
-    cut cost.
+    beat. Returns the report of each round, and the best rounded iterate: the
+    latest one with the lowest cut cost.
     """
     epsilon = (
         options.epsilon_start
@@ -742,7 +764,7 @@ def _irls_rounds(
         # A fixed point: the iterate did not move and the schedule has reached
         # its end, so further rounds would repeat this one. Whether the iterate
         # moved is known only after the solve, so the problem decides itself
-        # whether to reweight; on a GPU, a whole round is then one graph.
+        # whether to reweight; on the GPU, a whole round is then one CUDA graph.
         at_end = epsilon <= options.epsilon_min
         report, candidate = problem.run_round(
             phi, wrapped, epsilon=epsilon, at_end=at_end, options=options, index=index,
@@ -839,7 +861,7 @@ def _check_edge_weights(
             f"{expected[0]} and {expected[1]}, got {[w.shape for w in weights]}"
         )
         raise ValueError(msg)
-    # All checks in one array, so that on a GPU, they cost one synchronization:
+    # All checks in one array, so that on the GPU, they cost one synchronization:
     checks = [xp.all(xp.isfinite(w) & (w > 0)) for w in weights]
     maxima = [w.max() for w in weights if w.size]
     values = xp.stack(
@@ -859,12 +881,15 @@ def _check_input(
     *,
     keep_wave: bool = False,
     workers: int | None = None,
-) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None]:
+) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray] | None, np.ndarray | None]:
     """Validate the input, and convert it to the precision of the solve.
 
-    Returns the wrapped phase and the edge weights, which for a complex wave
-    default to :func:`amplitude_edge_weights`. With `keep_wave`, a complex wave
-    without edge weights is returned as it is, for the GPU to convert.
+    Returns the wrapped phase, the edge weights, which for a complex wave default
+    to :func:`amplitude_edge_weights`, and the invalid pixels: a boolean array of
+    the pixels whose input is not finite, which are 0 in the returned phase, or
+    None if there are none. With `keep_wave`, a complex wave without edge weights
+    is returned as it is, for the GPU to convert. For cupy input, the invalid
+    pixels are always None: the GPU finds them itself.
     """
     xp = _array_module(wrapped)
     wrapped = xp.asarray(wrapped)
@@ -875,42 +900,70 @@ def _check_input(
         msg = f"wrapped must be a real or complex array, got dtype {wrapped.dtype}"
         raise TypeError(msg)
     keep_wave = keep_wave and xp.iscomplexobj(wrapped) and edge_weights is None
+    invalid = None
     if xp is np and np.iscomplexobj(wrapped) and edge_weights is None:
         # The same as below, on several threads:
-        wrapped, edge_weights = _wave_setup(wrapped, workers or 1)
+        wrapped, edge_weights, invalid = _wave_setup(wrapped, workers or 1)
     elif xp.iscomplexobj(wrapped) and not keep_wave:
         if edge_weights is None:
             edge_weights = amplitude_edge_weights(xp.abs(wrapped))
-        wrapped = xp.angle(wrapped)
+        # A wave that is not finite can have a finite angle (an infinite one):
+        wrapped = xp.where(xp.isfinite(wrapped), xp.angle(wrapped), xp.nan)
     if edge_weights is not None and not isinstance(edge_weights, _CheckedEdges):
         edge_weights = _check_edge_weights(edge_weights, wrapped.shape)
-    if prior is not None:
-        prior_shape = np.shape(
-            prior.phase if isinstance(prior, L1PhasePrior) else prior.branches,
-        )
-        if prior_shape != wrapped.shape:
-            msg = (
-                f"the prior has shape {prior_shape}, "
-                f"but the wrapped phase has shape {wrapped.shape}"
-            )
-            raise ValueError(msg)
+    _check_prior_shape(prior, wrapped.shape)
     if keep_wave:
-        return wrapped, None
+        return wrapped, None, None
     dtype = np.float32 if wrapped.dtype == np.float32 else np.float64
-    return xp.ascontiguousarray(wrapped, dtype=dtype), edge_weights
+    wrapped = xp.ascontiguousarray(wrapped, dtype=dtype)
+    if xp is np and invalid is None:
+        wrapped, invalid = _mask_invalid(wrapped)
+    return wrapped, edge_weights, invalid
+
+
+def _check_prior_shape(
+    prior: L1PhasePrior | L1BranchesPrior | None, shape: tuple[int, ...],
+) -> None:
+    if prior is None:
+        return
+    prior_shape = np.shape(
+        prior.phase if isinstance(prior, L1PhasePrior) else prior.branches,
+    )
+    if prior_shape != shape:
+        msg = (
+            f"the prior has shape {prior_shape}, "
+            f"but wrapped has shape {shape}"
+        )
+        raise ValueError(msg)
+
+
+def _mask_invalid(wrapped: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return `wrapped` with its invalid pixels set to 0, and the invalid pixels.
+
+    If all pixels are finite, return `wrapped` itself and None.
+    """
+    if not _irls_numba.count_nonfinite(
+        wrapped, np.empty(wrapped.shape[0], dtype=np.int64),
+    ):
+        return wrapped, None
+    invalid = ~np.isfinite(wrapped)
+    return np.where(invalid, 0, wrapped), invalid  # a copy: the caller's stays
 
 
 _AMPLITUDE_FLOOR = 1e-3
 _AMPLITUDE_PERCENTILE = 90.0
+# The weight of edges that touch an invalid pixel, where the largest weight is 1:
+_INVALID_EDGE_WEIGHT = _AMPLITUDE_FLOOR
 
 
 class _CheckedEdges(tuple):
-    """Edge weights that are already checked and normalized (`_wave_setup`)."""
+    """Edge weights that `_wave_setup` has already checked and normalized."""
 
     __slots__ = ()
 
 
 _pools: dict[int, ThreadPoolExecutor] = {}
+_pools_lock = threading.Lock()
 
 
 def _by_rows(
@@ -929,9 +982,10 @@ def _by_rows(
     if blocks <= 1 or x.size < 1 << 16:  # not worth the threads
         func(x, out)
         return out
-    pool = _pools.get(workers)
-    if pool is None:
-        pool = _pools[workers] = ThreadPoolExecutor(workers)
+    with _pools_lock:
+        pool = _pools.get(workers)
+        if pool is None:
+            pool = _pools[workers] = ThreadPoolExecutor(workers)
     bounds = np.linspace(0, x.shape[0], blocks + 1).astype(int)
     list(pool.map(
         lambda b: func(x[bounds[b]:bounds[b + 1]], out[bounds[b]:bounds[b + 1]]),
@@ -956,13 +1010,15 @@ def _percentile(x: np.ndarray, q: float) -> float:
 
 def _wave_setup(
     wave: np.ndarray, workers: int,
-) -> tuple[np.ndarray, _CheckedEdges]:
-    """Return the phase of `wave`, and its normalized amplitude edge weights.
+) -> tuple[np.ndarray, _CheckedEdges, np.ndarray | None]:
+    """Return the phase of `wave`, its edge weights, and its invalid pixels.
 
-    The same as :func:`amplitude_edge_weights` of :code:`np.abs(wave)`, checked
-    and normalized by :func:`_check_edge_weights`, and :code:`np.angle(wave)`,
-    with identical results: numpy's functions on blocks of rows, a parallel
-    selection for the percentile, and one fused pass for the weights.
+    The results are identical to :code:`np.angle(wave)` and to
+    :func:`amplitude_edge_weights` of :code:`np.abs(wave)`, checked and normalized
+    by :func:`_check_edge_weights`, but are computed on several threads: numpy's
+    functions on blocks of rows, a parallel selection for the percentile, and one
+    fused pass for the weights. The invalid pixels, where the wave is not finite,
+    are 0 in the phase; they are None if there are none.
     """
     real = np.float32 if wave.dtype == np.complex64 else np.float64
     amplitude = _by_rows(lambda z, out: np.abs(z, out=out), wave, real, workers)
@@ -970,12 +1026,24 @@ def _wave_setup(
         lambda z, out: np.arctan2(z.imag, z.real, out=out), wave, real, workers,
     )
     rows, cols = wave.shape
-    reference = _percentile(amplitude, _AMPLITUDE_PERCENTILE)
+    invalid = None
+    if _irls_numba.count_nonfinite(amplitude, np.empty(rows, dtype=np.int64)):
+        invalid = ~np.isfinite(amplitude)
+        phase[invalid] = 0
+        valid = amplitude[~invalid]
+        # As `amplitude_edge_weights`: invalid pixels have no signal, and do not
+        # take part in the reference.
+        amplitude[invalid] = 0
+        reference = (
+            _percentile(valid, _AMPLITUDE_PERCENTILE) if valid.size else math.nan
+        )
+    else:
+        reference = _percentile(amplitude, _AMPLITUDE_PERCENTILE)
     if not reference > 0:
         # No signal anywhere: no edge is more reliable than another.
         return phase, _CheckedEdges((
             np.ones((rows, cols - 1)), np.ones((rows - 1, cols)),
-        ))
+        )), invalid
     edge_x = np.empty((rows, cols - 1))
     edge_y = np.empty((rows - 1, cols))
     row_max = np.empty(rows)
@@ -989,7 +1057,7 @@ def _wave_setup(
     largest = float(row_max.max()) if edge_x.size + edge_y.size else 1.0
     for edges in (edge_x, edge_y):
         _irls_numba.scale_into(edges, largest, edges)
-    return phase, _CheckedEdges((edge_x, edge_y))
+    return phase, _CheckedEdges((edge_x, edge_y)), invalid
 
 
 def amplitude_edge_weights(
@@ -997,23 +1065,25 @@ def amplitude_edge_weights(
     floor: float = _AMPLITUDE_FLOOR,
     percentile: float = _AMPLITUDE_PERCENTILE,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Edge weights for :func:`unwrap_phase_irls` from the amplitude of a wave.
+    """Edge weights for the L1 unwrapping, from the amplitude of a complex wave.
 
     Where the amplitude is low, the phase is noisy or undefined, for example where
     the specimen blocks the beam. Cuts through such regions should cost little,
-    so that the solve puts the discontinuities there and does not spend iterations
-    on reconciling their noise.
+    so that :func:`unwrap_phase_irls` and :func:`unwrap_phase_admm` put the
+    discontinuities there and do not spend iterations on reconciling their noise.
 
     The weight of an edge is the smaller amplitude of its two pixels, divided by
     the given percentile of the amplitude and clipped to :code:`[floor, 1]`.
     Clipping at one keeps bright features, such as Fresnel fringes, from
     attracting cuts. The floor keeps regions without signal weakly connected to
-    the rest of the image.
+    the rest of the image. Pixels whose amplitude is not finite count as pixels
+    without signal, and do not take part in the percentile.
 
     Parameters
     ----------
     amplitude
-        Amplitude of the wave, for example :code:`np.abs(wave)`.
+        Amplitude of the wave, for example :code:`np.abs(wave)`, as a numpy or
+        cupy array.
     floor
         Smallest weight, relative to the largest.
     percentile
@@ -1023,9 +1093,10 @@ def amplitude_edge_weights(
 
     Returns
     -------
-    weights_x, weights_y
-        Weights of the horizontal and vertical edges, with shapes
-        :code:`(rows, cols - 1)` and :code:`(rows - 1, cols)`.
+    edge_weights
+        The edge weights of the horizontal and vertical edges, with shapes
+        :code:`(rows, cols - 1)` and :code:`(rows - 1, cols)`, as arrays of the
+        same kind as :code:`amplitude`. Pass them as :code:`edge_weights`.
 
     """
     xp = _array_module(amplitude)
@@ -1036,8 +1107,16 @@ def amplitude_edge_weights(
     if not 0 < floor <= 1:
         msg = f"floor must be in (0, 1], got {floor}"
         raise ValueError(msg)
-    reference = xp.percentile(amplitude, percentile)
+    finite = xp.isfinite(amplitude)
     if xp is np:
+        if finite.all():
+            reference = np.percentile(amplitude, percentile)
+        else:
+            reference = (
+                np.percentile(amplitude[finite], percentile) if finite.any()
+                else math.nan
+            )
+            amplitude = np.where(finite, amplitude, 0.0)
         if not reference > 0:
             # No signal anywhere: no edge is more reliable than another.
             return (
@@ -1046,7 +1125,21 @@ def amplitude_edge_weights(
             )
         relative = np.clip(amplitude / reference, floor, 1.0)
     else:
-        # The same, without the synchronization of a host-side check:
+        # The same, without the synchronization of a host-side check: the
+        # percentile of the finite values, which sort before the others, by
+        # numpy's "linear" method (`_lerp`), with the count on the device.
+        valid = finite.sum()
+        ordered = xp.sort(xp.where(finite, amplitude, xp.inf).ravel())
+        virtual = (valid - 1) * np.true_divide(percentile, 100)
+        low = xp.floor(virtual)
+        t = virtual - low
+        below = ordered[xp.maximum(low.astype(np.int64), 0)]
+        above = ordered[xp.clip(low.astype(np.int64) + 1, 0, xp.maximum(valid - 1, 0))]
+        difference = above - below
+        reference = xp.where(
+            t >= 0.5, above - difference * (1 - t), below + difference * t,  # noqa: PLR2004
+        )
+        amplitude = xp.where(finite, amplitude, 0.0)
         relative = xp.where(
             reference > 0, xp.clip(amplitude / reference, floor, 1.0), 1.0,
         )
@@ -1063,14 +1156,16 @@ def unwrap_phase_irls(
     options: IRLSOptions | None = None,
     workers: int | None = None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
+    workspace: Workspace | None = None,
 ) -> L1Result:
     r"""Unwrap a 2D phase by iteratively reweighted least squares.
 
     The result is congruent with the input: it differs from it by an integer
-    multiple of :math:`2\pi` at every pixel. The solve is global and places the
-    discontinuities where they cost least.
+    multiple of :math:`2\pi` at every valid pixel. The solve is global and places
+    the discontinuities where they cost least.
 
-    The solve runs in float32 for float32 input and in float64 otherwise. The
+    The solve runs in float32 for float32 and complex64 input, and in float64
+    otherwise. The
     result phase is float64, computed from the input values, so it stays exactly
     congruent with them.
 
@@ -1081,6 +1176,11 @@ def unwrap_phase_irls(
         since only differences modulo :math:`2\pi` enter the solve. Or the complex
         wave: then its phase is unwrapped, with edge weights from its amplitude
         (:func:`amplitude_edge_weights`) unless :code:`edge_weights` is given.
+        For a cupy array, the solve runs on the GPU and the result holds cupy
+        arrays. Pixels that are not finite (NaN or infinite) are invalid: the solve
+        treats their phase as 0, gives the edges that touch them a weight of
+        :code:`1e-3` (where the largest weight is 1), and leaves those edges out
+        of the cut turns and cost. The result is NaN there, with branch 0.
     prior
         Start from an earlier solution instead of from scratch, and resume its
         epsilon schedule; see :class:`L1PhasePrior` and :class:`L1BranchesPrior`.
@@ -1091,19 +1191,25 @@ def unwrap_phase_irls(
         Solver settings, :class:`IRLSOptions` by default.
     workers
         Number of threads. By default, the number of CPUs, but at most 16.
-        The result does not depend on it.
+        The result does not depend on it. Not used on the GPU.
     edge_weights
         Weights :math:`C` of the horizontal and vertical edges between
         neighbouring pixels, with shapes :code:`(rows, cols - 1)` and
         :code:`(rows - 1, cols)`, finite and greater than zero. Edges with a low
         weight are cheap to cut, so the solve places discontinuities there. Only
         relative weights matter. Without edge weights, all edges weigh the same.
+    workspace
+        Where a solve on the GPU keeps its buffers, FFT plans and CUDA graphs for
+        the next solve of the same shape (see
+        :mod:`libertem_holo.base.workspace`). By default, the default workspace,
+        which solves in several threads then share, one at a time. Not used on
+        the CPU.
 
     Returns
     -------
     L1Result
-        The unwrapped phase, the branch field, the weights of the selected
-        iterate, the cut count and cost, and a report of each round.
+        The unwrapped phase, the branches, the weights of the selected iterate,
+        the cut turns and cut cost, and a report of each round.
 
     Notes
     -----
@@ -1125,16 +1231,17 @@ def unwrap_phase_irls(
     the unweighted Neumann Poisson solve, which is a pair of cosine transforms.
     By default (:code:`cold_start="zero"`), the solve starts at zero phase, with
     weights derived from it: edges whose wrapped gradient is large, and so
-    ambiguous, start out cheap to cut. Starting from the L2 solution instead,
-    which smears discontinuities and residues, puts noticeably more pixels on the
-    wrong branch in noisy test fields, at the same cut count.
+    ambiguous, start out cheap to cut. Starting from the L2 solution instead
+    (:code:`cold_start="least_squares"`), which smears discontinuities and
+    residues, tends to put more pixels on the wrong branch in noisy fields, with
+    as many cut turns.
 
     With edge weights :math:`C`, the objective is the weighted sum
     :math:`\sum C |r|`: each round's weights are :math:`C` times the Charbonnier
     weights.
 
     After each round, the iterate is snapped onto the branches of the input and
-    scored. Its *cut count* is the number of whole turns by which its gradient
+    scored. Its *cut turns* are the number of whole turns by which its gradient
     differs from the wrapped gradient, summed over all edges between neighbouring
     pixels: the L1 objective of a congruent result. Its *cut cost* weights each
     edge by :math:`C`; without edge weights, the two are equal. The solve returns
@@ -1144,7 +1251,7 @@ def unwrap_phase_irls(
     :code:`stop_patience` rounds, where an improvement must exceed both
     :code:`stop_tolerance` of the cost and half a cut through edges of full
     weight, so that tiny gains in nearly weightless regions do not keep it going.
-    It also stops as soon as the cut count is zero, since no result can be better.
+    It also stops as soon as there are no cut turns, since no result can be better.
 
     The approach follows B. Dubois-Taine, R. Akiki and A. d'Aspremont,
     "Iteratively Reweighted Least Squares for Phase Unwrapping", arXiv:2401.09961
@@ -1170,6 +1277,7 @@ def unwrap_phase_irls(
     """
     return _run(
         wrapped, prior, _check_options(options, IRLSOptions), workers, edge_weights,
+        workspace=workspace,
     )
 
 
@@ -1179,8 +1287,8 @@ def _check_options(options: object, expected: type) -> object:
         return expected()
     if not isinstance(options, expected):
         msg = (
-            f"options must be {expected.__name__}, got {type(options).__name__}; "
-            "each of unwrap_phase_irls and unwrap_phase_admm takes its own"
+            f"options must be {expected.__name__}, got {type(options).__name__}: "
+            "unwrap_phase_irls takes IRLSOptions, unwrap_phase_admm ADMMOptions"
         )
         raise TypeError(msg)
     return options
@@ -1191,6 +1299,7 @@ def _check_arguments(
     prior: L1PhasePrior | L1BranchesPrior | L1Result | None,
     workers: int | None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
+    workspace: Workspace | None = None,
 ) -> None:
     """Check the arguments of a solve besides the arrays' shapes and values.
 
@@ -1203,6 +1312,9 @@ def _check_arguments(
     ):
         msg = f"workers must be a positive integer or None, got {workers!r}"
         raise ValueError(msg)
+    if workspace is not None and not isinstance(workspace, Workspace):
+        msg = f"workspace must be a Workspace or None, got {type(workspace).__name__}"
+        raise TypeError(msg)
     if prior is not None and not isinstance(
         prior, (L1PhasePrior, L1BranchesPrior, L1Result),
     ):
@@ -1221,22 +1333,31 @@ def _check_arguments(
             raise TypeError(msg)
         arrays += [("edge_weights", w) for w in edge_weights]
     if prior is not None:
-        if isinstance(prior, L1BranchesPrior):
-            arrays.append(("the prior's branches", prior.branches))
-        else:
-            arrays.append(("the prior's phase", prior.phase))
-        epsilon = (
-            prior.resume_epsilon if isinstance(prior, L1Result) else prior.epsilon
-        )
-        if not (math.isfinite(epsilon) and epsilon >= 0):
-            msg = f"the prior's epsilon must be finite and not negative, got {epsilon}"
-            raise ValueError(msg)
+        arrays.append(_check_prior(prior))
+    _check_devices(wrapped, arrays)
+
+
+def _check_prior(
+    prior: L1PhasePrior | L1BranchesPrior | L1Result,
+) -> tuple[str, object]:
+    """Check the prior's epsilon; return the name and the array of the prior."""
+    epsilon = prior.resume_epsilon if isinstance(prior, L1Result) else prior.epsilon
+    if not (math.isfinite(epsilon) and epsilon >= 0):
+        msg = f"the prior's epsilon must be finite and not negative, got {epsilon}"
+        raise ValueError(msg)
+    if isinstance(prior, L1BranchesPrior):
+        return "the prior's branches", prior.branches
+    return "the prior's phase", prior.phase
+
+
+def _check_devices(wrapped: np.ndarray, arrays: list[tuple[str, object]]) -> None:
+    """Check that the (named) `arrays` are on the device of `wrapped`."""
     on_gpu = _array_module(wrapped) is not np
     for name, array in arrays:
         if (_array_module(array) is not np) != on_gpu:
             msg = (
-                f"{name} must be on the device of wrapped: "
-                f"{'cupy' if on_gpu else 'numpy'} arrays, got {type(array).__name__}"
+                f"{name} must be on the device of wrapped "
+                f"({'cupy' if on_gpu else 'numpy'} arrays), got {type(array).__name__}"
             )
             raise TypeError(msg)
 
@@ -1247,16 +1368,25 @@ def _run(
     options: IRLSOptions,
     workers: int | None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
+    *,
+    workspace: Workspace | None = None,
 ) -> L1Result:
     """Set up the threads and run :func:`_unwrap` (any method of `options`)."""
-    _check_arguments(wrapped, prior, workers, edge_weights)
+    _check_arguments(wrapped, prior, workers, edge_weights, workspace)
     if isinstance(prior, L1Result):
         prior = prior.as_prior()
     if _array_module(wrapped) is not np:
         if options.method == "admm" and 1 in wrapped.shape:
             return _on_host(wrapped, prior, options, edge_weights)
-        # On the GPU, CPU threads play no part.
-        return _unwrap(wrapped, prior, options, workers or 1, edge_weights)
+        # On the GPU, CPU threads play no part. The solve uses the workspace's
+        # problem until it returns, on the device of the input:
+        if workspace is None:
+            workspace = default_workspace()
+        with workspace.lock, wrapped.device:
+            return _unwrap(
+                wrapped, prior, options, workers or 1, edge_weights,
+                workspace=workspace,
+            )
     if workers is None:
         workers = min(os.cpu_count() or 1, _DEFAULT_MAX_THREADS)
     # BLAS only computes dot products here, on one thread, so that their summation
@@ -1276,11 +1406,11 @@ def _on_host(
     options: IRLSOptions,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
 ) -> L1Result:
-    """Solve a cupy problem on the CPU, with the result as cupy arrays.
+    """Solve for cupy input on the CPU, and return the result as cupy arrays.
 
-    For images of a single row or column, which the GPU's ADMM cannot transform
-    (their FFT plans would be of length 1): without loops, their unwrapping is an
-    integration of the edge targets, a matter of microseconds.
+    For images of a single row or column, which ADMM on the GPU cannot transform
+    (their FFT plans would be of length 1). Such an image has no loops, so its
+    unwrapping is an integration of the edge targets, a matter of microseconds.
     """
     import cupy as cp  # noqa: PLC0415
 
@@ -1306,33 +1436,38 @@ def _unwrap(
     options: IRLSOptions,
     workers: int,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
+    *,
+    workspace: Workspace | None = None,
 ) -> L1Result:
-    """Run :func:`unwrap_phase_irls` with the threads set up."""
+    """Run the solve (IRLS or ADMM) once the threads (or the workspace) are set up."""
     xp = _array_module(wrapped)
-    wrapped, edge_weights = _check_input(
+    wrapped, edge_weights, invalid = _check_input(
         wrapped, prior, edge_weights, keep_wave=xp is not np, workers=workers,
     )
     admm = options.method == "admm"
     if xp is np and admm:
         from .admm import _AdmmProblem  # noqa: PLC0415
-        problem = _AdmmProblem(wrapped, workers, edge_weights, options)
+        problem = _AdmmProblem(wrapped, workers, edge_weights, options, invalid=invalid)
     elif xp is np:
-        problem = _WeightedProblem(wrapped, workers=workers, edge_weights=edge_weights)
+        problem = _WeightedProblem(
+            wrapped, workers=workers, edge_weights=edge_weights, invalid=invalid,
+        )
     elif xp.iscomplexobj(wrapped):
-        # On the GPU, the phase and the amplitude weights of a wave come from a
-        # few fused kernels:
+        # On the GPU, the phase and the edge weights of a wave come from a few
+        # fused kernels:
         from ._irls_cupy import problem_for_wave  # noqa: PLC0415
         # The input is only staged; the start (setup, starting point, first
         # candidate) then runs as one CUDA graph:
         problem = problem_for_wave(
             wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE, deferred=True,
-            method=options.method,
+            method=options.method, workspace=workspace,
         )
         wrapped = problem.wrapped
     else:
         from ._irls_cupy import problem_for  # noqa: PLC0415
         problem = problem_for(
             wrapped, edge_weights, deferred=True, method=options.method,
+            workspace=workspace,
         )
         wrapped = problem.wrapped
 
@@ -1361,6 +1496,9 @@ def _unwrap(
     )
 
     best = problem.release(best)
+    if invalid is not None:  # on the GPU, `release` does this
+        best.phase[invalid] = np.nan
+        best.branches[invalid] = 0
     return L1Result(
         phase=best.phase,
         branches=best.branches,
