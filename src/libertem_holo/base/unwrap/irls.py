@@ -4,14 +4,14 @@ See :func:`unwrap_phase_irls` for how it works.
 """
 from __future__ import annotations
 
-import dataclasses
+import contextlib
 import functools
 import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeVar
 
 import numba
 import numpy as np
@@ -24,9 +24,17 @@ from libertem_holo.base.workspace import Workspace, default_workspace
 from . import _irls_numba
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+
+    from .admm import ADMMOptions
 
 TAU = 2 * np.pi
+_OptionsT = TypeVar("_OptionsT")
+# The options of one method, and what takes them (`_RoundProblem`, `_Solver`):
+_Options = TypeVar("_Options", bound="IRLSOptions | ADMMOptions")
+_OptionsIn_contra = TypeVar(
+    "_OptionsIn_contra", bound="IRLSOptions | ADMMOptions", contravariant=True,
+)
 
 # On a 72-core GH200, 16 threads made IRLS 8-22 % and ADMM 22-39 % faster than
 # 8, from ~500^2 to 2048^2 images; 32 were slower again at ~500^2 (the
@@ -379,18 +387,13 @@ def _negative_divergence(
     return out
 
 
-class _WeightedProblem:
-    r"""The weighted least-squares problem of one IRLS round.
+class _Edges:
+    """The core of a solve on the CPU, shared by `_IrlsProblem` and `admm._AdmmProblem`.
 
-    Find :math:`\phi` with :math:`A \phi = b`, where
-    :math:`A \phi = -\nabla \cdot (w \nabla \phi)` and
-    :math:`b = -\nabla \cdot (w g)` for the wrapped gradients :math:`g` and the
-    weights :math:`w`. :math:`A` is positive semi-definite: for an interior
-    pixel with unit weights, it is :code:`4 p - p[left] - p[right] - p[up] -
-    p[down]`, the same sign convention as the preconditioner.
-
-    The weights are the fixed edge weights :math:`C` (all ones if none are
-    given) times the Charbonnier weights of the current round.
+    The target gradients and their jumps, the edge weights :math:`C` (all ones
+    if none are given) and the invalid pixels, the weights of the current
+    iterate (:math:`C` times its Charbonnier weights), the unweighted
+    least-squares solution, rounding onto the branches, and counting the cuts.
     """
 
     def __init__(
@@ -439,9 +442,7 @@ class _WeightedProblem:
             self.edge_y[invalid[1:, :] | invalid[:-1, :]] = _INVALID_EDGE_WEIGHT
         self.weights_x = self.edge_x.copy()
         self.weights_y = self.edge_y.copy()
-        self._row_sums = np.empty(rows, dtype=np.float64)
-        self._b = np.empty((rows, cols), dtype=wrapped.dtype)
-        self._iterations = 0
+        self._iterations = 0  # of the last solve: see `reweight`
         self.precondition = _PoissonPreconditioner(
             (rows, cols), wrapped.dtype, workers=workers, pad=pad,
         )
@@ -463,6 +464,84 @@ class _WeightedProblem:
             self.invalid, turns, cost,
         )
         return int(turns.sum()), float(cost.sum())
+
+    def l2_solution(self) -> np.ndarray:
+        """Return the unweighted least-squares (L2) solution, ignoring the edge weights.
+
+        Exact up to the padding: the preconditioner is the inverse of the operator
+        with unit weights.
+        """
+        b = np.empty(self.precondition.shape, dtype=self.target_x.dtype)
+        _irls_numba.negative_divergence(self.target_x, self.target_y, b)
+        return np.array(self.precondition(b))
+
+    def reweight(
+        self, phi: np.ndarray, epsilon: float, *, unless_settled: bool = False,
+    ) -> None:
+        """Set the weights from the iterate `phi` at `epsilon`.
+
+        With `unless_settled`, only if the last solve ran an iteration (see
+        `_IrlsProblem.solve_round`).
+        """
+        if unless_settled and self._iterations == 0:
+            return
+        _irls_numba.charbonnier_weights(
+            phi, self.target_x, self.target_y, self.edge_x, self.edge_y,
+            phi.dtype.type(epsilon * epsilon), self.weights_x, self.weights_y,
+        )
+
+    def congruent(
+        self, phi: np.ndarray, wrapped: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Snap `phi` onto the branches of `wrapped`, see :func:`_congruent`."""
+        return _congruent(phi, wrapped)
+
+    def keep(self, candidate: _Candidate) -> _Candidate:
+        """Return the candidate, to keep past the next round (it owns its arrays)."""
+        return candidate
+
+    def cold_start(
+        self, wrapped: np.ndarray, options: IRLSOptions | ADMMOptions,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve without a prior, see :func:`_cold_start`."""
+        return _cold_start(self, wrapped, options)
+
+    def warm_start(
+        self,
+        wrapped: np.ndarray,
+        prior: L1PhasePrior | L1BranchesPrior,
+        options: IRLSOptions | ADMMOptions,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve from a prior, see :func:`_warm_start`."""
+        return _warm_start(self, wrapped, prior, options)
+
+    def release(self, candidate: _Candidate) -> _Candidate:
+        """Return the result of the solve (it owns its arrays)."""
+        return candidate
+
+
+class _IrlsProblem(_Edges):
+    r"""The weighted least-squares problem of one IRLS round.
+
+    Find :math:`\phi` with :math:`A \phi = b`, where
+    :math:`A \phi = -\nabla \cdot (w \nabla \phi)` and
+    :math:`b = -\nabla \cdot (w g)` for the wrapped gradients :math:`g` and the
+    weights :math:`w`. :math:`A` is positive semi-definite: for an interior
+    pixel with unit weights, it is :code:`4 p - p[left] - p[right] - p[up] -
+    p[down]`, the same sign convention as the preconditioner.
+    """
+
+    def __init__(
+        self,
+        wrapped: np.ndarray,
+        workers: int | None,
+        edge_weights: tuple[np.ndarray, np.ndarray] | None = None,
+        *,
+        invalid: np.ndarray | None = None,
+    ) -> None:
+        super().__init__(wrapped, workers, edge_weights, invalid=invalid)
+        self._row_sums = np.empty(wrapped.shape[0], dtype=np.float64)
+        self._b = np.empty(wrapped.shape, dtype=wrapped.dtype)
 
     def apply(self, p: np.ndarray, out: np.ndarray) -> float:
         """Compute :math:`A p` into `out`, and return :code:`p · A p`."""
@@ -499,31 +578,7 @@ class _WeightedProblem:
         out -= out.mean()
         return out
 
-    def l2_solution(self) -> np.ndarray:
-        """Return the unweighted least-squares (L2) solution, ignoring the edge weights.
-
-        Exact up to the padding: the preconditioner is the inverse of the operator
-        with unit weights.
-        """
-        b = np.empty(self.precondition.shape, dtype=self.target_x.dtype)
-        _irls_numba.negative_divergence(self.target_x, self.target_y, b)
-        return np.array(self.precondition(b))
-
-    def reweight(
-        self, phi: np.ndarray, epsilon: float, *, unless_settled: bool = False,
-    ) -> None:
-        """Set the weights from the iterate `phi` at `epsilon`.
-
-        With `unless_settled`, only if the last :meth:`solve` ran an iteration.
-        """
-        if unless_settled and self._iterations == 0:
-            return
-        _irls_numba.charbonnier_weights(
-            phi, self.target_x, self.target_y, self.edge_x, self.edge_y,
-            phi.dtype.type(epsilon * epsilon), self.weights_x, self.weights_y,
-        )
-
-    def solve(
+    def solve_round(
         self, phi: np.ndarray, options: IRLSOptions,
     ) -> Callable[[], L1Round]:
         """Run one round's CG on `phi` (in place), and remove its mean if it changed.
@@ -540,12 +595,6 @@ class _WeightedProblem:
             phi -= phi.mean()
         self._iterations = report.iterations
         return lambda: report
-
-    def congruent(
-        self, phi: np.ndarray, wrapped: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Snap `phi` onto the branches of `wrapped`, see :func:`_congruent`."""
-        return _congruent(phi, wrapped)
 
     def run_round(
         self,
@@ -564,36 +613,13 @@ class _WeightedProblem:
         onto the branches. Returns the round's report and its candidate result,
         whose `weights_epsilon` and `converged` the caller sets.
         """
-        pending = self.solve(phi, options)
+        pending = self.solve_round(phi, options)
         self.reweight(phi, epsilon, unless_settled=at_end)
         candidate = _Candidate.take(
             self, phi, wrapped,
             weights_epsilon=math.nan, converged=False, round_index=index,
         )
         return pending(), candidate
-
-    def keep(self, candidate: _Candidate) -> _Candidate:
-        """Return the candidate, to keep past the next round (it owns its arrays)."""
-        return candidate
-
-    def cold_start(
-        self, wrapped: np.ndarray, options: IRLSOptions,
-    ) -> tuple[np.ndarray, _Candidate, float]:
-        """Start a solve without a prior, see :func:`_cold_start`."""
-        return _cold_start(self, wrapped, options)
-
-    def warm_start(
-        self,
-        wrapped: np.ndarray,
-        prior: L1PhasePrior | L1BranchesPrior,
-        options: IRLSOptions,
-    ) -> tuple[np.ndarray, _Candidate, float]:
-        """Start a solve from a prior, see :func:`_warm_start`."""
-        return _warm_start(self, wrapped, prior, options)
-
-    def release(self, candidate: _Candidate) -> _Candidate:
-        """Return the result of the solve (it owns its arrays)."""
-        return candidate
 
 
 def _starting_phase(
@@ -635,7 +661,7 @@ def _congruent(
 
 
 def _conjugate_gradients(
-    problem: _WeightedProblem,
+    problem: _IrlsProblem,
     phi: np.ndarray,
     b: np.ndarray,
     options: IRLSOptions,
@@ -714,7 +740,7 @@ class _Candidate:
     @classmethod
     def take(
         cls,
-        problem: _WeightedProblem,
+        problem: _Edges,
         phi: np.ndarray,
         wrapped: np.ndarray,
         *,
@@ -737,12 +763,55 @@ class _Candidate:
         )
 
 
+class _RoundProblem(Protocol[_OptionsIn_contra]):
+    """A problem that `_start_and_rounds` starts and `_irls_rounds` runs.
+
+    `_IrlsProblem`, `_AdmmProblem`, and the GPU's IRLS problem.
+    """
+
+    def cold_start(
+        self, wrapped: np.ndarray, options: _OptionsIn_contra,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve without a prior: the phase, best candidate, and epsilon."""
+        ...
+
+    def warm_start(
+        self,
+        wrapped: np.ndarray,
+        prior: L1PhasePrior | L1BranchesPrior,
+        options: _OptionsIn_contra,
+    ) -> tuple[np.ndarray, _Candidate, float]:
+        """Start a solve from a prior: the phase, best candidate, and epsilon."""
+        ...
+
+    def release(self, candidate: _Candidate) -> _Candidate:
+        """Return the result, which owns its arrays."""
+        ...
+
+    def run_round(
+        self,
+        phi: np.ndarray,
+        wrapped: np.ndarray,
+        *,
+        epsilon: float,
+        at_end: bool,
+        options: _OptionsIn_contra,
+        index: int,
+    ) -> tuple[L1Round, _Candidate]:
+        """Run one round on `phi` (in place); return its report and candidate."""
+        ...
+
+    def keep(self, candidate: _Candidate) -> _Candidate:
+        """Keep `candidate` past the next round."""
+        ...
+
+
 def _irls_rounds(
-    problem: _WeightedProblem,
+    problem: _RoundProblem[_Options],
     phi: np.ndarray,
     wrapped: np.ndarray,
     weights_epsilon: float,
-    options: IRLSOptions,
+    options: _Options,
     *,
     best: _Candidate,
 ) -> tuple[list[L1Round], _Candidate]:
@@ -794,9 +863,9 @@ def _irls_rounds(
 
 
 def _cold_start(
-    problem: _WeightedProblem,
+    problem: _Edges,
     wrapped: np.ndarray,
-    options: IRLSOptions,
+    options: IRLSOptions | ADMMOptions,
 ) -> tuple[np.ndarray, _Candidate, float]:
     """Start a solve without a prior: return the phase, best candidate, and epsilon.
 
@@ -821,10 +890,10 @@ def _cold_start(
 
 
 def _warm_start(
-    problem: _WeightedProblem,
+    problem: _Edges,
     wrapped: np.ndarray,
     prior: L1PhasePrior | L1BranchesPrior,
-    options: IRLSOptions,
+    options: IRLSOptions | ADMMOptions,
 ) -> tuple[np.ndarray, _Candidate, float]:
     """Start a solve from a prior: return the phase, best candidate, and epsilon.
 
@@ -842,6 +911,126 @@ def _warm_start(
         weights_epsilon=weights_epsilon, converged=True, round_index=-1,
     )
     return phi, best, weights_epsilon
+
+
+# ---- The interface between the driver and the solvers --------------------------------
+
+
+@dataclass
+class _Prepared:
+    """The checked input of a solve, on its device (see `_check_input`).
+
+    `data` is the wrapped phase, in the precision of the solve; on the GPU, it is
+    the complex wave itself if no edge weights are given (the start graph
+    computes its phase and amplitude weights). `edge_weights` are normalized to
+    a maximum of 1, or None. `invalid` (on the CPU) are the pixels whose input is
+    not finite, which are 0 in `data`, or None if there are none.
+    """
+
+    data: np.ndarray
+    edge_weights: tuple[np.ndarray, np.ndarray] | None
+    invalid: np.ndarray | None
+
+
+@dataclass
+class _Solution:
+    """What a solver returns: the best rounded iterate, the rounds, the status."""
+
+    phase: np.ndarray
+    branches: np.ndarray
+    weights_x: np.ndarray
+    weights_y: np.ndarray
+    rounds: list[L1Round]
+    selected_round: int
+    cut_turns: int
+    cut_cost: float
+    weights_epsilon: float
+    converged: bool
+    status: L1Status
+
+    @classmethod
+    def of(cls, best: _Candidate, rounds: list[L1Round], status: L1Status) -> _Solution:
+        """Return the solution with the result `best`, after `rounds`."""
+        return cls(
+            phase=best.phase, branches=best.branches,
+            weights_x=best.weights_x, weights_y=best.weights_y,
+            rounds=rounds, selected_round=best.round_index,
+            cut_turns=best.cut_turns, cut_cost=best.cut_cost,
+            weights_epsilon=best.weights_epsilon, converged=best.converged,
+            status=status,
+        )
+
+
+class _Solver(Protocol[_OptionsIn_contra]):
+    """One method on one device: `_CpuIrls`, `_CpuAdmm`, `_GpuIrls`, `_GpuAdmm`."""
+
+    def solve(
+        self,
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: _OptionsIn_contra,
+    ) -> _Solution:
+        """Solve `prepared`: start (from `prior`, if given), run the rounds, finish.
+
+        The result has NaN at the invalid pixels, and branch 0 there.
+        """
+        ...
+
+
+def _start_and_rounds(
+    problem: _RoundProblem[_Options],
+    wrapped: np.ndarray,
+    prior: L1PhasePrior | L1BranchesPrior | None,
+    options: _Options,
+) -> tuple[list[L1Round], _Candidate]:
+    """Start `problem` and run its rounds in Python; return them and the result.
+
+    The result is the best candidate, released from the problem.
+    """
+    if prior is None:
+        phi, best, weights_epsilon = problem.cold_start(wrapped, options)
+    else:
+        phi, best, weights_epsilon = problem.warm_start(wrapped, prior, options)
+    rounds: list[L1Round] = []
+    if best.cut_turns > 0:
+        rounds, best = _irls_rounds(
+            problem, phi, wrapped, weights_epsilon, options, best=best,
+        )
+    return rounds, problem.release(best)
+
+
+def _irls_status(rounds: list[L1Round]) -> L1Status:
+    """Return the status of an IRLS solve: whether the CG of every round converged."""
+    return "converged" if all(r.converged for r in rounds) else "iteration_limit"
+
+
+def _restore_invalid(best: _Candidate, invalid: np.ndarray | None) -> None:
+    """Set the result at the invalid pixels: phase NaN, branch 0."""
+    if invalid is not None:
+        best.phase[invalid] = np.nan
+        best.branches[invalid] = 0
+
+
+class _CpuIrls:
+    """IRLS on the CPU, on `workers` threads (see `_cpu_threads`)."""
+
+    def __init__(self, workers: int) -> None:
+        self.workers = workers
+
+    def solve(
+        self,
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: IRLSOptions,
+    ) -> _Solution:
+        """See `_Solver.solve`."""
+        problem = _IrlsProblem(
+            prepared.data, self.workers, prepared.edge_weights,
+            invalid=prepared.invalid,
+        )
+        rounds, best = _start_and_rounds(problem, prepared.data, prior, options)
+        _restore_invalid(best, prepared.invalid)
+        return _Solution.of(best, rounds, _irls_status(rounds))
 
 
 def _check_edge_weights(
@@ -1281,7 +1470,7 @@ def unwrap_phase_irls(
     )
 
 
-def _check_options(options: object, expected: type) -> object:
+def _check_options(options: object, expected: type[_OptionsT]) -> _OptionsT:
     """Return `options`, or the defaults of `expected` if None; check the type."""
     if options is None:
         return expected()
@@ -1362,22 +1551,36 @@ def _check_devices(wrapped: np.ndarray, arrays: list[tuple[str, object]]) -> Non
             raise TypeError(msg)
 
 
+@contextlib.contextmanager
+def _cpu_threads(workers: int) -> Iterator[None]:
+    """Run numba's kernels and the cosine transforms on `workers` threads.
+
+    BLAS only computes dot products here, on one thread, so that their summation
+    order and the result do not depend on the thread count. Only the outermost
+    numba setting takes effect, so it comes before `set_num_threads`, which sets
+    numba too.
+    """
+    with (
+        set_numba_threads(min(workers, numba.config.NUMBA_NUM_THREADS)),
+        set_num_threads(1),
+    ):
+        yield
+
+
 def _run(
     wrapped: np.ndarray,
     prior: L1PhasePrior | L1BranchesPrior | L1Result | None,
-    options: IRLSOptions,
+    options: IRLSOptions | ADMMOptions,
     workers: int | None,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
     *,
     workspace: Workspace | None = None,
 ) -> L1Result:
-    """Set up the threads and run :func:`_unwrap` (any method of `options`)."""
+    """Check the arguments, set up the threads or the workspace, and solve."""
     _check_arguments(wrapped, prior, workers, edge_weights, workspace)
     if isinstance(prior, L1Result):
         prior = prior.as_prior()
     if _array_module(wrapped) is not np:
-        if options.method == "admm" and 1 in wrapped.shape:
-            return _on_host(wrapped, prior, options, edge_weights)
         # On the GPU, CPU threads play no part. The solve uses the workspace's
         # problem until it returns, on the device of the input:
         if workspace is None:
@@ -1389,129 +1592,69 @@ def _run(
             )
     if workers is None:
         workers = min(os.cpu_count() or 1, _DEFAULT_MAX_THREADS)
-    # BLAS only computes dot products here, on one thread, so that their summation
-    # order and the result do not depend on the thread count. The kernels and the
-    # cosine transforms use `workers` threads. Only the outermost numba setting
-    # takes effect, so it comes before `set_num_threads`, which sets numba too.
-    with (
-        set_numba_threads(min(workers, numba.config.NUMBA_NUM_THREADS)),
-        set_num_threads(1),
-    ):
+    with _cpu_threads(workers):
         return _unwrap(wrapped, prior, options, workers, edge_weights)
-
-
-def _on_host(
-    wrapped: np.ndarray,
-    prior: L1PhasePrior | L1BranchesPrior | None,
-    options: IRLSOptions,
-    edge_weights: tuple[np.ndarray, np.ndarray] | None,
-) -> L1Result:
-    """Solve for cupy input on the CPU, and return the result as cupy arrays.
-
-    For images of a single row or column, which ADMM on the GPU cannot transform
-    (their FFT plans would be of length 1). Such an image has no loops, so its
-    unwrapping is an integration of the edge targets, a matter of microseconds.
-    """
-    import cupy as cp  # noqa: PLC0415
-
-    def host(x: object) -> object:
-        return cp.asnumpy(x) if isinstance(x, cp.ndarray) else x
-
-    if prior is not None:
-        prior = dataclasses.replace(prior, **{
-            f.name: host(getattr(prior, f.name)) for f in dataclasses.fields(prior)
-        })
-    if edge_weights is not None:
-        edge_weights = (host(edge_weights[0]), host(edge_weights[1]))
-    result = _run(host(wrapped), prior, options, 1, edge_weights)
-    return dataclasses.replace(result, **{
-        f.name: cp.asarray(value) for f in dataclasses.fields(result)
-        if isinstance(value := getattr(result, f.name), np.ndarray)
-    })
 
 
 def _unwrap(
     wrapped: np.ndarray,
     prior: L1PhasePrior | L1BranchesPrior | None,
-    options: IRLSOptions,
+    options: IRLSOptions | ADMMOptions,
     workers: int,
     edge_weights: tuple[np.ndarray, np.ndarray] | None,
     *,
     workspace: Workspace | None = None,
 ) -> L1Result:
-    """Run the solve (IRLS or ADMM) once the threads (or the workspace) are set up."""
+    """Prepare the input, solve it with the solver for `options` and its device."""
     xp = _array_module(wrapped)
-    wrapped, edge_weights, invalid = _check_input(
+    data, edge_weights, invalid = _check_input(
         wrapped, prior, edge_weights, keep_wave=xp is not np, workers=workers,
     )
+    solver = _solver_for(
+        options, gpu=xp is not np, workers=workers, workspace=workspace,
+    )
+    solution = solver.solve(_Prepared(data, edge_weights, invalid), prior, options)
+    return _result(solution, options)
+
+
+def _solver_for(
+    options: IRLSOptions | ADMMOptions,
+    *,
+    gpu: bool,
+    workers: int,
+    workspace: Workspace | None,
+) -> _Solver[Any]:
+    """Return the solver for the method of `options`, on the CPU or the GPU."""
     admm = options.method == "admm"
-    if xp is np and admm:
-        from .admm import _AdmmProblem  # noqa: PLC0415
-        problem = _AdmmProblem(wrapped, workers, edge_weights, options, invalid=invalid)
-    elif xp is np:
-        problem = _WeightedProblem(
-            wrapped, workers=workers, edge_weights=edge_weights, invalid=invalid,
-        )
-    elif xp.iscomplexobj(wrapped):
-        # On the GPU, the phase and the edge weights of a wave come from a few
-        # fused kernels:
-        from ._irls_cupy import problem_for_wave  # noqa: PLC0415
-        # The input is only staged; the start (setup, starting point, first
-        # candidate) then runs as one CUDA graph:
-        problem = problem_for_wave(
-            wrapped, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE,
-            method=options.method, workspace=workspace,
-        )
-        wrapped = problem.wrapped
-    else:
-        from ._irls_cupy import problem_for  # noqa: PLC0415
-        problem = problem_for(
-            wrapped, edge_weights, method=options.method, workspace=workspace,
-        )
-        wrapped = problem.wrapped
+    if gpu:
+        from ._irls_cupy import _GpuAdmm, _GpuIrls  # noqa: PLC0415
+        return _GpuAdmm(workspace) if admm else _GpuIrls(workspace)
+    if admm:
+        from .admm import _CpuAdmm  # noqa: PLC0415
+        return _CpuAdmm(workers)
+    return _CpuIrls(workers)
 
-    if prior is None:
-        phi, best, weights_epsilon = problem.cold_start(wrapped, options)
-    else:
-        phi, best, weights_epsilon = problem.warm_start(wrapped, prior, options)
 
-    if best.cut_turns == 0:
-        rounds: list[L1Round] = []
-    else:
-        run_rounds = getattr(problem, "run_rounds", None)
-        if run_rounds is not None:  # a problem may run its own rounds (on the GPU)
-            rounds, best = run_rounds(phi, wrapped, weights_epsilon, options, best=best)
-        else:
-            rounds, best = _irls_rounds(
-                problem, phi, wrapped, weights_epsilon, options, best=best,
-            )
+def _result(solution: _Solution, options: IRLSOptions | ADMMOptions) -> L1Result:
+    """Return the `L1Result` of `solution`."""
     # If the selected round did not converge, its iterate does not solve the
     # system at its epsilon, so a warm start resumes one round coarser:
-    resume_epsilon = best.weights_epsilon
-    if not best.converged:
+    resume_epsilon = solution.weights_epsilon
+    if not solution.converged:
         resume_epsilon /= options.decay
     resume_epsilon = min(
         max(resume_epsilon, options.epsilon_min), options.epsilon_start,
     )
-
-    best = problem.release(best)
-    if invalid is not None:  # on the GPU, `release` does this
-        best.phase[invalid] = np.nan
-        best.branches[invalid] = 0
     return L1Result(
-        phase=best.phase,
-        branches=best.branches,
-        weights_x=best.weights_x,
-        weights_y=best.weights_y,
-        rounds=rounds,
-        selected_round=best.round_index,
-        cut_turns=best.cut_turns,
-        cut_cost=best.cut_cost,
-        status=(
-            ("converged" if len(rounds) < options.rounds else "iteration_limit")
-            if admm
-            else "converged" if all(r.converged for r in rounds) else "iteration_limit"
-        ),
+        phase=solution.phase,
+        branches=solution.branches,
+        weights_x=solution.weights_x,
+        weights_y=solution.weights_y,
+        rounds=solution.rounds,
+        selected_round=solution.selected_round,
+        cut_turns=solution.cut_turns,
+        cut_cost=solution.cut_cost,
+        status=solution.status,
         resume_epsilon=resume_epsilon,
     )
 

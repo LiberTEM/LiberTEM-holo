@@ -518,7 +518,7 @@ def _kernels(dtype: np.dtype) -> dict:
     )
     def apply_operator(p, z, p_new, wx, wy, out, rows, cols, partials, counter, s, f,
                        mode, tiny, rz_new, rz_old, rz_count, pap_out):
-        """Compute out = -div(w grad p), the operator of `irls._WeightedProblem`.
+        """Compute out = -div(w grad p), the operator of `irls._IrlsProblem`.
 
         mode 0: only that. mode 1: also alpha = rz / (p . out) into s[S_ALPHA];
         p . out <= `tiny` stops CG. mode 2: as 1, for the next CG direction
@@ -1166,7 +1166,7 @@ def _kernels(dtype: np.dtype) -> dict:
     def subtract_mean_if_iterated(x, n, s, f):
         """Subtract the mean from x, once CG has stopped, if it iterated.
 
-        As `if iterated: phi -= phi.mean()` in `irls._WeightedProblem.solve`.
+        As `if iterated: phi -= phi.mean()` in `irls._IrlsProblem.solve_round`.
         """
         if not f[F_DONE] or not f[F_ITERATED]:
             return
@@ -1183,7 +1183,7 @@ def _kernels(dtype: np.dtype) -> dict:
         """Compute w = C eps^2 / sqrt((grad phi - g)^2 + eps^2), eps^2 = params[0].
 
         As `_irls_numba.charbonnier_weights`. With params[1] != 0 (as
-        `unless_settled` of `irls._WeightedProblem.reweight`), nothing happens if
+        `unless_settled` of `irls._Edges.reweight`), nothing happens if
         the last CG solve ran no iteration (the IRLS fixed point), decided on the
         device. The parameters are in device memory, so that a captured graph can
         take new ones each round.
@@ -1428,7 +1428,7 @@ def _kernels(dtype: np.dtype) -> dict:
                         s):
         """Copy the wrapped phase, and compute the targets and their jumps.
 
-        `in_` may be `wrapped` without `detect`. As `_WeightedProblem`: the
+        `in_` may be `wrapped` without `detect`. As `irls._Edges`: the
         wrapped target gradients g = d - rint(d / tau) tau and their whole-turn
         jumps rint((d - g) / tau), in T. With `unit_edges`, also C = w = 1 on
         every edge. With `detect`, the pixels of `in_` that are not finite are

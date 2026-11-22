@@ -402,7 +402,7 @@ def test_gpu_wave_start_is_the_start_of_its_phase(dtype, amplitude, shape):
 
 
 def _start_on(
-    problem: _irls_cupy.CupyWeightedProblem | irls._WeightedProblem,
+    problem: _irls_cupy.CupyWeightedProblem | irls._Edges,
     start: str,
     options: IRLSOptions,
     prior: L1PhasePrior | L1BranchesPrior | None,
@@ -523,7 +523,7 @@ def test_gpu_start_graphs_are_the_cpus_starts(source, start):
         cpu_wrapped, cpu_edges, invalid = irls._check_input(  # noqa: SLF001
             wrapped.get(), prior, edges,
         )
-        cpu = irls._WeightedProblem(cpu_wrapped, 1, cpu_edges, invalid=invalid)  # noqa: SLF001
+        cpu = irls._Edges(cpu_wrapped, 1, cpu_edges, invalid=invalid)  # noqa: SLF001
         expected = _start_on(cpu, kind, options, prior, wrapped=cpu_wrapped)
 
         def compare(actual: dict, expected: dict) -> None:
@@ -556,7 +556,7 @@ def test_gpu_start_graphs_follow_the_options():
     )
     for epsilon_start in (1.0, 2.5, 1.0):
         options = IRLSOptions(epsilon_start=epsilon_start)
-        cpu = irls._WeightedProblem(wrapped, 1)  # noqa: SLF001
+        cpu = irls._Edges(wrapped, 1)  # noqa: SLF001
         expected = _start_on(cpu, "cold", options, None, wrapped=wrapped)
         staged.stage_phase(cp.asarray(wrapped), None)
         actual = _start_on(staged, "cold", options, None)
