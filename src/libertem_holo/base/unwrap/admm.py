@@ -20,10 +20,15 @@ from .irls import (
     L1PhasePrior,
     L1Result,
     L1Round,
+    L1Status,
     _Candidate,
     _check_options,
+    _Edges,
+    _Prepared,
+    _restore_invalid,
     _run,
-    _WeightedProblem,
+    _Solution,
+    _start_and_rounds,
 )
 
 if TYPE_CHECKING:
@@ -131,8 +136,8 @@ def _rho(edges: np.ndarray | None, scale: float) -> float:
     return scale * (b - (b - a) * 0.5) / math.pi
 
 
-class _AdmmProblem(_WeightedProblem):
-    """The state of an ADMM solve on the CPU, with the hooks of `_WeightedProblem`.
+class _AdmmProblem(_Edges):
+    """The state of an ADMM solve on the CPU, a sibling of `irls._IrlsProblem`.
 
     The u-step is the unweighted least-squares fit to the edge targets, which the
     exact (unpadded) Neumann Poisson solve by cosine transforms does in one go.
@@ -252,6 +257,33 @@ class _AdmmProblem(_WeightedProblem):
                 candidate.weights_x, candidate.weights_y,
             )
         return candidate
+
+
+def _admm_status(rounds: list[L1Round], options: ADMMOptions) -> L1Status:
+    """Return the status of an ADMM solve: whether it stopped before the last round."""
+    return "converged" if len(rounds) < options.rounds else "iteration_limit"
+
+
+class _CpuAdmm:
+    """ADMM on the CPU, on `workers` threads (see `irls._cpu_threads`)."""
+
+    def __init__(self, workers: int) -> None:
+        self.workers = workers
+
+    def solve(
+        self,
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: ADMMOptions,
+    ) -> _Solution:
+        """See `irls._Solver.solve`."""
+        problem = _AdmmProblem(
+            prepared.data, self.workers, prepared.edge_weights, options,
+            invalid=prepared.invalid,
+        )
+        rounds, best = _start_and_rounds(problem, prepared.data, prior, options)
+        _restore_invalid(best, prepared.invalid)
+        return _Solution.of(best, rounds, _admm_status(rounds, options))
 
 
 def unwrap_phase_admm(

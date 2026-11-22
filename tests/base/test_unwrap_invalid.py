@@ -123,7 +123,7 @@ def test_edges_that_touch_invalid_pixels_are_weak_and_do_not_count():
     assert edges is None
     assert wrapped[5, 7] == 0
     assert np.isnan(phase[5, 7])  # the caller's array is unchanged
-    problem = irls._WeightedProblem(wrapped, 1, edges, invalid=invalid)  # noqa: SLF001
+    problem = irls._Edges(wrapped, 1, edges, invalid=invalid)  # noqa: SLF001
     weak_x = problem.edge_x[5, 6:8]
     weak_y = problem.edge_y[4:6, 7]
     np.testing.assert_array_equal(weak_x, irls._INVALID_EDGE_WEIGHT)  # noqa: SLF001

@@ -153,7 +153,7 @@ def test_percentile_is_numpys(seed):
 @pytest.mark.parametrize("shape", [(33, 47), (1, 9), (9, 1)])
 def test_targets_and_jumps_are_numpys(dtype, shape):
     wrapped = (np.random.default_rng(1).uniform(-4, 4, size=shape)).astype(dtype)
-    problem = irls._WeightedProblem(wrapped, 2)  # noqa: SLF001
+    problem = irls._Edges(wrapped, 2)  # noqa: SLF001
     for axis, target, jumps in ((1, problem.target_x, problem.jumps_x),
                                 (0, problem.target_y, problem.jumps_y)):
         difference = np.diff(wrapped, axis=axis)

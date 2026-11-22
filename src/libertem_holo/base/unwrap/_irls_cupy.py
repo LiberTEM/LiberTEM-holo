@@ -1,9 +1,10 @@
 """GPU (cupy) implementation of the weighted problems of the IRLS and ADMM unwrapping.
 
-The counterpart of :class:`~libertem_holo.base.unwrap.irls._WeightedProblem`
-for cupy input: the same arithmetic in the same order per pixel, and dot products
-summed in float64, so the results match the CPU's when both pad to the same lengths
-(see `PADDED_LENGTH`). At the image sizes of holography (~500² to 2048²), the work
+The counterpart of the CPU's problems (`irls._Edges` and its IRLS and ADMM
+siblings) for cupy input, with the solvers `_GpuIrls` and `_GpuAdmm` that use it:
+the same arithmetic in the same order per pixel, and dot products summed in
+float64, so the results match the CPU's when both pad to the same lengths (see
+`PADDED_LENGTH`). At the image sizes of holography (~500² to 2048²), the work
 per CG iteration is a few passes over one image, so kernel launches and host
 synchronizations cost more than the arithmetic. Hence:
 
@@ -48,13 +49,26 @@ except ImportError:
 
 from libertem_holo.base.workspace import Workspace, default_workspace
 
-from .irls import _INVALID_EDGE_WEIGHT, _is_smooth
+from .irls import (
+    _AMPLITUDE_FLOOR,
+    _AMPLITUDE_PERCENTILE,
+    _INVALID_EDGE_WEIGHT,
+    _is_smooth,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from .admm import ADMMOptions
-    from .irls import IRLSOptions, L1BranchesPrior, L1PhasePrior, L1Round, _Candidate
+    from .irls import (
+        IRLSOptions,
+        L1BranchesPrior,
+        L1PhasePrior,
+        L1Round,
+        _Candidate,
+        _Prepared,
+        _Solution,
+    )
 
 _BLOCK = 256
 # CG iterations per captured graph: the default `iterations_per_round` fits in one.
@@ -462,7 +476,7 @@ class CupyWeightedProblem:
     def cold_start(
         self,
         wrapped: cp.ndarray,  # noqa: ARG002 (staged; the CPU problem's call)
-        options: IRLSOptions,
+        options: IRLSOptions | ADMMOptions,
     ) -> tuple[cp.ndarray, _Candidate, float]:
         """Start a solve without a prior; as `irls._cold_start` on the CPU.
 
@@ -479,7 +493,7 @@ class CupyWeightedProblem:
         self,
         wrapped: cp.ndarray,  # noqa: ARG002 (staged; the CPU problem's call)
         prior: L1PhasePrior | L1BranchesPrior,
-        options: IRLSOptions,
+        options: IRLSOptions | ADMMOptions,
     ) -> tuple[cp.ndarray, _Candidate, float]:
         """Start a solve from a prior; as `irls._warm_start` on the CPU.
 
@@ -513,7 +527,7 @@ class CupyWeightedProblem:
         return self.phi, best, epsilon
 
     def _run_start(
-        self, kind: str, options: IRLSOptions, *, weights_epsilon: float,
+        self, kind: str, options: IRLSOptions | ADMMOptions, *, weights_epsilon: float,
     ) -> _Candidate:
         """Run the start graph of `kind` on the staged input; return its candidate."""
         from .irls import _Candidate  # noqa: PLC0415
@@ -549,7 +563,9 @@ class CupyWeightedProblem:
             weights_epsilon=weights_epsilon, converged=True, round_index=-1,
         )
 
-    def _enqueue_start(self, staged: tuple, kind: str, options: IRLSOptions) -> None:
+    def _enqueue_start(
+        self, staged: tuple, kind: str, options: IRLSOptions | ADMMOptions,
+    ) -> None:
         """Enqueue a start: the setup, the starting point, and the first candidate.
 
         `staged` is ("wave", floor, percentile) or ("phase", whether edge weights
@@ -1029,7 +1045,7 @@ class CupyWeightedProblem:
         self._graph = self._graphs[0]
         self._graph_key = key
 
-    # -- the interface of _WeightedProblem -----------------------------------
+    # -- the rounds ----------------------------------------------------------
 
     def run_round(
         self,
@@ -1041,7 +1057,7 @@ class CupyWeightedProblem:
         options: IRLSOptions,
         index: int,
     ) -> tuple[L1Round, _Candidate]:
-        """Run one IRLS round on `phi` (in place); see `_WeightedProblem.run_round`.
+        """Run one IRLS round on `phi` (in place); see `irls._IrlsProblem.run_round`.
 
         One graph launch and one synchronization (with up to `_GRAPH_ITERATIONS`
         CG iterations). The candidate's arrays are a candidate slot of the
@@ -1100,22 +1116,22 @@ class CupyWeightedProblem:
     def run_rounds(
         self,
         phi: cp.ndarray,
-        wrapped: cp.ndarray,
         weights_epsilon: float,
-        options: IRLSOptions | ADMMOptions,
+        options: ADMMOptions,
         *,
         best: _Candidate,
     ) -> tuple[list[L1Round], _Candidate]:
-        """Run the rounds of a solve; see `irls._irls_rounds`.
+        """Run the rounds of an ADMM solve, as `irls._irls_rounds` does on the CPU.
 
-        IRLS runs `irls._irls_rounds`, one graph launch per round. ADMM runs its
-        stop rule on the device (in `cuts_decide`), and a graph launch runs
-        `_ADMM_CHUNK` rounds: one host synchronization per chunk.
+        The stop rule runs on the device (in `cuts_decide`), and a graph launch
+        runs `_ADMM_CHUNK` rounds: one host synchronization per chunk. (IRLS
+        runs `irls._irls_rounds` itself, one graph launch per round.)
         """
-        from .irls import _MIN_IMPROVEMENT, L1Round, _Candidate, _irls_rounds  # noqa: PLC0415
+        from .irls import _MIN_IMPROVEMENT, L1Round, _Candidate  # noqa: PLC0415
 
         if self.method != "admm":
-            return _irls_rounds(self, phi, wrapped, weights_epsilon, options, best=best)
+            msg = "run_rounds is for ADMM problems; IRLS runs irls._irls_rounds"
+            raise RuntimeError(msg)
         self._prepare_admm(options)
         eps = (
             options.epsilon_start if math.isinf(weights_epsilon)
@@ -1367,3 +1383,116 @@ class CupyWeightedProblem:
             "branches_and_phase",
             (phi, wrapped, self.offset, tau, branches, phase, n),
         )
+
+
+# ---- The solvers: IRLS and ADMM on the GPU (see `irls._Solver`) ---------------------
+
+
+def _problem_for_input(
+    prepared: _Prepared, method: str, workspace: Workspace | None,
+) -> CupyWeightedProblem:
+    """Return the problem of `workspace` for `prepared`, with the input staged."""
+    if cp.iscomplexobj(prepared.data):
+        return problem_for_wave(
+            prepared.data, _AMPLITUDE_FLOOR, _AMPLITUDE_PERCENTILE,
+            method=method, workspace=workspace,
+        )
+    return problem_for(
+        prepared.data, prepared.edge_weights, method=method, workspace=workspace,
+    )
+
+
+class _GpuIrls:
+    """IRLS on the GPU, with the problem kept in `workspace`.
+
+    The caller holds the workspace's lock, on the device of the input.
+    """
+
+    def __init__(self, workspace: Workspace | None) -> None:
+        self.workspace = workspace
+
+    def solve(
+        self,
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: IRLSOptions,
+    ) -> _Solution:
+        """See `irls._Solver.solve`."""
+        from .irls import _irls_status, _Solution, _start_and_rounds  # noqa: PLC0415
+
+        problem = _problem_for_input(prepared, "irls", self.workspace)
+        rounds, best = _start_and_rounds(problem, problem.wrapped, prior, options)
+        return _Solution.of(best, rounds, _irls_status(rounds))
+
+
+class _GpuAdmm:
+    """ADMM on the GPU, with the problem kept in `workspace`.
+
+    The caller holds the workspace's lock, on the device of the input. Images of
+    a single row or column are solved on the CPU (see `_solve_on_host`).
+    """
+
+    def __init__(self, workspace: Workspace | None) -> None:
+        self.workspace = workspace
+
+    def solve(
+        self,
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: ADMMOptions,
+    ) -> _Solution:
+        """See `irls._Solver.solve`."""
+        from .admm import _admm_status  # noqa: PLC0415
+        from .irls import _Solution  # noqa: PLC0415
+
+        if 1 in prepared.data.shape:
+            return self._solve_on_host(prepared, prior, options)
+        problem = _problem_for_input(prepared, "admm", self.workspace)
+        wrapped = problem.wrapped
+        if prior is None:
+            phi, best, weights_epsilon = problem.cold_start(wrapped, options)
+        else:
+            phi, best, weights_epsilon = problem.warm_start(wrapped, prior, options)
+        rounds: list[L1Round] = []
+        if best.cut_turns > 0:
+            rounds, best = problem.run_rounds(phi, weights_epsilon, options, best=best)
+        best = problem.release(best)
+        return _Solution.of(best, rounds, _admm_status(rounds, options))
+
+    @staticmethod
+    def _solve_on_host(
+        prepared: _Prepared,
+        prior: L1PhasePrior | L1BranchesPrior | None,
+        options: ADMMOptions,
+    ) -> _Solution:
+        """Solve on the CPU, and return the solution as cupy arrays.
+
+        For images of a single row or column, which ADMM on the GPU cannot
+        transform (their FFT plans would be of length 1). Such an image has no
+        loops, so its unwrapping is an integration of the edge targets, a matter
+        of microseconds.
+        """
+        from .admm import _CpuAdmm  # noqa: PLC0415
+        from .irls import _check_input, _cpu_threads, _Prepared  # noqa: PLC0415
+
+        def host(x: object) -> object:
+            return cp.asnumpy(x) if isinstance(x, cp.ndarray) else x
+
+        if prior is not None:
+            prior = dataclasses.replace(prior, **{
+                f.name: host(getattr(prior, f.name)) for f in dataclasses.fields(prior)
+            })
+        edges = prepared.edge_weights
+        if edges is not None:
+            edges = (host(edges[0]), host(edges[1]))
+        data, edges, invalid = _check_input(
+            host(prepared.data), prior, edges, workers=1,
+        )
+        with _cpu_threads(1):
+            solution = _CpuAdmm(1).solve(
+                _Prepared(data, edges, invalid), prior, options,
+            )
+        return dataclasses.replace(solution, **{
+            f.name: cp.asarray(value) for f in dataclasses.fields(solution)
+            if isinstance(value := getattr(solution, f.name), np.ndarray)
+        })
