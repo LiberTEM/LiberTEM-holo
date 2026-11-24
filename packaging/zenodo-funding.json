@@ -1,0 +1,16 @@
+[
+    {
+        "funder": {"id": "02nv7yv05"},
+        "award": {
+            "title": {"en": "AIDAS"},
+            "identifiers": [{"scheme": "url", "identifier": "https://aidas-lab.eu/"}]
+        }
+    },
+    {
+        "funder": {"id": "00jjx8s55"},
+        "award": {
+            "title": {"en": "AIDAS"},
+            "identifiers": [{"scheme": "url", "identifier": "https://aidas-lab.eu/"}]
+        }
+    }
+]

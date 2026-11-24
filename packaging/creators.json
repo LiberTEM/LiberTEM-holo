@@ -1,7 +1,7 @@
 [
     {            
         "displayname": "Malika Khelfallah",
-        "authorname": "Khelfallah Malika",
+        "authorname": "Khelfallah, Malika",
         "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
         "github": "malika576",
         "contribution": "Reconstruction and alignment functions, example notebooks, ...",
@@ -9,7 +9,7 @@
     },
     {            
         "displayname": "J. V. Vas",
-        "authorname": "Joseph Vimal Vas",
+        "authorname": "Vas, Joseph Vimal",
         "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
         "github": "jvvas",
         "contribution": "Documentation, feedback, data, etc",
@@ -38,5 +38,16 @@
         "contributions": "Discussions, model-based iterative reconstruction prototypes",
         "github": "DavidLanders95",
         "orcid": "0000-0002-3295-9473"
+    },
+    {
+        "displayname": "Dieter Weber",
+        "authorname": "Weber, Dieter",
+        "affiliation": "Jülich Research Centre, Ernst Ruska Centre",
+        "orcid": "0000-0001-6635-9567"
+    },
+    {
+        "displayname": "Patrick Adrian",
+        "authorname": "Adrian, Patrick",
+        "affiliation": "TH Lübeck"
     }
 ]
