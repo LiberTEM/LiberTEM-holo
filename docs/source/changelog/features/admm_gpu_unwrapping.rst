@@ -8,3 +8,4 @@
    :code:`method="admm"` in :func:`~libertem_holo.base.unwrap.phase_unwrap`.
    Both methods solve on the GPU for cupy input, keeping their buffers in a
    :class:`~libertem_holo.base.workspace.Workspace`, and leave NaN pixels NaN.
+ * Experimental, please report any issues you encounter

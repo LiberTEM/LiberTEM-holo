@@ -1358,6 +1358,8 @@ def unwrap_phase_irls(
     result phase is float64, computed from the input values, so it stays exactly
     congruent with them.
 
+    This algorithm is recently added and still experimental, use at your own risk.
+
     Parameters
     ----------
     wrapped
