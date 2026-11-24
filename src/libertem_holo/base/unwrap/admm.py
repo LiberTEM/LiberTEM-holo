@@ -65,8 +65,9 @@ class ADMMOptions:
         than this fraction of it, and by more than half a cut through edges of
         full weight.
     cold_start
-        Where a solve without a prior starts, as in
-        :class:`~libertem_holo.base.unwrap.IRLSOptions`.
+        Where a solve without a prior starts: :code:`"zero"` starts at zero phase,
+        :code:`"least_squares"` at the unweighted least-squares (L2) solution.
+        Either way, the rounded L2 solution is the first candidate result.
 
     """
 
@@ -297,28 +298,112 @@ def unwrap_phase_admm(
 ) -> L1Result:
     r"""Unwrap a 2D phase by ADMM on a weighted, smoothed L1 objective.
 
-    The same inputs and result as
-    :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`, which describes them,
-    and the same objective: the weighted sum :math:`\sum C |r|` of the gradient
-    residuals :math:`r` of the result, smoothed by a Huber function of scale
-    :math:`\varepsilon`, which decays over the rounds.
+    The result is congruent with the input: it differs from it by an integer
+    multiple of :math:`2\pi` at every valid pixel. The solve is global and places
+    the discontinuities where they cost least.
 
-    Instead of reweighted least-squares solves, ADMM splits the residuals off
-    into edge variables :math:`z = \nabla u - g`. An iteration is an unweighted
+    The solve runs in float32 for float32 and complex64 input, and in float64
+    otherwise. The result phase is float64, computed from the input values, so it
+    stays exactly congruent with them.
+
+    This algorithm is recently added and still experimental, use at your own risk.
+
+    Parameters
+    ----------
+    wrapped
+        The wrapped phase, usually in :math:`[-\pi, \pi]`; any real values work,
+        since only differences modulo :math:`2\pi` enter the solve. Or the complex
+        wave: then its phase is unwrapped, with edge weights from its amplitude
+        (:func:`~libertem_holo.base.unwrap.amplitude_edge_weights`) unless
+        :code:`edge_weights` is given. For a cupy array, the solve runs on the GPU
+        and the result holds cupy arrays. Pixels that are not finite (NaN or
+        infinite) are invalid: the solve treats their phase as 0, gives the edges
+        that touch them a weight of :code:`1e-3` (where the largest weight is 1),
+        and leaves those edges out of the cut turns and cost. The result is NaN
+        there, with branch 0.
+    prior
+        Start from an earlier solution instead of from scratch, and resume its
+        epsilon schedule; see :class:`~libertem_holo.base.unwrap.L1PhasePrior` and
+        :class:`~libertem_holo.base.unwrap.L1BranchesPrior`. Passing an
+        :class:`~libertem_holo.base.unwrap.L1Result` is the same as passing
+        :meth:`L1Result.as_prior() <libertem_holo.base.unwrap.L1Result.as_prior>`.
+        A warm start from the previous frame of a series typically needs fewer
+        rounds than a cold start.
+    options
+        Solver settings, :class:`ADMMOptions` by default.
+    workers
+        Number of threads. By default, the number of CPUs, but at most 16.
+        The result does not depend on it. Not used on the GPU.
+    edge_weights
+        Weights :math:`C` of the horizontal and vertical edges between
+        neighbouring pixels, with shapes :code:`(rows, cols - 1)` and
+        :code:`(rows - 1, cols)`, finite and greater than zero. Edges with a low
+        weight are cheap to cut, so the solve places discontinuities there. Only
+        relative weights matter. Without edge weights, all edges weigh the same.
+    workspace
+        Where a solve on the GPU keeps its buffers, FFT plans and CUDA graphs for
+        the next solve of the same shape (see
+        :mod:`libertem_holo.base.workspace`). By default, the default workspace,
+        which solves from several threads use one at a time. Not used on the CPU.
+
+    Returns
+    -------
+    L1Result
+        The unwrapped phase, the branches, the weights of the selected iterate
+        (the edge weights times the Charbonnier weights
+        :math:`\varepsilon^2 / \sqrt{r^2 + \varepsilon^2}` of its gradient residuals
+        :math:`r` at its :math:`\varepsilon`), the cut turns and cut cost, and a
+        report of each round. The reports give the number of ADMM iterations, but
+        no CG residuals. The status is :code:`"converged"` if the solve stopped
+        before running all :code:`rounds`, :code:`"iteration_limit"` otherwise.
+
+    See Also
+    --------
+    libertem_holo.base.unwrap.unwrap_phase_irls : The same objective, minimized by
+        iteratively reweighted least squares.
+
+    Notes
+    -----
+    A plain least-squares (L2) unwrap, like
+    :func:`~libertem_holo.base.unwrap.unwrap_phase_laplacian`, smears a genuine
+    discontinuity or the step around a residue across the image. This solve
+    minimizes the weighted sum :math:`\sum C |r|` of the gradient residuals
+    :math:`r` of the result instead, where :math:`r` is the difference between the
+    gradient of the result and the wrapped gradient of the input. The absolute
+    value is smoothed by a Huber function of scale :math:`\varepsilon`, which
+    decays geometrically from :code:`epsilon_start` to :code:`epsilon_min` over
+    the rounds: the solve starts smooth and then sharpens.
+
+    ADMM splits the residuals off into edge variables :math:`z = \nabla u - g`,
+    for the wrapped gradient :math:`g`. An iteration is an unweighted
     least-squares fit of :math:`u` to the edge targets (one Neumann Poisson solve,
     a pair of cosine transforms), the proximal step of the Huber function for
     :math:`z` (elementwise; the edge weights only enter here), and a dual update.
     This follows B. Rouet-Leduc and C. Hulbert, "Phase Unwrapping in Seconds: A
     Spectral ADMM Algorithm for Large-Scale InSAR", Remote Sensing 18, 1801
-    (2026), https://doi.org/10.3390/rs18111801. Added here are the Huber
-    smoothing, and the zero start, rounds and stop rule of
-    :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`. Results are close to
-    those of IRLS, at a fraction of its iterations.
+    (2026), https://doi.org/10.3390/rs18111801. The Huber smoothing, the rounds
+    and the stop rule below are additions to it. Results are close to those of
+    :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`, at a fraction of its
+    iterations.
 
-    The rounds' reports carry the number of iterations, but no CG residuals.
-    The status is :code:`"converged"` unless the solve ran all :code:`rounds`.
+    By default (:code:`cold_start="zero"`), the solve starts at zero phase;
+    with :code:`cold_start="least_squares"`, at the L2 solution, which smears
+    discontinuities and residues. Either way, the rounded L2 solution is the first
+    candidate result.
 
-    This algorithm is recently added and still experimental, use at your own risk.
+    After each round of :code:`iterations_per_round` iterations, the iterate is
+    snapped onto the branches of the input and scored. Its *cut turns* are the
+    number of whole turns by which its gradient differs from the wrapped gradient,
+    summed over all edges between neighbouring pixels: the L1 objective of a
+    congruent result. Its *cut cost* weights each edge by :math:`C`; without edge
+    weights, the two are equal. The solve returns the latest rounded iterate with
+    the lowest cut cost. The starting point (the rounded L2 solution, or the
+    prior) is a candidate too, so the result is never worse than that. The solve
+    stops once the cut cost has not improved for :code:`stop_patience` rounds,
+    where an improvement must exceed both :code:`stop_tolerance` of the cost and
+    half a cut through edges of full weight, so that tiny gains in nearly
+    weightless regions do not keep it going. It also stops as soon as there are
+    no cut turns, since no result can be better.
 
     Examples
     --------

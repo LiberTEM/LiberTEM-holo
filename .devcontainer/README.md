@@ -1,10 +1,10 @@
 # Dev container
 
-Ubuntu 26.04 with uv, Python 3.10–3.14, neovim, Claude Code and the Nsight
-profilers, on amd64 and arm64 hosts. When the container is created, `post-create.sh`
-sets up the editable dev install in `.venv`, with `cupy-cuda13x` and the CUDA toolkit
-from pip. The GPU is passed through if the host has the NVIDIA container toolkit;
-otherwise the container starts without a GPU.
+Ubuntu 26.04 with uv, Python 3.10–3.14, neovim, Claude Code, the Nsight
+profilers and pandoc (for the docs build), on amd64 and arm64 hosts. When the
+container is created, `post-create.sh` sets up the editable dev install in `.venv`,
+with `cupy-cuda13x` and the CUDA toolkit from pip. The GPU is passed through if the
+host has the NVIDIA container toolkit; otherwise the container starts without a GPU.
 
 `.venv`, `.tox`, `~/.claude`, `~/.cache` and the neovim plugin directory are Docker
 volumes: they stay out of the host checkout and survive container rebuilds.

@@ -7,9 +7,10 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu26.04
 
 ARG NVIM_VERSION=0.12.6
 
+# pandoc: nbsphinx needs it for the notebook pages of the docs
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y --no-install-recommends \
-        build-essential ripgrep fd-find less htop \
+        build-essential ripgrep fd-find less htop pandoc \
     && rm -rf /var/lib/apt/lists/*
 
 # Nsight Systems (nsys) and Nsight Compute (ncu) for profiling CUDA code,
