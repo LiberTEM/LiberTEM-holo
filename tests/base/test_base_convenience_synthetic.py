@@ -4,6 +4,7 @@ from collections.abc import Iterator
 import numpy as np
 import pytest
 from libertem.api import Context
+from libertem.utils.devices import detect
 
 from libertem_holo.base import convenience
 from libertem_holo.base._registration import REFERENCE_NODE
@@ -17,9 +18,11 @@ from libertem_holo.base.align import (
 from libertem_holo.base.convenience import (
     _align_waves,
     _reconstruct_stack,
+    reconstruct_hologram,
     reconstruct_stack,
 )
 from libertem_holo.base.io import InputData, Results
+from libertem_holo.base.reconstr import reconstruct_frame
 from libertem_holo.base.utils import HoloParams
 
 try:
@@ -370,3 +373,62 @@ def test_reconstruct_stack_anchored_cupy(holo_stack, lt_ctx: Context, correlator
     res = reconstruct_stack(stack, backend="cupy", progress=False, registration=options, **kwargs)
     _assert_results_similar(res, expected)
     assert len(res.metadata["registration"]["psr"]) == len(expected.metadata["registration"]["psr"])
+
+
+def _skip_without_gpu() -> None:
+    d = detect()
+    if not d["cudas"] or not d["has_cupy"]:
+        pytest.skip("No CUDA device or no CuPy, skipping CuPy test")
+
+
+def test_reconstruct_hologram_holoparams(holo_stack) -> None:
+    holo, _, _, _ = holo_stack
+    p = _params(holo, np)
+    wave = reconstruct_hologram(holo[0], p)
+    expected = reconstruct_frame(holo[0], p.sb_position, p.aperture, p.slice_fft)
+    assert np.array_equal(wave, expected)
+    assert wave.shape == (64, 64)
+
+
+def test_reconstruct_hologram_estimate_params(holo_stack) -> None:
+    """Without `holoparams`, they are estimated with `from_hologram`'s defaults."""
+    holo, _, _, _ = holo_stack
+    frame = holo[0]
+    p = HoloParams.from_hologram(frame)
+    wave = reconstruct_hologram(frame)
+    assert np.array_equal(
+        wave, reconstruct_frame(frame, p.sb_position, p.aperture, p.slice_fft),
+    )
+    assert wave.shape == (frame.shape[0] // 4, frame.shape[1] // 4)
+
+
+def test_reconstruct_hologram_precision(holo_stack) -> None:
+    holo, _, _, _ = holo_stack
+    p = _params(holo, np)
+    assert reconstruct_hologram(holo[0], p).dtype == np.complex128
+    assert reconstruct_hologram(holo[0], p, precision=False).dtype == np.complex64
+
+
+def test_reconstruct_hologram_shape_mismatch(holo_stack) -> None:
+    holo, _, _, _ = holo_stack
+    p = _params(holo, np)
+    with pytest.raises(ValueError, match="shape"):
+        reconstruct_hologram(holo[0, :128, :128], p)
+
+
+def test_reconstruct_hologram_cupy(holo_stack) -> None:
+    """The array module follows `holoparams`, or the hologram without them."""
+    _skip_without_gpu()
+    holo, _, _, _ = holo_stack
+    frame = holo[0]
+    expected = reconstruct_hologram(frame, _params(holo, np))
+
+    wave = reconstruct_hologram(frame, _params(holo, cp))
+    assert isinstance(wave, cp.ndarray)
+    assert np.allclose(cp.asnumpy(wave), expected)
+
+    assert isinstance(reconstruct_hologram(cp.asarray(frame)), cp.ndarray)
+    # a cupy hologram with numpy parameters is reconstructed with numpy:
+    wave = reconstruct_hologram(cp.asarray(frame), _params(holo, np))
+    assert isinstance(wave, np.ndarray)
+    assert np.array_equal(wave, expected)

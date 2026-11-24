@@ -188,6 +188,9 @@ def reconstruct_frame(
     This is a convenience wrapper around
     :class:`~libertem_holo.base.plan.ReconstructionPlan`; when reconstructing
     many holograms with the same parameters, build the plan once and reuse it.
+    To reconstruct with a :class:`~libertem_holo.base.utils.HoloParams`
+    instance, or with parameters estimated from the hologram, use
+    :func:`~libertem_holo.base.convenience.reconstruct_hologram`.
 
     Parameters
     ----------

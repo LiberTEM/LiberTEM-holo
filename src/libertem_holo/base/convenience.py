@@ -24,7 +24,7 @@ from libertem_holo.base.align import (
 )
 from libertem_holo.base.io import InputData, Results
 from libertem_holo.base.plan import ReconstructionPlan
-from libertem_holo.base.reconstr import phase_offset_correction
+from libertem_holo.base.reconstr import phase_offset_correction, reconstruct_frame
 from libertem_holo.base.utils import HoloParams, to_cpu
 
 try:
@@ -42,6 +42,86 @@ if TYPE_CHECKING:
     from libertem.api import Context
 
     from libertem_holo.base.reconstr import XPType
+
+
+def reconstruct_hologram(
+    hologram: np.ndarray,
+    holoparams: HoloParams | None = None,
+    *,
+    precision: bool = True,
+) -> np.ndarray:
+    """Reconstruct the complex wave from a single hologram.
+
+    Parameters
+    ----------
+    hologram
+        A numpy or cupy array containing the hologram
+    holoparams
+        Reconstruction parameters, determined for holograms of the same shape,
+        for example with
+        :meth:`HoloParams.from_hologram()
+        <libertem_holo.base.utils.HoloParams.from_hologram>`. The
+        reconstruction runs with their array module :code:`holoparams.xp`,
+        and the hologram is moved there if needed. If None, the parameters
+        are estimated from the hologram with the default settings of
+        :meth:`~libertem_holo.base.utils.HoloParams.from_hologram`, using
+        the array module of the hologram.
+    precision
+        If True, the complex wave is complex128, otherwise complex64
+
+    Returns
+    -------
+    wave
+        The complex wave, with shape :code:`holoparams.out_shape`, as a
+        numpy or cupy array like :code:`holoparams.aperture`
+
+    See Also
+    --------
+    reconstruct_stack : reconstruct, align and average a stack of holograms
+    libertem_holo.base.plan.ReconstructionPlan : reconstruct many holograms
+        with the same parameters efficiently
+    libertem_holo.base.reconstr.reconstruct_frame : the low-level function
+        this calls
+
+    Examples
+    --------
+    >>> from libertem_holo.base.generate import hologram_frame
+    >>> holo = hologram_frame(np.ones((64, 64)), np.zeros((64, 64)))
+
+    Estimate the parameters automatically:
+
+    >>> wave = reconstruct_hologram(holo)
+    >>> wave.shape
+    (16, 16)
+
+    Or determine them once, and reuse them for more holograms:
+
+    >>> params = HoloParams.from_hologram(holo, out_shape=(32, 32))
+    >>> wave = reconstruct_hologram(holo, params)
+    >>> wave.shape
+    (32, 32)
+
+    """
+    if holoparams is None:
+        xp = cp if cp is not None and isinstance(hologram, cp.ndarray) else np
+        holoparams = HoloParams.from_hologram(hologram, xp=xp)
+    elif tuple(holoparams.orig_shape) != tuple(hologram.shape):
+        msg = (
+            f"holoparams were determined for holograms of shape "
+            f"{tuple(holoparams.orig_shape)}, but the hologram has shape "
+            f"{tuple(hologram.shape)}"
+        )
+        raise ValueError(msg)
+    xp = holoparams.xp
+    hologram = to_cpu(hologram) if xp is np else xp.asarray(hologram)
+    return reconstruct_frame(
+        hologram,
+        holoparams.sb_position,
+        holoparams.aperture,
+        holoparams.slice_fft,
+        precision=precision,
+        xp=xp,
+    )
 
 
 def reconstruct_stack(
