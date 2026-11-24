@@ -1,0 +1,126 @@
+#!/usr/bin/env python
+"""Add funding entries to the Zenodo draft that ``zenodo_upload`` filled in.
+
+``zenodo_upload`` uses Zenodo's deposit API, which accepts only grants from
+Zenodo's award database. Awards without an entry there, such as AIDAS, can
+only be set through Zenodo's InvenioRDM API. This script adds the entries
+from ``packaging/zenodo-funding.json`` to the draft; entries that are already
+on the draft are skipped, so it can run more than once.
+"""
+
+import json
+from pathlib import Path
+
+import click
+import requests
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+FUNDING_FILE = BASE_DIR / "packaging" / "zenodo-funding.json"
+INVENIO_JSON = "application/vnd.inveniordm.v1+json"
+TIMEOUT = 60
+
+
+class ZenodoError(click.ClickException):
+    """Zenodo returned something we can't continue with."""
+
+
+def funding_key(entry: dict) -> tuple:
+    """Identify a funding entry by funder and award (ID, or title if it has none)."""
+    funder = entry.get("funder", {})
+    award = entry.get("award", {})
+    award_key = award.get("id") or award.get("title", {}).get("en")
+    return (funder.get("id") or funder.get("name"), award_key)
+
+
+def merge_funding(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Return ``existing`` with the entries of ``new`` it doesn't have yet appended."""
+    keys = {funding_key(e) for e in existing}
+    return existing + [e for e in new if funding_key(e) not in keys]
+
+
+def check_response(r: requests.Response, expected: int) -> dict:
+    """Return the JSON body of ``r``, or raise if the status isn't ``expected``."""
+    if r.status_code != expected:
+        msg = f"{r.request.method} {r.url}: status {r.status_code}\n{r.text}"
+        raise ZenodoError(msg)
+    return r.json()
+
+
+def find_draft_id(session: requests.Session, url: str, concept: str) -> int:
+    """Find the unpublished draft of the record with concept ID ``concept``."""
+    r = session.get(f"{url}deposit/depositions", timeout=TIMEOUT)
+    depositions = check_response(r, 200)
+    drafts = [
+        d for d in depositions
+        if d["conceptrecid"] == concept and not d["submitted"]
+    ]
+    if len(drafts) != 1:
+        msg = (
+            f"Expected exactly one unpublished draft with concept ID {concept}, "
+            f"found {len(drafts)}. Run zenodo_upload first."
+        )
+        raise ZenodoError(msg)
+    return drafts[0]["id"]
+
+
+def add_funding(
+    session: requests.Session, draft_url: str, new_funding: list[dict],
+) -> int:
+    """Add the missing entries of ``new_funding`` to a draft; return how many."""
+    headers = {"Accept": INVENIO_JSON, "Content-Type": "application/json"}
+    r = session.get(draft_url, headers=headers, timeout=TIMEOUT)
+    draft = check_response(r, 200)
+    existing = draft["metadata"].get("funding", [])
+    merged = merge_funding(existing, new_funding)
+    if len(merged) == len(existing):
+        return 0
+
+    draft["metadata"]["funding"] = merged
+    # GET returns licenses with their full vocabulary entry, but PUT
+    # accepts only the ID for those:
+    draft["metadata"]["rights"] = [
+        {"id": e["id"]} if "id" in e else e
+        for e in draft["metadata"].get("rights", [])
+    ]
+    r = session.put(draft_url, json=draft, headers=headers, timeout=TIMEOUT)
+    result = check_response(r, 200)
+    # InvenioRDM saves the draft even if validation fails, and lists the
+    # problems in "errors":
+    if result.get("errors"):
+        msg = f"Zenodo reported errors for {draft_url}: {result['errors']}"
+        raise ZenodoError(msg)
+    saved = {funding_key(e) for e in result["metadata"].get("funding", [])}
+    missing = [e for e in new_funding if funding_key(e) not in saved]
+    if missing:
+        msg = f"Zenodo didn't keep these funding entries on {draft_url}: {missing}"
+        raise ZenodoError(msg)
+    return len(merged) - len(existing)
+
+
+@click.command()
+@click.option("--url", required=True,
+              help="Zenodo API base URL, for example https://zenodo.org/api/")
+@click.option("--concept", required=True, envvar="LT_RELEASE_UPLOAD_ZENODO_CONCEPT",
+              show_envvar=True, help="Concept ID of the Zenodo record")
+@click.option("--token", required=True, envvar="LT_RELEASE_UPLOAD_ZENODO_TOKEN",
+              show_envvar=True, help="Zenodo personal access token")
+@click.option("--funding-file", type=click.Path(exists=True, path_type=Path),
+              default=FUNDING_FILE, show_default=True,
+              help="JSON list of funding entries in InvenioRDM format")
+def main(url: str, concept: str, token: str, funding_file: Path) -> None:
+    """Add funding entries to the Zenodo draft of the record CONCEPT."""
+    url = url if url.endswith("/") else f"{url}/"
+    new_funding = json.loads(funding_file.read_text(encoding="utf-8"))
+
+    with requests.Session() as session:
+        session.headers["Authorization"] = f"Bearer {token}"
+        draft_id = find_draft_id(session, url, concept)
+        added = add_funding(session, f"{url}records/{draft_id}/draft", new_funding)
+    if added:
+        click.echo(f"Added {added} funding entries to draft {draft_id}.")
+    else:
+        click.echo(f"Draft {draft_id} already has all funding entries.")
+
+
+if __name__ == "__main__":
+    main()

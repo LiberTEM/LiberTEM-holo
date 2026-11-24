@@ -5,10 +5,16 @@
             "upload_type": "software",
             "grants": [
                 {"id": "10.13039/501100000780::780487"},
-                {"id": "10.13039/501100000780::686053"},
                 {"id": "10.13039/501100000780::823717"}
             ],
-            "keywords": ["TODO"],
+            "keywords": [
+                "electron holography",
+                "off-axis electron holography",
+                "TEM",
+                "phase reconstruction",
+                "phase unwrapping",
+                "electron microscopy"
+            ],
             "related_identifiers": [
                 {
                     "identifier": "https://github.com/LiberTEM/LiberTEM-holo/tree/continuous",
@@ -16,8 +22,7 @@
                 }
             ],
             "access_right": "open",
-            "license": "GPL-3.0",
-            "notes": "TODO"
+            "license": "gpl-3.0-or-later"
         }
 
     }

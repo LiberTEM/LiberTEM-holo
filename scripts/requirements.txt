@@ -6,6 +6,6 @@ build
 wheel
 html5lib
 docutils
-bibtexparser
+bibtexparser<2
 ghp-import
 packaging

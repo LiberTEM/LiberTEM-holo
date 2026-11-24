@@ -127,7 +127,7 @@ jobs:
       LT_RELEASE_UPLOAD_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LT_RELEASE_UPLOAD_PYPI_PASSWORD: ${{ secrets.LT_RELEASE_UPLOAD_PYPI_PASSWORD }}
       LT_RELEASE_UPLOAD_ZENODO_TOKEN: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_TOKEN }}
-      LT_RELEASE_UPLOAD_ZENODO_PARENT: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_PARENT }}
+      LT_RELEASE_UPLOAD_ZENODO_CONCEPT: ${{ secrets.LT_RELEASE_UPLOAD_ZENODO_CONCEPT }}
     steps:
       - uses: actions/checkout@v7
       - name: Choose Python version 3.11
@@ -141,3 +141,6 @@ jobs:
         run: ./scripts/release status
       - name: run release script
         run: ./scripts/release --verbose upload --no-dry-run --pypi-user __token__
+      - name: add funding to the Zenodo draft
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: ./scripts/zenodo_add_funding --url=https://zenodo.org/api/

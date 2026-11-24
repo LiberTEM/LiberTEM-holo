@@ -31,7 +31,14 @@ dependencies = [
     "natsort",
     "empyre",  # used in example notebook(s)
 ]
-keywords = ["electron microscopy", "holography", "off-axis holography"]
+keywords = [
+    "electron holography",
+    "off-axis electron holography",
+    "TEM",
+    "phase reconstruction",
+    "phase unwrapping",
+    "electron microscopy",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3.10",
