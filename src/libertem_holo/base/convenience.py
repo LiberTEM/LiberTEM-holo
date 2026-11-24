@@ -62,7 +62,7 @@ def reconstruct_hologram(
         :meth:`HoloParams.from_hologram()
         <libertem_holo.base.utils.HoloParams.from_hologram>`. The
         reconstruction runs with their array module :code:`holoparams.xp`,
-        and the hologram is moved there if needed. If None, the parameters
+        and the hologram is moved to CPU or GPU accordingly. If None, the parameters
         are estimated from the hologram with the default settings of
         :meth:`~libertem_holo.base.utils.HoloParams.from_hologram`, using
         the array module of the hologram.
