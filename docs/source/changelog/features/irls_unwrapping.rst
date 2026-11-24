@@ -7,3 +7,4 @@
    whole multiples of :math:`2\pi`. Use it with
    :func:`~libertem_holo.base.unwrap.unwrap_phase_irls`, or with
    :code:`method="irls"` in :func:`~libertem_holo.base.unwrap.phase_unwrap`.
+ * Experimental, please report any issues you encounter

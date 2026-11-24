@@ -318,6 +318,8 @@ def unwrap_phase_admm(
     The rounds' reports carry the number of iterations, but no CG residuals.
     The status is :code:`"converged"` unless the solve ran all :code:`rounds`.
 
+    This algorithm is recently added and still experimental, use at your own risk.
+
     Examples
     --------
     >>> import numpy as np
